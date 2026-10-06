@@ -1,0 +1,22 @@
+# 本地私有素材（Muse 附件解包、提取的 helper）——自用，不进 git
+private-vendor/
+
+# 运行时产物
+private-state/
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node / TS
+node_modules/
+dist/
+build/
+
+# macOS / 编辑器
+.DS_Store

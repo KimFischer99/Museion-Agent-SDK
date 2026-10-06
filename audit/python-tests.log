@@ -1,0 +1,57 @@
+test_interrupted_is_not_success (test_adapters.HermesContractTests.test_interrupted_is_not_success) ... ok
+test_only_completed_returns_text (test_adapters.HermesContractTests.test_only_completed_returns_text) ... ok
+test_quote_run_id (test_adapters.HermesContractTests.test_quote_run_id) ... ok
+test_reject_non_local_http (test_adapters.HermesContractTests.test_reject_non_local_http) ... ok
+test_reject_url_credentials (test_adapters.HermesContractTests.test_reject_url_credentials) ... ok
+test_started_is_not_completed (test_adapters.HermesContractTests.test_started_is_not_completed) ... ok
+test_submit_matches_documented_contract (test_adapters.HermesContractTests.test_submit_matches_documented_contract) ... ok
+test_waiting_approval_not_auto_approved (test_adapters.HermesContractTests.test_waiting_approval_not_auto_approved) ... ok
+test_allowed_window_boundaries (test_reference.ClockTests.test_allowed_window_boundaries) ... ok
+test_clock_backwards (test_reference.ClockTests.test_clock_backwards) ... ok
+test_coalesce_not_replay_all (test_reference.ClockTests.test_coalesce_not_replay_all) ... ok
+test_cross_midnight_window (test_reference.ClockTests.test_cross_midnight_window) ... ok
+test_fall_back_both_folds_same_rule (test_reference.ClockTests.test_fall_back_both_folds_same_rule) ... ok
+test_future_anchor (test_reference.ClockTests.test_future_anchor) ... ok
+test_invalid_period (test_reference.ClockTests.test_invalid_period) ... ok
+test_naive_time_rejected (test_reference.ClockTests.test_naive_time_rejected) ... ok
+test_no_drift (test_reference.ClockTests.test_no_drift) ... ok
+test_same_slot_not_twice (test_reference.ClockTests.test_same_slot_not_twice) ... ok
+test_atomic_proposal_validation (test_reference.LedgerTests.test_atomic_proposal_validation) ... ok
+test_crash_after_send_does_not_auto_resend (test_reference.LedgerTests.test_crash_after_send_does_not_auto_resend) ... ok
+test_delivery_requires_receipt (test_reference.LedgerTests.test_delivery_requires_receipt) ... ok
+test_disable_and_admit_are_atomic (test_reference.LedgerTests.test_disable_and_admit_are_atomic) ... ok
+test_dry_run_has_no_persistent_effect (test_reference.LedgerTests.test_dry_run_has_no_persistent_effect) ... ok
+test_event_replay_conflict (test_reference.LedgerTests.test_event_replay_conflict) ... ok
+test_expired_notification_is_not_sent (test_reference.LedgerTests.test_expired_notification_is_not_sent) ... ok
+test_expired_run_cannot_commit_without_reclaim (test_reference.LedgerTests.test_expired_run_cannot_commit_without_reclaim) ... ok
+test_failed_admission_rolls_back_hook_state (test_reference.LedgerTests.test_failed_admission_rolls_back_hook_state) ... ok
+test_late_receipt_resolves_unknown (test_reference.LedgerTests.test_late_receipt_resolves_unknown) ... ok
+test_new_revision_can_notify_again (test_reference.LedgerTests.test_new_revision_can_notify_again) ... ok
+test_no_second_claim_before_expiry (test_reference.LedgerTests.test_no_second_claim_before_expiry) ... ok
+test_other_profile_cannot_open_database (test_reference.LedgerTests.test_other_profile_cannot_open_database) ... ok
+test_owner_destination_not_model_selected (test_reference.LedgerTests.test_owner_destination_not_model_selected) ... ok
+test_probe_replay_is_idempotent (test_reference.LedgerTests.test_probe_replay_is_idempotent) ... ok
+test_quiet_time_defers_not_loses (test_reference.LedgerTests.test_quiet_time_defers_not_loses) ... ok
+test_restart_preserves_work (test_reference.LedgerTests.test_restart_preserves_work) ... ok
+test_retry_only_after_authoritative_not_sent (test_reference.LedgerTests.test_retry_only_after_authoritative_not_sent) ... ok
+test_same_fact_across_runs_not_notified_twice (test_reference.LedgerTests.test_same_fact_across_runs_not_notified_twice) ... ok
+test_silent_probe_does_not_create_run (test_reference.LedgerTests.test_silent_probe_does_not_create_run) ... ok
+test_stale_hook_state_rejected (test_reference.LedgerTests.test_stale_hook_state_rejected) ... ok
+test_stale_run_cannot_commit (test_reference.LedgerTests.test_stale_run_cannot_commit) ... ok
+test_duplicate_json_key (test_reference.ProtocolTests.test_duplicate_json_key) ... ok
+test_missing_terminal (test_reference.ProtocolTests.test_missing_terminal) ... ok
+test_non_boolean_disable (test_reference.ProtocolTests.test_non_boolean_disable) ... ok
+test_nonfinite_json (test_reference.ProtocolTests.test_nonfinite_json) ... ok
+test_nonzero_exit_never_wakes (test_reference.ProtocolTests.test_nonzero_exit_never_wakes) ... ok
+test_output_after_result (test_reference.ProtocolTests.test_output_after_result) ... ok
+test_output_limit (test_reference.ProtocolTests.test_output_limit) ... ok
+test_silent (test_reference.ProtocolTests.test_silent) ... ok
+test_skill_normalization (test_reference.ProtocolTests.test_skill_normalization) ... ok
+test_two_terminal_records (test_reference.ProtocolTests.test_two_terminal_records) ... ok
+test_utf8_required (test_reference.ProtocolTests.test_utf8_required) ... ok
+test_wake_payload (test_reference.ProtocolTests.test_wake_payload) ... ok
+
+----------------------------------------------------------------------
+Ran 52 tests in 0.104s
+
+OK

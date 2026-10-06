@@ -1,0 +1,2187 @@
+{
+  "schema_version": "1.0",
+  "audited_at": "2026-10-06",
+  "archive_sha256": "088277b0a712fec0e2bcecb61c25e5450a277e08cd84579ec963ff2061bbde8c",
+  "method": "Recursive SKILL.md discovery; safe YAML parsing; metadata and name checks; lexical dependency hints only.",
+  "count": 88,
+  "issue_counts": {
+    "invalid_name": 43,
+    "name_directory_mismatch": 41,
+    "metadata_values_not_all_strings": 88,
+    "invalid_description": 1
+  },
+  "skills": [
+    {
+      "source_path": "skills/apple-healthkit/SKILL.md",
+      "sha256": "4db87d410a8f112430c19bdd6735de0b0ba8fe10bd8a20361772f980cf2d3e6c",
+      "original_name": "apple_healthkit",
+      "canonical_name_proposed": "apple-healthkit",
+      "description_characters": 176,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/artifacts/document/SKILL.md",
+      "sha256": "7628749f20fa28419c28b11e68aae9951c0041aead9d64815403b4d1fc553d46",
+      "original_name": "artifact_document",
+      "canonical_name_proposed": "artifact-document",
+      "description_characters": 544,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/artifacts/markdown/SKILL.md",
+      "sha256": "d0fdbbc6ee466d646cb43c2c3daecde0f2aef18d0a6ac3347e4badbc766bcf41",
+      "original_name": "artifact_markdown",
+      "canonical_name_proposed": "artifact-markdown",
+      "description_characters": 280,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/artifacts/pdf/SKILL.md",
+      "sha256": "d51ff2be31b4db0699b7db2c5b7df9586da22ac7cd0a965664bc4e3f220086a0",
+      "original_name": "artifact_pdf",
+      "canonical_name_proposed": "artifact-pdf",
+      "description_characters": 459,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/artifacts/presentation/SKILL.md",
+      "sha256": "9e59be038880de90641280d52a441c8c2643b758e55a684f6325f189d2e065ee",
+      "original_name": "artifact_presentation",
+      "canonical_name_proposed": "artifact-presentation",
+      "description_characters": 313,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-slide"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/artifacts/spreadsheet/SKILL.md",
+      "sha256": "0f782a0fec9aac90c4b4decd24343ca42e73d2a8d9c9fc7bf2eb470544f21cf3",
+      "original_name": "artifact_spreadsheet",
+      "canonical_name_proposed": "artifact-spreadsheet",
+      "description_characters": 500,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/artifacts/testing/SKILL.md",
+      "sha256": "c110e05073b807eec02aca0e5ffd77d8b1366d22f66ec0d639903b448ef567d1",
+      "original_name": "artifact_testing",
+      "canonical_name_proposed": "artifact-testing",
+      "description_characters": 320,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/asana/SKILL.md",
+      "sha256": "c7c7a00dbebedb528db0ac3660bc3808a0bac1582a25cec0fb26a8e60013c8a8",
+      "original_name": "asana",
+      "canonical_name_proposed": "asana",
+      "description_characters": 228,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/booking/SKILL.md",
+      "sha256": "e87800eba77735e5006472b510c0ca1789d93cd6a5a7ac8ffa119433a5e573fb",
+      "original_name": "booking",
+      "canonical_name_proposed": "booking",
+      "description_characters": 487,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/box/SKILL.md",
+      "sha256": "55a16cfc2e357f577047b183df00002aa6586897cafa5c5593e1af5ca703ebec",
+      "original_name": "box",
+      "canonical_name_proposed": "box",
+      "description_characters": 115,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/calendly/SKILL.md",
+      "sha256": "368c603507723df4587c5d51a8ea700afe0a9eea5e5711fc984d60d71b359af6",
+      "original_name": "calendly",
+      "canonical_name_proposed": "calendly",
+      "description_characters": 88,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-tool",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/canva/SKILL.md",
+      "sha256": "f3ee4406ce60b21f4ed279d2b2f249c972d9d9e996f9cbe67ed8fc5808f6b41b",
+      "original_name": "canva",
+      "canonical_name_proposed": "canva",
+      "description_characters": 336,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch_permission_overrides",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_permission_overrides"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/device-data/SKILL.md",
+      "sha256": "ac97fcde54c6b70419f6be6b45da7c90fa4d4624c10603cff814cd0f5ce69b28",
+      "original_name": "device_data",
+      "canonical_name_proposed": "device-data",
+      "description_characters": 135,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/dropbox/SKILL.md",
+      "sha256": "85ec120b7614ddf843ba983193585ff73361ab35efa70df48434d846fb1b08b3",
+      "original_name": "dropbox",
+      "canonical_name_proposed": "dropbox",
+      "description_characters": 279,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/duffel/SKILL.md",
+      "sha256": "e46f8524bf94bc771267a55af3f1babd8636fdaa56d029aa55823529b2a0d33c",
+      "original_name": "duffel",
+      "canonical_name_proposed": "duffel",
+      "description_characters": 167,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/evernote/SKILL.md",
+      "sha256": "7476cc87783d57d8b00958b6a2e0650d52b1022690c047c8a03b8a51fa2c1fb6",
+      "original_name": "evernote",
+      "canonical_name_proposed": "evernote",
+      "description_characters": 61,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/facebook-cli/SKILL.md",
+      "sha256": "c535f428afe93f902a91ead53678b8a6f062eee272d7ff7a5f2722e198fa778d",
+      "original_name": "facebook_cli",
+      "canonical_name_proposed": "facebook-cli",
+      "description_characters": 561,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch_messenger_cli"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/figma/SKILL.md",
+      "sha256": "e1b86fc061b3ec6bb40849568f83922c07ee9102d19648979bda31f8c9469fb6",
+      "original_name": "figma",
+      "canonical_name_proposed": "figma",
+      "description_characters": 277,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/flightaware/SKILL.md",
+      "sha256": "9d168f1ed658a8aec6ef956c03d7b38403abbacfed7a362d4c744a508de8df20",
+      "original_name": "flightaware",
+      "canonical_name_proposed": "flightaware",
+      "description_characters": 436,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-extensions",
+        "hatch-swarm",
+        "hatch_nav_caller",
+        "muse_cancellation_evidence"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/forget/SKILL.md",
+      "sha256": "3ffe3787b0d1e0208ef006271e85c5c744792ce6a51293dc90a75d0dfe436f6e",
+      "original_name": "forget",
+      "canonical_name_proposed": "forget",
+      "description_characters": 349,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse-special"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/function-health/SKILL.md",
+      "sha256": "e8c7418f8ae022e205440e7d9b13cc389de2c198bd52c7e59f6333ec74ea4507",
+      "original_name": "function_health",
+      "canonical_name_proposed": "function-health",
+      "description_characters": 72,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/generate_podcast/SKILL.md",
+      "sha256": "9bc10b9e2ff29423bdbf2f9dc61adad748b36b94c055e8ea290e01856f5d1630",
+      "original_name": "generate_podcast",
+      "canonical_name_proposed": "generate-podcast",
+      "description_characters": 171,
+      "issues": [
+        "invalid_name",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch",
+        "hatch-extensions",
+        "hatch-image",
+        "hatch-upload"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/ghl/SKILL.md",
+      "sha256": "10cd385b9ed0aca4430711f68d8598f2056550c047dcb7a9e837748a9c9aedd3",
+      "original_name": "ghl",
+      "canonical_name_proposed": "ghl",
+      "description_characters": 93,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/github/SKILL.md",
+      "sha256": "41003d2ec1eacf119db56ab86de73b1f1656d2a98f05a6a94216c9a82a1318dc",
+      "original_name": "github",
+      "canonical_name_proposed": "github",
+      "description_characters": 89,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch_command",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_command"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/gmail/SKILL.md",
+      "sha256": "d7b02ed0be2d8d376ca487f88ca0a167feab71e2e66634496e8493f0083e08a1",
+      "original_name": "gmail",
+      "canonical_name_proposed": "gmail",
+      "description_characters": 147,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/goals/SKILL.md",
+      "sha256": "2caf64c2ac19f7ecd52a8f8fca0b46c39d934e80fa46785ffb8f11df9b81a64d",
+      "original_name": "goals",
+      "canonical_name_proposed": "goals",
+      "description_characters": 278,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-calendar/SKILL.md",
+      "sha256": "a912169b0a4d434de2e33021ce0aa3dccc9ccd5272294090013800504d672c8f",
+      "original_name": "google_calendar",
+      "canonical_name_proposed": "google-calendar",
+      "description_characters": 90,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-contacts/SKILL.md",
+      "sha256": "64e015bcaf8ab7e1e7f7b02a08a3db8ff05228081bc2267999dc80b24c03097e",
+      "original_name": "google_contacts",
+      "canonical_name_proposed": "google-contacts",
+      "description_characters": 68,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch-swarm",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-docs/SKILL.md",
+      "sha256": "8f9801ca6d83035a94563e40d26e427182ff017b88de487726a76c546425175f",
+      "original_name": "google_docs",
+      "canonical_name_proposed": "google-docs",
+      "description_characters": 46,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-drive/SKILL.md",
+      "sha256": "5a503764b202d879fd3f30f5abcd3291ee1f0fbddd4fcb67ff5b9cb24a48372c",
+      "original_name": "google_drive",
+      "canonical_name_proposed": "google-drive",
+      "description_characters": 83,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-forms/SKILL.md",
+      "sha256": "d40fe4716a3a9aac092a134f606bbca36fa79580a2318d95894d5eaa052d7200",
+      "original_name": "google_forms",
+      "canonical_name_proposed": "google-forms",
+      "description_characters": 69,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-health-connect/SKILL.md",
+      "sha256": "f46d9bc098c5aeabecbdedaa7657ff5a6c50d3cc31ad5c7d1d8ae842ad96438a",
+      "original_name": "google_health_connect",
+      "canonical_name_proposed": "google-health-connect",
+      "description_characters": 199,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-sheets/SKILL.md",
+      "sha256": "6476fbfec8ab67d05ddcc3258c09985fd33ebc1a50e4336f0ec764d2caf22c55",
+      "original_name": "google_sheets",
+      "canonical_name_proposed": "google-sheets",
+      "description_characters": 49,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-slides/SKILL.md",
+      "sha256": "72d5ca9b9e5dab1a125ecb4db387e3363ab1cb58e98e79e001336836634fddae",
+      "original_name": "google_slides",
+      "canonical_name_proposed": "google-slides",
+      "description_characters": 62,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/google-tasks/SKILL.md",
+      "sha256": "251492cd70e72cdda1d8e2de8e6458f755a4daee587dd382bff5f2671aae1288",
+      "original_name": "google_tasks",
+      "canonical_name_proposed": "google-tasks",
+      "description_characters": 87,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-gws",
+        "hatch-swarm",
+        "hatch_gws_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_gws_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/granola/SKILL.md",
+      "sha256": "5331a2c631854525d92cbfd4b411d9af4f328876cf33824050beb26fe657f3cf",
+      "original_name": "granola",
+      "canonical_name_proposed": "granola",
+      "description_characters": 96,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/healthex/SKILL.md",
+      "sha256": "e7afe7cac058f92f5ef04f7c1372792839a74d5d2e414390238fec621bd1ebda",
+      "original_name": "healthex",
+      "canonical_name_proposed": "healthex",
+      "description_characters": 104,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/image-search/SKILL.md",
+      "sha256": "718455b5b8bbbe358ed2379845b3d5fb5c0ec7318d707f5ef8ee9d48ff58a926",
+      "original_name": "image_search",
+      "canonical_name_proposed": "image-search",
+      "description_characters": 151,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/instagram/SKILL.md",
+      "sha256": "85e473c4cd59e00a983da08235901995432edc54efb6322dc1b11be9a7a2b743",
+      "original_name": "instagram",
+      "canonical_name_proposed": "instagram",
+      "description_characters": 267,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-zeitgeist",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/instagram-messages/SKILL.md",
+      "sha256": "c36b36bf155199abd145309d3ee279be0c1e5199dd58dbf5a5e2ca934de809c8",
+      "original_name": "instagram_messages",
+      "canonical_name_proposed": "instagram-messages",
+      "description_characters": 188,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/klaviyo/SKILL.md",
+      "sha256": "a1779c5337880356fdc2956df2040ccac31abdb15abda0a6ea5e3e06b116661a",
+      "original_name": "klaviyo",
+      "canonical_name_proposed": "klaviyo",
+      "description_characters": 313,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/linear/SKILL.md",
+      "sha256": "0ed95e13902bb8e5ad2aec9dba4150bc0c572f701936894ca62d1c0025d77f9b",
+      "original_name": "linear",
+      "canonical_name_proposed": "linear",
+      "description_characters": 262,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/lovable/SKILL.md",
+      "sha256": "d85199e4618dc87e87f7ae00701f57b89c3313f42278507f31dd8fbdb5f11fa0",
+      "original_name": "lovable",
+      "canonical_name_proposed": "lovable",
+      "description_characters": 246,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/magic-moment/SKILL.md",
+      "sha256": "97edbce84f4eeb6657fe1b4483247558f128849e93d42671ffe469aff7198bc5",
+      "original_name": "magic-moment",
+      "canonical_name_proposed": "magic-moment",
+      "description_characters": 607,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-asr",
+        "hatch-browser",
+        "hatch-local",
+        "hatch-protocol",
+        "inference-proxy",
+        "muse",
+        "muse-lockup",
+        "muse-moments",
+        "sentinel"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/media-library/SKILL.md",
+      "sha256": "791fc0c1ab3d6f3686317a6b4a78d09bddece6e4393d1f8e827a3dceb5dc16e5",
+      "original_name": "media_library",
+      "canonical_name_proposed": "media-library",
+      "description_characters": 260,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/messenger/SKILL.md",
+      "sha256": "4e63dfb10e075249816bf213bd0d1ecef296e3535c7a7d2088aca127f0d5bf30",
+      "original_name": "messenger_read",
+      "canonical_name_proposed": "messenger-read",
+      "description_characters": 210,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-messenger",
+        "hatch_messenger_cli",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_messenger_cli"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/meta-ads/SKILL.md",
+      "sha256": "2526e3f181327c48e80d75b0c8364efb526c8ccbc086592b77465632b6d2292b",
+      "original_name": "meta_ads",
+      "canonical_name_proposed": "meta-ads",
+      "description_characters": 1247,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "invalid_description",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "hatch-extensions",
+        "hatch-swarm",
+        "muse",
+        "muse-opt"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/muse-early-access/SKILL.md",
+      "sha256": "d5fb879d2cf2dad16b21fd22b983ac55f18d98473049e69a2b313a3bd1df91b4",
+      "original_name": "muse_early_access",
+      "canonical_name_proposed": "muse-early-access",
+      "description_characters": 144,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse-feedback",
+        "muse_early_access"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/muse-feedback/SKILL.md",
+      "sha256": "a3b00a44241ba4a7bb1de54e693ff82df8becc7647f9b41b7f71555670a22262",
+      "original_name": "muse-feedback",
+      "canonical_name_proposed": "muse-feedback",
+      "description_characters": 437,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse",
+        "muse-early",
+        "muse-feedback"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/muse_db/SKILL.md",
+      "sha256": "6196e3f50fef128d4bbdc28d7ecdd264a32d7c1252abb918b069be2b885c5d8c",
+      "original_name": "muse_db",
+      "canonical_name_proposed": "muse-db",
+      "description_characters": 139,
+      "issues": [
+        "invalid_name",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_cte_",
+        "muse",
+        "muse_db"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/notion/SKILL.md",
+      "sha256": "c4fcc62b0b5bd260dcd27cf9278a0d86729a9c1f2173947e678c68c42763b750",
+      "original_name": "notion",
+      "canonical_name_proposed": "notion",
+      "description_characters": 65,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/opentable/SKILL.md",
+      "sha256": "b26c95ea774b6820c414e3652c9a85ec93d40e549e5a85f77d025ab2d87528f0",
+      "original_name": "opentable",
+      "canonical_name_proposed": "opentable",
+      "description_characters": 146,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/outlook-calendar/SKILL.md",
+      "sha256": "4c50eb1e16016118fc0a2ba069e54b9e9ce003f343aa5915915e8722b239fb27",
+      "original_name": "outlook_calendar",
+      "canonical_name_proposed": "outlook-calendar",
+      "description_characters": 71,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/outlook-contacts/SKILL.md",
+      "sha256": "0af657b5bc43452de28fa98a5db3a826f7a605afe41588509496af001de85639",
+      "original_name": "outlook_contacts",
+      "canonical_name_proposed": "outlook-contacts",
+      "description_characters": 80,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/outlook-mail/SKILL.md",
+      "sha256": "4b4abf80d75f848bd603d1f95db876c645ed1d0ea65e9f274eb1b289b1addcaa",
+      "original_name": "outlook_mail",
+      "canonical_name_proposed": "outlook-mail",
+      "description_characters": 77,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/peloton/SKILL.md",
+      "sha256": "14c9006aa7eaf0229d6dd1681e6eb4b6c7394c81be104bb89485d4d609e305d4",
+      "original_name": "peloton",
+      "canonical_name_proposed": "peloton",
+      "description_characters": 81,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/philips-hue/SKILL.md",
+      "sha256": "df0b76426ee157d1cbcd33f6d6c732c079e2640547a31220d291d2066eaad38a",
+      "original_name": "philips_hue",
+      "canonical_name_proposed": "philips-hue",
+      "description_characters": 87,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/places-search/SKILL.md",
+      "sha256": "cafe9623b99c7ea7d4a83fdc1a06cbcb64716687d0e49dc326fe42ad539df22b",
+      "original_name": "places_search",
+      "canonical_name_proposed": "places-search",
+      "description_characters": 286,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/plaid/SKILL.md",
+      "sha256": "fdc4b5d31ce6da2a300ddd4a17514420ee3d12010bfd46cca6426d834f086f1c",
+      "original_name": "plaid",
+      "canonical_name_proposed": "plaid",
+      "description_characters": 144,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/printify/SKILL.md",
+      "sha256": "fdd91837442eac19f8834e300a8425ef08f81aa50c1f75da6bd4b1078075b4a4",
+      "original_name": "printify",
+      "canonical_name_proposed": "printify",
+      "description_characters": 92,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/quickbooks/SKILL.md",
+      "sha256": "0fa2253ff31af236c5996ca6a496361ae4a18ebe8612727be4e330f355f2f820",
+      "original_name": "quickbooks",
+      "canonical_name_proposed": "quickbooks",
+      "description_characters": 190,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/replit/SKILL.md",
+      "sha256": "5c12076323977e464454129b91ec22b606a9b33ac71accd7184d4c64f4fee4ac",
+      "original_name": "replit",
+      "canonical_name_proposed": "replit",
+      "description_characters": 76,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/self-awareness/SKILL.md",
+      "sha256": "abe55ea3e2c3a5747f259633102c82cba8e49437952a6d6089076bf0fa8a246a",
+      "original_name": "self_awareness",
+      "canonical_name_proposed": "self-awareness",
+      "description_characters": 230,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/share-ideas/SKILL.md",
+      "sha256": "8869d04c9c13bbb5bfd3c741db59d763294c0eaf9a2f499f1e6894366620e567",
+      "original_name": "share_ideas",
+      "canonical_name_proposed": "share-ideas",
+      "description_characters": 265,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/shopify/SKILL.md",
+      "sha256": "ed776341ca4d5cf24a6b05b8cb4320d7de51302d6274a652cc7c82eeb5d128a3",
+      "original_name": "shopify",
+      "canonical_name_proposed": "shopify",
+      "description_characters": 892,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/shopping/SKILL.md",
+      "sha256": "03fcd54de6ca41340668eb4801c3a9a589d20ff0dac693efac6059b8582cc417",
+      "original_name": "shopping",
+      "canonical_name_proposed": "shopping",
+      "description_characters": 389,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/skill-creator/SKILL.md",
+      "sha256": "8abe25b21401dbf92da75231fa0250943cd7026178e0f4d3e55184e9de89943e",
+      "original_name": "skill_creator",
+      "canonical_name_proposed": "skill-creator",
+      "description_characters": 99,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/slack/SKILL.md",
+      "sha256": "fd1951350a6a4e239267cf2c3e29e9e618091c90667408ad00cace1f3f175b27",
+      "original_name": "slack",
+      "canonical_name_proposed": "slack",
+      "description_characters": 212,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/social-content-performance/SKILL.md",
+      "sha256": "d7472d9de7d05c6c5fcc3ca4a962a94adbae936cf955155b5373d38286fc88b4",
+      "original_name": "social_content_performance",
+      "canonical_name_proposed": "social-content-performance",
+      "description_characters": 93,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch-widget"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/spotify/SKILL.md",
+      "sha256": "48201d4542b62fe0821640a51ae1a2221e3e5df5bac61e467f842e409a78dd48",
+      "original_name": "spotify",
+      "canonical_name_proposed": "spotify",
+      "description_characters": 139,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/stripe/SKILL.md",
+      "sha256": "c02102f8c4520cb92e8372acef07d7d8c7521944bb76a5fee9c5adf47e55e4c9",
+      "original_name": "stripe",
+      "canonical_name_proposed": "stripe",
+      "description_characters": 325,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/subscription-status/SKILL.md",
+      "sha256": "5cb9545549c935b82343b6a1c734c63edefb85760c709e2543e0959a1c88986f",
+      "original_name": "subscription_status",
+      "canonical_name_proposed": "subscription-status",
+      "description_characters": 179,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/tailscale/SKILL.md",
+      "sha256": "e2d7bd4d6399987a358eaafd57712da2e1bbdc5f40ae8358568fdc83b96874ce",
+      "original_name": "tailscale",
+      "canonical_name_proposed": "tailscale",
+      "description_characters": 264,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/tessie/SKILL.md",
+      "sha256": "e6ad52b06593ed0af89909302dde4dff60f32b482f682f0aa929d71651209620",
+      "original_name": "tessie",
+      "canonical_name_proposed": "tessie",
+      "description_characters": 87,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/threads/SKILL.md",
+      "sha256": "af0ceb56e52b29513ebaadb559b6b5ee6d3f5f4c1828d19c2d49f8676b410358",
+      "original_name": "threads",
+      "canonical_name_proposed": "threads",
+      "description_characters": 214,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/threads-messages/SKILL.md",
+      "sha256": "cfc562f28985ec7ff439a56fdcef875bb277c1dc11bd8e36d7acb5f835aa757a",
+      "original_name": "threads_messages",
+      "canonical_name_proposed": "threads-messages",
+      "description_characters": 138,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/ticketmaster/SKILL.md",
+      "sha256": "48d3cfa699d14bb8e3a597c07df43b9c8de090b0bae5397c82a73d5e2863f9b7",
+      "original_name": "ticketmaster",
+      "canonical_name_proposed": "ticketmaster",
+      "description_characters": 136,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/todoist/SKILL.md",
+      "sha256": "48bd39fdf456bfa3d2cfd6c46f465c4f894ad4c612184da5470e51e4be1ca16c",
+      "original_name": "todoist",
+      "canonical_name_proposed": "todoist",
+      "description_characters": 120,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/travel-planning/SKILL.md",
+      "sha256": "371a5b6c8a1b25d21e1d88bb6d10da994dd3a0fc46f98965c2068ef3b4f696d2",
+      "original_name": "travel_planning",
+      "canonical_name_proposed": "travel-planning",
+      "description_characters": 473,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/tts/SKILL.md",
+      "sha256": "e2de6414e50757e614aad9d0f138d57456fcc36115b331defebd3f898dec9989",
+      "original_name": "tts",
+      "canonical_name_proposed": "tts",
+      "description_characters": 146,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/vercel/SKILL.md",
+      "sha256": "5ffc60109cd5b67353a0060e84ce044fb16a589821327c41348e1b6e23662a92",
+      "original_name": "vercel",
+      "canonical_name_proposed": "vercel",
+      "description_characters": 256,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/voice-selector/SKILL.md",
+      "sha256": "d18e42e0b051fe1e322c5d523071756df9821a701849be614cc807b83997102c",
+      "original_name": "voice_selector",
+      "canonical_name_proposed": "voice-selector",
+      "description_characters": 99,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool",
+        "voiceOnly": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/wearable-device-skills/SKILL.md",
+      "sha256": "b9b82df7cb2f1948cdab6c3e27c9f34cde857f4115822baa3ff8355103020299",
+      "original_name": "wearable_device_skills",
+      "canonical_name_proposed": "wearable-device-skills",
+      "description_characters": 218,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/wearables-comms/SKILL.md",
+      "sha256": "a6e7ddd22dc2639dfda6a3e7cd3fa3a59de266c13e4226f6add431674eea3c4a",
+      "original_name": "wearables_comms",
+      "canonical_name_proposed": "wearables-comms",
+      "description_characters": 305,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool",
+        "devices": "list"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/wide-research/SKILL.md",
+      "sha256": "bbb702a52bdcf9089e37111aa27f2c8c8f9b733ee7be36e3d8f4cfbdc9a8f6ea",
+      "original_name": "wide_research",
+      "canonical_name_proposed": "wide-research",
+      "description_characters": 107,
+      "issues": [
+        "invalid_name",
+        "name_directory_mismatch",
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/withings/SKILL.md",
+      "sha256": "a2a15f9e7ab0fef41df65b1987fadbf38ea28923122daa807fbf311b4e115a82",
+      "original_name": "withings",
+      "canonical_name_proposed": "withings",
+      "description_characters": 116,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "hatch"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/zapier/SKILL.md",
+      "sha256": "ac4b047ffd8b7835095b105253ae7247de51851cd34efb0860813907bbdb3ea8",
+      "original_name": "zapier",
+      "canonical_name_proposed": "zapier",
+      "description_characters": 73,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [
+        "hatch_action",
+        "hatch_permission",
+        "hatch_permission_label"
+      ],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    },
+    {
+      "source_path": "skills/zoom/SKILL.md",
+      "sha256": "ecfe9279cf861d15516a6f92cd9b94fb33a5b22d0d8ebd085ca55db08bfdf692",
+      "original_name": "zoom",
+      "canonical_name_proposed": "zoom",
+      "description_characters": 267,
+      "issues": [
+        "metadata_values_not_all_strings"
+      ],
+      "non_string_metadata": {
+        "includeInPrompt": "bool"
+      },
+      "platform_markers_heuristic": [
+        "authd",
+        "muse"
+      ],
+      "additional_tool_tokens_heuristic": [],
+      "technical_status": "unverified_requires_capability_audit",
+      "distribution_status": "no_grant_identified_in_snapshot",
+      "license_frontmatter": null,
+      "full_prompt_included": false,
+      "note": "词法扫描不是能力完整性判断；不含原始 Skill 正文。"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-10-06",
+  "protocol": "PAS Interoperability Profile v1 (design)",
+  "hermes": {
+    "documentation_checked": true,
+    "live_integration_tested": false,
+    "transport": "HTTP Runs",
+    "requires": [
+      "run_submission",
+      "run_status",
+      "run_stop"
+    ],
+    "locked_release": null,
+    "release_blocker": "Pin a real version and run restricted-profile end-to-end tests."
+  },
+  "pi": {
+    "documentation_checked": true,
+    "live_integration_tested": false,
+    "documented_package": "@earendil-works/pi-coding-agent",
+    "locked_release": null,
+    "release_blocker": "Bind a vetted factory to a pinned real package; test resource isolation and lifecycle."
+  },
+  "muse": {
+    "source_archive_sha256": "088277b0a712fec0e2bcecb61c25e5450a277e08cd84579ec963ff2061bbde8c",
+    "official_backend_verified": false,
+    "skill_entries_audited": 88,
+    "all_skill_capabilities_verified": false,
+    "redistribution_grant_verified": false
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "archive_sha256": "088277b0a712fec0e2bcecb61c25e5450a277e08cd84579ec963ff2061bbde8c",
+  "full_archive_files_after_metadata_exclusion": 449,
+  "effective_bytes": 4115762,
+  "selection_only": true,
+  "privacy_note": "未附完整文件名清单，避免泄露归档任务中的个性化信息；原始 Skills 正文未再分发。",
+  "sources": [
+    {
+      "path": "README.md",
+      "sha256": "3c6ca21626fb0f3a5d8d80b3d7429586d40f6b593394edb113bd1398c0cd657f",
+      "bytes": 4130,
+      "lines": 35
+    },
+    {
+      "path": "SKILL-CATALOG.md",
+      "sha256": "4aa1ee4c2240a9b7cbbb02835e62db6708aadd3649ea6c72035747fad6d7037d",
+      "bytes": 13291,
+      "lines": 107
+    },
+    {
+      "path": "architecture/hooks/runtime/hatch_hook_runtime.sh",
+      "sha256": "c87af221181a1559e3adcb0cdd601f5be5d4bd91eec2fe0597c09dc27558e741",
+      "bytes": 3241,
+      "lines": 114
+    },
+    {
+      "path": "architecture/cron.d/minutely/heartbeat__interval@30m.md",
+      "sha256": "7cb474319fe867a08242ff7d8e19d55ef244b883d814e22ea8af0aeeaa9c7faf",
+      "bytes": 212,
+      "lines": 13
+    },
+    {
+      "path": "architecture/HEARTBEAT.md",
+      "sha256": "55acc18c4867cf74151fdb2962a5d9be756cda277a329e65ad3bd3a29e3eb62b",
+      "bytes": 113,
+      "lines": 3
+    },
+    {
+      "path": "architecture/PROACTIVE_PREFERENCES.md",
+      "sha256": "fc16d125c2cece493aabfedc16f2949fc0726659e1be3c2e6c0161c6d68168a1",
+      "bytes": 496,
+      "lines": 15
+    },
+    {
+      "path": "architecture/platform-docs/scheduling-and-watching.md",
+      "sha256": "887e8a4b824637871509ab6a195bb97ab6c3bc90351283f6f8003af0deebc5a8",
+      "bytes": 3386,
+      "lines": 68
+    },
+    {
+      "path": "architecture/platform-docs/chat/scheduling-and-watching.md",
+      "sha256": "c00d4c4e147e72ed7ba74868b673f83f283d1984c9f6367af71ee0971b932e74",
+      "bytes": 7334,
+      "lines": 60
+    },
+    {
+      "path": "architecture/runtime-cell/launch-daemon.sh",
+      "sha256": "e8083eb7f30e9b6d701e17836605ee2a115b979aabead4b0762edddcd7eccff8",
+      "bytes": 17006,
+      "lines": 313
+    },
+    {
+      "path": "architecture/runtime-cell/skill-scopes.conf",
+      "sha256": "c0ec415341772ec8e71c9dc2aeeb2478916c0a50782f01a90fbd6c3352470e01",
+      "bytes": 1582,
+      "lines": 23
+    },
+    {
+      "path": "skills/gmail/SKILL.md",
+      "sha256": "d7b02ed0be2d8d376ca487f88ca0a167feab71e2e66634496e8493f0083e08a1",
+      "bytes": 18070,
+      "lines": 136
+    },
+    {
+      "path": "skills/google-calendar/SKILL.md",
+      "sha256": "a912169b0a4d434de2e33021ce0aa3dccc9ccd5272294090013800504d672c8f",
+      "bytes": 8537,
+      "lines": 48
+    },
+    {
+      "path": "skills/skill-creator/bin/dynamic_credentials.py",
+      "sha256": "d26f92f1a9709f9c875b6e034e89433e3675a2a7593f75a94cde297f80802741",
+      "bytes": 7671,
+      "lines": 207
+    }
+  ]
+}
