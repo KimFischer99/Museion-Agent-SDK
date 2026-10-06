@@ -6,13 +6,14 @@
 
 | 工具 | 实测版本 |
 |---|---|
-| Python | 3.13.5 |
-| Python 链接的 SQLite | 3.46.1 |
-| Node.js | 22.16.0 |
-| TypeScript compiler | 5.8.3 |
+| Python | 3.14.4（P1 复测时；交接时为 3.13.5） |
+| Python 链接的 SQLite | 3.50.4（P1 复测时；交接时为 3.46.1） |
+| Node.js | 24.14.0（交接时为 22.16.0） |
+| TypeScript compiler | 5.8.3（经 npx 固定版本调用） |
 | 原 helper 依赖 | Bash、jq，环境中可用 |
 
 参考 SQLite ledger 明确使用 DELETE journal；没有在此环境启用需要另外核验修复版本的 WAL。目标 Python 3.11+ 是设计范围，本次没有跑 3.11/3.12 的版本矩阵。
+P1 复测环境与交接时不同（Python/SQLite/Node 均升级）；DELETE journal 决定在新版本下仍然成立（PRAGMA 实测值见下文 P1 一节），WAL 修复核验在启用 WAL 前仍是前置条件。
 
 ## 1. 原创 Python 参考代码
 
@@ -73,7 +74,52 @@ python reuse/test_original_helper.py /private/path/hatch_hook_runtime.sh -v
 - `reuse/extract_original.py` 对原 ZIP/hash 验证通过，并成功提取 byte-identical helper 到新私有目录。
 - 原 helper SHA-256：`c87af221181a1559e3adcb0cdd601f5be5d4bd91eec2fe0597c09dc27558e741`。
 
-## 5. 明确未做
+## 5. P1 持久化与时钟（新增，2026-10-06）
+
+实际命令：
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 examples/reference_core.py
+npm exec --yes --package=typescript@5.8.3 -- tsc --strict --target ES2022 \
+  --module commonjs --lib ES2022,DOM --outDir /tmp/pas-ts-build \
+  examples/pi_executor.ts tests/pi_contract_test.ts
+node /tmp/pas-ts-build/tests/pi_contract_test.js
+python3 tools/reproduce_audit.py
+python3 tools/license_gate.py
+```
+
+**177 项 Python 测试全部通过**（交接包原有 52 项 + P1 新增 125 项），参考 demo
+输出与交接时一致（`{"delivered_notifications":0,"events":1,"pending_notifications":1,"runs":1}`）；
+TypeScript strict 编译 + 4 项结构检查通过；审计复现 OK；license gate PASS。
+
+P1 新增覆盖（对应 SPEC §16.1 Scheduling / Transactions / Operations 行）：
+
+- **迁移**：全量建表与 checksum 记账、重复打开幂等、注入坏 SQL 时事务整体回滚、
+  库版本新于二进制时拒绝打开。实测 PRAGMA：journal_mode=delete、synchronous=2(FULL)、
+  foreign_keys=1（FK 违规真实抛错）。
+- **调度**：interval 锚定槽与漂移（槽后 500ms 内准入）、时钟回拨不重放已准入
+  slot、runonce 过期窗口、Berlin 2026-03-29 春令时跳空跳过 / 2026-10-25 回拨
+  折叠到 earliest（fold_policy=latest 取第二次）、转换日 daily 偏移 1h 变化、
+  每月 31 日短月跳过不钳到月底、闰年 2/29、ISO 周几。
+- **misfire**：停机 7 天后 heartbeat 恰好补 1 次（不是 336 次）；grace_once 超
+  窗记 expired + `episode_slots=336` 可查询 reason、窗内补跑一次；expire 策略
+  只在健康 tick 容差内准入；连续错过 episode 计数不重算；job deadline 到期阻断。
+- **事务/并发**：同 occurrence 重试单入队（event/run/occurrence 各 1 条）；两个
+  独立 SQLite 连接抢同一 run 恰好一胜、4 个 run 被两连接无重复认领；**真实子进程**
+  claim 后 `os._exit(1)` 模拟崩溃，父进程重启回收过期 lease 并以新 fence 续作，
+  死进程旧 fence 提交被拒；lease 存活期间第二进程拿不到租约。
+- **jobs API**：idempotency 重放返回原记录、同 key 异内容 conflict、乐观 revision
+  （必须 +1）、暂停/恢复 revision 语义、删除有准入历史的 job 被拒。
+- **扫描效率**：due 查询 EXPLAIN QUERY PLAN 走 `jobs_due` 索引；1000 任务注册
+  + 全量准入 < 30s（本机 ~2s，环境相关，非基准声明）。
+
+P1 未做/边界（继续成立）：未做跨进程多 writer 长时间压测与断电耐久测试；未做
+WAL 启用；store 层 jobs API 不等于公共 facade/daemon（P3+/P7）；run 状态机为
+参考切片三态 + failed，§4.3 完整状态随 P3；outbox/grants/approvals 表已建但
+写入路径属 P4；`packages/client-ts` 未生成，fold_policy 的 TS 侧同步待 P5。
+
+## 6. 明确未做（交接包历史记录，继续有效）
 
 没有对真实 Hermes gateway、真实 Pi SDK、Muse 后台、邮箱、日历、设备、push 服务或付费模型执行联调；没有发布、安装或提交到用户的仓库；没有验证全部 88 个 Skill 的实际功能；没有完成第三方代码再分发授权核验。
 

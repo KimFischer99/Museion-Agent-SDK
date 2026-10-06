@@ -25,4 +25,4 @@ pas = "proactive_sdk.service:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-proactive_sdk = ["py.typed"]
+proactive_sdk = ["py.typed", "migrations/*.sql"]

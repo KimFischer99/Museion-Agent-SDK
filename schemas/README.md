@@ -24,6 +24,7 @@ Python / TypeScript 实现与 fixtures 从这里派生，schema 变更须同步�
 | 规则 | 位置 |
 |---|---|
 | `Schedule` 按 kind 的必填字段（interval⇒anchor+every_seconds；daily/monthly⇒local_time+timezone；weekly⇒weekdays+local_time+timezone；runonce⇒at） | `contracts.validate_schedule` |
+| `Schedule.fold_policy` 仅允许 `earliest`/`latest`（默认 `earliest`；DST 回拨重复时刻取哪一次，春令时跳空一律跳过。P1 起 schema 与实现同步支持） | `contracts.validate_schedule` |
 | `Decision.decision == "silent"` ⇒ `proposals` 为空；`"propose"` ⇒ 至少 1 条 | `contracts.validate_decision` |
 | `notify_self` 提案必须带 `evidence_refs` 与 `expires_at` | `contracts.validate_decision` |
 

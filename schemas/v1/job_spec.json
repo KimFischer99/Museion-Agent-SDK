@@ -67,7 +67,12 @@
           "items": { "type": "integer", "minimum": 1, "maximum": 7 }
         },
         "day_of_month": { "type": "integer", "minimum": 1, "maximum": 31 },
-        "at": { "type": "string", "format": "date-time" }
+        "at": { "type": "string", "format": "date-time" },
+        "fold_policy": {
+          "description": "DST fall-back repetition choice for daily/weekly/monthly (SPEC §5.1); persists per job revision. Spring-forward gaps are always skipped, independent of this field.",
+          "enum": ["earliest", "latest"],
+          "default": "earliest"
+        }
       }
     }
   }

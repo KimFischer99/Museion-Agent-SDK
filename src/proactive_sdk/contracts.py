@@ -30,6 +30,7 @@ __all__ = [
     "require_utc_timestamp",
     "validate_schedule",
     "validate_decision",
+    "JobSpec",
     "ProfileConfig",
     "RuntimeConfig",
     "assert_single_profile",
@@ -209,6 +210,11 @@ def validate_schedule(schedule: dict[str, Any]) -> list[str]:
         local_time = schedule.get("local_time")
         if local_time is not None and not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", local_time):
             errors.append(f"schedule.local_time {local_time!r} must be HH:MM")
+        # DST fall-back repetition policy; persists per job revision (SPEC §5.1).
+        # Spring-forward gaps are always skipped; this only chooses the fold.
+        fold_policy = schedule.get("fold_policy", "earliest")
+        if fold_policy not in ("earliest", "latest"):
+            errors.append("schedule.fold_policy must be 'earliest' or 'latest'")
     if kind == "weekly":
         weekdays = schedule.get("weekdays") or []
         if any(not isinstance(w, int) or not 1 <= w <= 7 for w in weekdays):
@@ -304,6 +310,87 @@ def assert_single_profile(profiles: list[ProfileConfig]) -> ProfileConfig:
             scope="profile",
         )
     return profiles[0]
+
+
+# --------------------------------------------------------------------------- #
+# JobSpec (SPEC §4.1) — implemented for real in P1 (store + scheduler)
+# --------------------------------------------------------------------------- #
+
+_JOB_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_MISFIRE_POLICIES = frozenset({"coalesce_latest", "grace_once", "expire"})
+_SCHEDULER_OWNERS = frozenset({"pas", "host"})
+_JOB_MODES = frozenset({"heartbeat", "task"})
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    """Typed JobSpec. Structural shape is ``schemas/v1/job_spec.json``;
+    the checks here are the cross-field rules the schema deliberately does
+    not express (mirrors ``contracts.validate_schedule``)."""
+
+    job_id: str
+    mode: str
+    schedule: dict[str, Any]
+    task: dict[str, Any]
+    owner: str = "pas"
+    revision: int = 1
+    grant_refs: tuple[str, ...] = ()
+    delivery_policy: dict[str, Any] = field(default_factory=dict)
+    misfire_policy: str | None = None
+    deadline: str | None = None
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.job_id, str) or not _JOB_ID_RE.fullmatch(self.job_id):
+            raise PASError(ErrorCode.INVALID_CONFIG, f"job_id {self.job_id!r} fails naming rule")
+        if self.mode not in _JOB_MODES:
+            raise PASError(ErrorCode.INVALID_CONFIG, f"mode {self.mode!r} must be heartbeat|task")
+        if self.owner not in _SCHEDULER_OWNERS:
+            raise PASError(ErrorCode.INVALID_CONFIG, f"owner {self.owner!r} must be pas|host")
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
+            raise PASError(ErrorCode.INVALID_CONFIG, "revision must be an integer >= 1")
+        if not isinstance(self.schedule, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "schedule must be an object")
+        problems = validate_schedule(self.schedule)
+        if problems:
+            raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
+        if not isinstance(self.task, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "task must be an object")
+        instruction = self.task.get("instruction")
+        if not isinstance(instruction, str) or not 1 <= len(instruction) <= 10000:
+            raise PASError(ErrorCode.INVALID_CONFIG, "task.instruction must be 1..10000 chars")
+        if self.misfire_policy is not None and self.misfire_policy not in _MISFIRE_POLICIES:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"misfire_policy {self.misfire_policy!r} not in {sorted(_MISFIRE_POLICIES)}",
+            )
+        if self.deadline is not None:
+            try:
+                require_utc_timestamp(self.deadline)
+            except ValueError as exc:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"deadline: {exc}") from None
+        if not isinstance(self.enabled, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "enabled must be boolean")
+        if any(not isinstance(g, str) or not g for g in self.grant_refs):
+            raise PASError(ErrorCode.INVALID_CONFIG, "grant_refs must be non-empty strings")
+        if not isinstance(self.delivery_policy, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "delivery_policy must be an object")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Canonical dict shape; the idempotency hash input for job upserts."""
+        return {
+            "job_id": self.job_id,
+            "revision": self.revision,
+            "owner": self.owner,
+            "mode": self.mode,
+            "schedule": self.schedule,
+            "task": self.task,
+            "grant_refs": list(self.grant_refs),
+            "delivery_policy": self.delivery_policy,
+            "misfire_policy": self.misfire_policy,
+            "deadline": self.deadline,
+            "enabled": self.enabled,
+        }
 
 
 # --------------------------------------------------------------------------- #
