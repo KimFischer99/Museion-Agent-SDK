@@ -18,11 +18,14 @@ src/proactive_sdk/  契约与工具库（P0：contracts / pathsafe / schema_vali
                     P1：clock / store / scheduler / migrations；
                     P2：hooks — legacy parser、沙盒 runner、staging + CAS；
                     P3：model / tools / context / executor / coordinator —
-                    独立 Agent 闭环）
+                    独立 Agent 闭环；
+                    P4：policy / delivery — grants、冻结审批、outbox 投递）
 schemas/v1/         JSON Schema 2020-12 契约（10 个对象）+ 说明
-examples/           参考代码切片、schema 起点、agent_loop_demo（P3 闭环 demo）
+examples/           参考代码切片、schema 起点、agent_loop_demo（P3 闭环 demo）、
+                    policy_delivery_demo（P4 策略与投递 demo）
 tests/              可执行参考测试、P0 契约测试、P1 持久化/调度测试、
-                    P2 hook 运行时测试、P3 executor/context/model/coordinator 测试
+                    P2 hook 运行时测试、P3 executor/context/model/coordinator 测试、
+                    P4 policy/delivery 测试
 audit/              88 个 Skill 的元数据审计与来源 hash（不含 Skill 正文）
 reuse/              受限的私有提取与测试脚本
 tools/              reproduce_audit.py（审计复现）、license_gate.py（许可门禁）

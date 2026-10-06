@@ -16,25 +16,33 @@ L0 — no model (§5.3). Before any LLM call the coordinator checks job
 
 L1 — the executor's bounded tool loop produces a Decision; accepted
      decisions, proposals, usage and the immutable ContextPack are
-     committed in one transaction under the lease fence (§13.2). The run
-     ends ``proposed``; policy evaluation, actions and delivery stay P4.
+     committed in one transaction under the lease fence (§13.2). When a
+     PolicyEngine is wired in, the P4 policy phases run right after the
+     decision commit: proposed → policy_evaluated → actions_queued /
+     waiting_for_approval / completed (§4.3). A policy failure does NOT
+     rewrite the analysis outcome: the run stays ``proposed`` (retryable)
+     and the report says so.
 
 Accounting honesty (AGENTS.md): ``suppressed`` / ``failed`` / ``proposed``
 are three different outcomes and the report names which one happened,
 plus how many model turns were actually spent. Analysis completion is
-recorded; nothing here claims a notification was delivered.
+recorded; nothing here claims a notification was delivered — delivery
+state lives in the outbox and is reported by the dispatcher.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .context import ContextPackBuilder, SnapshotMaterializer, SourceRegistry
 from .contracts import ErrorCode, PASError, content_hash
 from .executor import ExecutorOutcome, ToolLoopExecutor
 from .store import RunLease, Store
+
+if TYPE_CHECKING:
+    from .policy import PolicyEngine
 
 __all__ = ["CoordinatorConfig", "RunReport", "ProactiveCoordinator"]
 
@@ -57,7 +65,9 @@ class CoordinatorConfig:
 
 @dataclass(frozen=True)
 class RunReport:
-    """What actually happened to one run — the caller-visible truth."""
+    """What actually happened to one run — the caller-visible truth.
+    ``outcome`` is the ANALYSIS outcome (§4.3 dimension one); delivery is
+    reported separately (``policy_outcome``) and never folded into it."""
 
     run_id: str
     outcome: str  # proposed | suppressed | failed
@@ -66,6 +76,10 @@ class RunReport:
     model_turns: int = 0
     proposals: int = 0
     context_ref: str | None = None
+    policy_outcome: str | None = None  # completed | actions_queued | waiting_for_approval | policy_error
+    queued: int = 0
+    approval_pending: int = 0
+    suppressed_by_policy: int = 0
 
 
 def _ms_to_rfc3339(ms: int) -> str:
@@ -90,6 +104,7 @@ class ProactiveCoordinator:
         executor: ToolLoopExecutor,
         config: CoordinatorConfig | None = None,
         tool_allowlist: tuple[str, ...] | None = None,
+        policy_engine: "PolicyEngine | None" = None,
     ) -> None:
         self.store = store
         self.registry = registry
@@ -97,6 +112,7 @@ class ProactiveCoordinator:
         self.executor = executor
         self.config = config if config is not None else CoordinatorConfig()
         self.tool_allowlist = tool_allowlist
+        self.policy_engine = policy_engine
 
     async def process_pending_run(
         self, *, now_ms: int | None = None, cancel_event: Any | None = None
@@ -248,13 +264,57 @@ class ProactiveCoordinator:
             usage={"protocol_version": "1.0", **outcome.usage},
             now_ms=now_ms,
         )
-        return RunReport(
+        report = RunReport(
             run_id=lease.run_id,
             outcome="proposed",
             reason=outcome.decision.summary,
             model_turns=outcome.model_turns,
             proposals=len(outcome.decision.proposals),
             context_ref=context_ref,
+        )
+        if self.policy_engine is not None:
+            report = self._apply_policy(report, now_ms=now_ms)
+        return report
+
+    def _apply_policy(self, report: RunReport, *, now_ms: int) -> RunReport:
+        """P4 policy phases right after the decision commit. A policy
+        failure never rewrites the analysis outcome: the run stays
+        ``proposed`` (retryable via ``PolicyEngine.apply_to_run``), the
+        report records the error."""
+        try:
+            verdict = self.policy_engine.apply_to_run(report.run_id, now_ms=now_ms)
+        except PASError as exc:
+            try:
+                self.store.record_run_note(
+                    report.run_id,
+                    kind="policy_error",
+                    summary=f"policy evaluation failed: {exc.code.value}"[:500],
+                    now_ms=now_ms,
+                )
+            except PASError:
+                pass
+            return RunReport(
+                run_id=report.run_id,
+                outcome=report.outcome,
+                reason=report.reason,
+                error_code=report.error_code,
+                model_turns=report.model_turns,
+                proposals=report.proposals,
+                context_ref=report.context_ref,
+                policy_outcome="policy_error",
+            )
+        return RunReport(
+            run_id=report.run_id,
+            outcome=report.outcome,
+            reason=report.reason,
+            error_code=report.error_code,
+            model_turns=report.model_turns,
+            proposals=report.proposals,
+            context_ref=report.context_ref,
+            policy_outcome=verdict.outcome,
+            queued=verdict.queued,
+            approval_pending=verdict.approval_pending,
+            suppressed_by_policy=verdict.suppressed,
         )
 
     # ------------------------------------------------------------------ #

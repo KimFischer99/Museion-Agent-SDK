@@ -226,6 +226,65 @@ profile 级预算与 runs.cancel 控制面 API 未实现（executor 已支持 ca
 flag）；run 状态机推进到 `proposed`，`policy_evaluated/actions_queued/
 completed` 属 P4；公共 facade（api.py）与 JSON-RPC 控制面未开工。
 
+## 5d. P4 策略与投递（新增，2026-10-06）
+
+实际命令（同前几节的全量命令，另加 demo）：
+
+- `python3 -m unittest discover -s tests` → **374 项全部通过**（交接 52 +
+  P1 125 + P2 76 + P3 58 + P4 新增 63），`python3 examples/reference_core.py`
+  输出不变；`python3 examples/agent_loop_demo.py` 三场景照旧；审计复现 OK；
+  license gate PASS；TypeScript strict + 4 项结构检查照旧通过。
+- `python3 examples/policy_delivery_demo.py` → 六场景断言全过，退出码 0：
+  夜间推迟/一次入箱/业务去重/反馈静音/ACK 丢失对账重试/撤销级联/冻结审批。
+
+P4 新增覆盖（对应 SPEC §9 / §10 / §15.1 P4 行 / POLICY-01 / SEND-01）：
+
+- **policy（41 项）**：静默时段（夜间推迟至 quiet end、期间过期则抑制不
+  补发、白天直发、HH:MM/时区配置错误报错）；本人目标不可替换（模型在
+  arguments 点名 destination/receiver/to 一律抑制而非转发；local_inbox 通道
+  必须等于 store.owner_destination；未知 notification profile 拒绝）；撤销
+  立刻生效（同一事务级联 pending approvals→revoked、actions→cancelled、
+  outbox→suppressed，派发零投递；在途发送的 attempt 仍入 journal 但消息
+  提交被拒；能力快照随撤销收窄；撤销幂等）；冻结参数审批（外部动作
+  waiting_for_approval 且 pending 期间派发零请求；同冻结请求幂等返回原
+  审批；参数/附件变化产生新 hash 需重新审批；哈希篡改在 promote 时 fail
+  拒绝入队；拒绝取消动作并结算 run；过期先落盘再拒绝、不可解析；resolve
+  必须带 authenticated actor 并记录 resolved_by）；账户切换与 scope 扩大
+  （account_mismatch/resource_id 越界/actions 白名单越界均抑制）；两层去重
+  的业务层（同 fact+revision 跨 run 抑制、revision 升级放行）；反馈抑制
+  （mute_topic 经 feedback 事务生效、unmute 恢复、handled 事实抑制、配置
+  muted_topics 为硬策略、feedback 强制 actor 与已知 message）；每日配额
+  （推迟不丢弃，deferred 是 queued 子集口径）；过期消息派发前清扫为
+  expired；本地记录类提案走 run_events 不进 actions/outbox；锁屏去敏
+  （webhook payload 仅摘要、本地 inbox 保正文）；blobs 内容寻址 roundtrip、
+  快照正文经 blob 解析、通道重注册冲突检测。
+- **delivery（22 项）**：真实 loopback HTTP 上验证 Idempotency-Key/Content-Type
+  头与 canonical JSON body；2xx→provider_accepted（receipt external_id）、
+  408/429/5xx→failed_retryable、其余 4xx→failed_terminal、302 不跟随且计
+  terminal；服务端已处理但连接死亡→delivery_unknown（不是 failed）；本地
+  inbox 一次入箱（重复派发不双入箱、attempt journal 带 fence）；stale fence
+  只 journal 不迁移状态、真 claimant 可正常完成；**ACK 丢失不盲发**——
+  unknown 后推时钟 5 次派发零重发、attempt 仍 1 条；权威 not-delivered 后
+  重新排队并以同一 provider_key 重试成功（服务器所见幂等键集合为 1）；
+  无 status_url/404/非布尔答复均不算权威、unknown 永远停摆不自动重发；
+  权威 delivered 收口为 reconciled_delivered；晚到回执把 failed_terminal
+  对账为 reconciled_delivered、重复回执幂等；从未发送的消息收到回执视为
+  unsolicited 状态不变；重试退避（not_before 推后、指数封顶、预算耗尽转
+  failed_terminal）；双连接不可双取同一消息；撤销介于 claim 与 finish 之间
+  时提交被拒。
+- **coordinator 端到端（2 项）**：L0→L1→策略→outbox→本地 inbox 全链
+  （report.policy_outcome=actions_queued、inbox 落 fact/body、run 终态
+  actions_queued）；静音话题提案（urgency=urgent）端到端被策略拦截、
+  零投递——优先级不可绕过明确禁区。
+
+P4 未做/边界（如实记录）：真实通知 provider（push/邮件/日历写入）未联调，
+webhook sink 只有 loopback 传输层契约（兼容声明属 P5–P7 门禁）；出站网络
+broker（域名 allowlist/DNS rebinding/SSRF/redirect 检查）未实现，sink 仅禁
+重定向 + 默认 TLS 验证；approval 解析的认证目前是 authenticated actor 字符串
+记账，bearer/token 级控制面认证随 P7；配额仅每日条数口径；request_external_
+action 批准后经 webhook 派发"授权自动化请求"，真实外部动作执行器属 P5/P6；
+delivery 派发循环由调用方驱动（常驻 daemon 属 P7）。
+
 ## 6. 明确未做（交接包历史记录，继续有效）
 
 没有对真实 Hermes gateway、真实 Pi SDK、Muse 后台、邮箱、日历、设备、push 服务或付费模型执行联调；没有发布、安装或提交到用户的仓库；没有验证全部 88 个 Skill 的实际功能；没有完成第三方代码再分发授权核验。

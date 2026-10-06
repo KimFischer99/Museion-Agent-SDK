@@ -9,7 +9,7 @@
 | P1 持久化与时钟 | **done** | 2026-10-06 | store、migrations、Clock、五类 schedule、misfire、claim/fencing、jobs API；验收测试见下 |
 | P2 Hooks 与事件 | **done** | 2026-10-06 | 沙盒 runner、legacy parser、staging + CAS、hook 状态机；验收测试见下 |
 | P3 独立 Agent 闭环 | **done** | 2026-10-06 | Source/Memory ports、ContextPack、ToolLoopExecutor、OpenAI 兼容 ModelPort、L0/L1 coordinator；验收测试见下 |
-| P4 策略与投递 | not started | — | grants、审批、outbox、本人 inbox、真实通知 sink、对账 |
+| P4 策略与投递 | **done** | 2026-10-06 | grants、冻结参数审批、owner channels、outbox 派发（attempt journal/幂等 key/unknown 对账）、本人 inbox、真实 webhook 通知 sink、feedback；验收测试见下 |
 | P5 宿主适配 | not started | — | Hermes Runs / Pi worker，锁定版本真实联调 |
 | P6 Skills 能力 | not started | — | legacy importer、aliases、依赖闭包、Gmail/Calendar 最小兼容 |
 | P7 产品化与发布 | not started | — | daemon、备份恢复、SBOM、license gate、兼容矩阵 |
@@ -245,3 +245,70 @@
 - 公共 facade（api.py）、`pas serve`、JSON-RPC 控制面随 P4/P7；runs.cancel
   控制面 API 未实现（executor 已支持 cancel flag，等待控制面接入）。
 - hook 定义公开 schema（§4.1 之外的对象）仍待 facade 冻结时定。
+
+## P4 记录（2026-10-06）
+
+实现（对应 POLICY-01 / SEND-01 / 工单 B 的策略部分）：
+
+- **`src/proactive_sdk/migrations/m005_p4_policy.sql`**（additive）：grants/approvals
+  记账列、run_proposals.policy_json（§4.3 phase A 裁决持久化）、outbox 交付
+  记账列（provider_key 幂等键、payload、attempts、reason）、`inbox`（与 outbox
+  同事务一次入箱）、`owner_channels`（可信配置绑定的本人通道）、`topic_mutes`、
+  `feedback` handled-fact 表达式索引、共享 `blobs` 内容寻址存储。
+- **store.py P4 段**：grants CRUD + 撤销级联（同一事务：version+1、pending
+  approvals→revoked、未执行 actions→cancelled、未投递 outbox→suppressed）、
+  审批冻结/解析（actor 必需、过期先提交后报错）、§4.3 两阶段
+  （record_policy_verdicts：proposed→policy_evaluated；queue_run_actions：
+  单事务建 approvals/actions/outbox + run 终态）、outbox claim（事务内 grant
+  复验）/finish（attempt journal 先行，fence 失守只记账不动状态）/reconcile/
+  apply_receipt（晚到/重复回执幂等）、expire/promote 扫描、inbox、feedback。
+- **policy.py**：GrantManager（能力快照供给 broker）、OwnerChannelRegistry
+  （local_inbox 必须等于 store.owner_destination）、ApprovalManager（冻结请求
+  = kind/账户/接收者/规范化参数/附件 hash/证据/payload，哈希由 store 对存储的
+  canonical JSON 统一计算，审批与动作绑定同源）、PolicyEngine 硬策略顺序：
+  模型点名接收者→拒绝；grant 检查（账户切换/scope 扩大）；过期/已处理/话题
+  静音；业务去重键（profile+goal+fact_id+revision+destination+kind，不 hash
+  文案）；静默时段推迟（过期则抑制）；每日配额推迟；promote_approved 重新
+  计算静默时段；payload 锁屏去敏（webhook 仅摘要，本地 inbox 保正文）。
+- **delivery.py**：OutboxDispatcher（网络在事务外；claim 复验 fence；结果
+  事务 journal+状态迁移；重试退避封顶；unknown 永不自动重发；reconcile 仅认
+  显式 provider 答复，404 不算权威）；WebhookNotificationSink（真实 HTTP：
+  Idempotency-Key 头、有界响应、禁跟随重定向、2xx/408/429/5xx/其他 4xx/
+  传输错误→accepted/retryable/terminal/unknown 映射）；FeedbackManager。
+- **coordinator**：可选注入 policy_engine——决策提交后连跑 §4.3 两阶段；
+  策略失败不改写分析结果（run 保持 proposed 可重试，RunReport 单列
+  policy_outcome）。
+
+关键语义决定：
+
+- 审批绑定哈希唯一来源：store 对 canonical request JSON 计算 sha256，
+  approval 与 action 各自写入同一值——两侧永不漂移；参数/附件任何变化都会
+  改变该哈希（重新审批），promote 时哈希不匹配的动作 fail 拒不入队。
+- provider 幂等 key 按消息（pas-{action_id}）而非按尝试：重试同 key；
+  delivery_unknown 独立状态，只有权威答复（显式 delivered true/false）
+  能移动它；"没找到消息"（404/无 status_url）不算权威。
+- 本地收件箱：inbox 行与 outbox stored_in_inbox 同一事务（可靠一次入箱）；
+  本地记录类提案（draft/internal_record/suggest_watch）不进 actions 表
+  （m001 的 actions.grant_id 为 NOT NULL 外键），以 run_events 记账为本地台账。
+- 撤销立即生效是级联事务 + 派发前复验双保险：在途消息的 attempt 仍会被
+  journal（账面诚实），但消息状态由撤销事务决定，fence 失守的结果提交被拒。
+
+验收（§15.1 P4 行 + §16.1 Policy/Delivery 行）：41 项 policy 测试 +
+22 项 delivery 测试覆盖夜间不发（含推迟/过期抑制/白日直发）、撤销立刻生效
+（级联/在途/claim 复验）、冻结参数审批（同请求幂等/参数变化重批/篡改拒绝/
+拒绝取消/过期/actor 必需）、本人目标不可替换（模型点名接收者抑制/local inbox
+绑定校验/未知 profile 拒绝）、ACK 丢失不盲发（5 次派发不重发/权威 not-
+delivered 后同 key 重试/无权威源永远停摆/权威 delivered 收口）、晚到与重复
+回执、未发送消息的回执视为 unsolicited、重试预算耗尽、双连接不可双取。
+另有 2 项 coordinator 端到端（L0→L1→策略→入箱；静音话题优先级不可绕过）。
+
+已知缺口（不阻塞 P5，按阶段补）：
+
+- WebhookNotificationSink 已做真实 loopback HTTP 传输测试；真实 push/邮件
+  provider 联调与兼容声明仍属 P5/P6/P7 门禁。
+- approval/resolve 目前以 authenticated actor 字符串记账；bearer/token 级
+  控制面认证随 P7 JSON-RPC 层。
+- 网络出站 broker（域名 allowlist/DNS rebinding/redirect/SSRF 检查）未实现，
+  webhook sink 目前仅禁跟随重定向 + 默认 TLS 验证；属 P4/P6 之间的网络层工作。
+- profile 级配额只有每日条数口径；预算账本（token/费用）仍待 P5+。
+- 快照正文已入 blobs；大附件的分块/外置 blob 存储策略在 P6 随连接器补齐。

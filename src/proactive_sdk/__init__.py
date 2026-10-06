@@ -6,8 +6,11 @@ schedules, misfire, claim/fencing, jobs API); P2 adds the hook runtime
 (legacy protocol parser, sandbox runner, staging + CAS state machine,
 dry-run); P3 adds the independent agent loop (typed source/memory ports,
 ContextPack, bounded ToolLoopExecutor, OpenAI-compatible ModelPort,
-L0/L1 coordinator). Policy, grants, outbox and delivery continue with
-P4. Importing this package must never start threads, daemons or I/O.
+L0/L1 coordinator); P4 adds the policy & delivery layer (grants,
+frozen-parameter approvals, owner channels, outbox dispatcher with
+attempt journal and unknown reconciliation, local inbox, real webhook
+notification sink, feedback). Importing this package must never start
+threads, daemons or I/O.
 """
 
 from __future__ import annotations
@@ -55,6 +58,17 @@ from .context import (
     render_context_blocks,
 )
 from .coordinator import CoordinatorConfig, ProactiveCoordinator, RunReport
+from .delivery import (
+    DeliveryRequest,
+    DispatchConfig,
+    DispatchReport,
+    FeedbackManager,
+    OutboxDispatcher,
+    ReconcileAnswer,
+    ReconcileRequest,
+    SinkResult,
+    WebhookNotificationSink,
+)
 from .executor import ExecutorConfig, ExecutorOutcome, RunCancelled, ToolLoopExecutor
 from .hooks import (
     BubblewrapSandbox,
@@ -79,6 +93,17 @@ from .pathsafe import (
     safe_join,
     validate_zip_member,
 )
+from .policy import (
+    NOTIFY_SELF_CAPABILITY,
+    POLICY_VERSION,
+    ApprovalManager,
+    GrantManager,
+    OwnerChannelRegistry,
+    PolicyConfig,
+    PolicyEngine,
+    PolicyRunReport,
+    quiet_end_ms,
+)
 from .scheduler import (
     AdmissionReport,
     Schedule,
@@ -89,11 +114,14 @@ from .scheduler import (
     resolve_local_wall,
 )
 from .store import (
+    ApprovalRecord,
     EventRecord,
+    GrantRecord,
     HookClaim,
     HookCommitResult,
     HookRecord,
     JobRecord,
+    OutboxLease,
     RunLease,
     SnapshotRecord,
     SourceStateRecord,
@@ -204,4 +232,26 @@ __all__ = [
     "CoordinatorConfig",
     "ProactiveCoordinator",
     "RunReport",
+    # P4 policy & delivery
+    "POLICY_VERSION",
+    "NOTIFY_SELF_CAPABILITY",
+    "PolicyConfig",
+    "PolicyEngine",
+    "PolicyRunReport",
+    "GrantManager",
+    "OwnerChannelRegistry",
+    "ApprovalManager",
+    "quiet_end_ms",
+    "GrantRecord",
+    "ApprovalRecord",
+    "OutboxLease",
+    "DeliveryRequest",
+    "ReconcileRequest",
+    "SinkResult",
+    "ReconcileAnswer",
+    "WebhookNotificationSink",
+    "DispatchConfig",
+    "DispatchReport",
+    "OutboxDispatcher",
+    "FeedbackManager",
 ]

@@ -50,6 +50,9 @@ __all__ = [
     "HookRecord",
     "HookClaim",
     "HookCommitResult",
+    "GrantRecord",
+    "ApprovalRecord",
+    "OutboxLease",
     "MIGRATION_COUNT",
 ]
 
@@ -243,6 +246,61 @@ class HookCommitResult:
 
     outcome: str
     event_id: str | None
+
+
+@dataclass(frozen=True)
+class GrantRecord:
+    """One authorization (SPEC §9.1). ``scope`` carries resource filters
+    and action scope; ``version`` bumps on every change so approvals and
+    actions bind an exact version."""
+
+    grant_id: str
+    account_ref: str
+    capability: str
+    scope: dict[str, Any]
+    version: int
+    expires_at_ms: int | None
+    revoked_at_ms: int | None
+    consent_evidence_ref: str
+    created_at_ms: int
+
+    def is_active(self, now_ms: int) -> bool:
+        if self.revoked_at_ms is not None:
+            return False
+        return self.expires_at_ms is None or self.expires_at_ms > now_ms
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    """One frozen-parameter approval (SPEC §9.2). ``request_hash`` is the
+    SHA-256 of the canonical frozen request; approval binds the hash and
+    the grant version, never a verbal category."""
+
+    approval_id: str
+    request_hash: str
+    grant_id: str
+    grant_version: int
+    state: str  # pending | approved | denied | expired | revoked
+    expires_at_ms: int
+    resolved_by: str | None
+    resolved_at_ms: int | None
+    created_at_ms: int
+
+
+@dataclass(frozen=True)
+class OutboxLease:
+    """Claim token for one outbox message. The fence is monotonic per
+    message; finishing requires state='sending' AND this fence."""
+
+    message_id: str
+    action_id: str
+    fence: int
+    lease_until_ms: int
+    delivery_key: str
+    destination_ref: str
+    channel_kind: str
+    payload: dict[str, Any]
+    provider_key: str
 
 
 class Store:
@@ -1415,12 +1473,16 @@ class Store:
     ) -> SnapshotRecord:
         """Content-address an observed item. Re-observing identical
         content refreshes the observation metadata (content itself is
-        immutable); the snapshot ref is stable across runs."""
+        immutable); the snapshot ref is stable across runs.
+
+        The body goes to the controlled blob store (P4, §13.1); the DB row
+        keeps only hash + ref."""
         if sensitivity not in ("public", "private", "sensitive"):
             raise PASError(ErrorCode.INVALID_CONFIG, "sensitivity must be public|private|sensitive", scope="sources")
         content_hash = _sha256_text(content)
         snapshot_id = f"snap{content_hash[:28]}"
         with self.transaction():
+            self._put_blob(content, now_ms=observed_at_ms)
             self.db.execute(
                 """INSERT INTO snapshots(snapshot_id, source_id, account_ref, content_ref,
                                          content_hash, observed_at_ms, fresh_until_ms,
@@ -1435,7 +1497,7 @@ class Store:
                     snapshot_id,
                     source_id,
                     account_ref,
-                    "inline",
+                    f"blob:{content_hash}",
                     content_hash,
                     observed_at_ms,
                     fresh_until_ms,
@@ -1447,7 +1509,7 @@ class Store:
             snapshot_id=snapshot_id,
             source_id=source_id,
             account_ref=account_ref,
-            content_ref="inline",
+            content_ref=f"blob:{content_hash}",
             content_hash=content_hash,
             observed_at_ms=observed_at_ms,
             fresh_until_ms=fresh_until_ms,
@@ -1477,13 +1539,56 @@ class Store:
         ]
 
     def snapshot_content(self, snapshot_id: str) -> str | None:
-        """Snapshot bodies stay with the source items that produced them
-        in P3 (the coordinator keeps them for evidence); a shared blob
-        store arrives with P4. Unknown ids return None."""
+        """Resolve a snapshot's body from the blob store (P4, §13.1).
+        Legacy rows from P3 builds carry content_ref='inline' and resolve
+        to that marker string (bodies were kept by the caller)."""
         row = self.db.execute(
             "SELECT content_ref FROM snapshots WHERE snapshot_id=?", (snapshot_id,)
         ).fetchone()
-        return None if row is None else row["content_ref"]
+        if row is None:
+            return None
+        return self.blob_content(row["content_ref"])
+
+    # ------------------------------------------------------------------ #
+    # Blob store (P4 / SPEC §13.1: bodies in a controlled local store,
+    # the DB keeps hash + ref)
+    # ------------------------------------------------------------------ #
+
+    _BLOB_MAX_BYTES = 1_048_576
+
+    def _put_blob(self, content: str, *, now_ms: int) -> str:
+        """Insert a blob inside the caller's transaction; idempotent on
+        content hash. Caller owns the transaction."""
+        encoded = content.encode("utf-8")
+        if len(encoded) > self._BLOB_MAX_BYTES:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"blob content exceeds {self._BLOB_MAX_BYTES} bytes",
+                scope="blobs",
+            )
+        blob_hash = hashlib.sha256(encoded).hexdigest()
+        self.db.execute(
+            """INSERT INTO blobs(blob_hash, content, size_bytes, created_at_ms)
+               VALUES (?,?,?,?) ON CONFLICT(blob_hash) DO NOTHING""",
+            (blob_hash, content, len(encoded), now_ms),
+        )
+        return blob_hash
+
+    def put_blob(self, content: str, *, now_ms: int | None = None) -> str:
+        """Store content once; returns ``blob:<sha256>`` content ref."""
+        with self.transaction():
+            blob_hash = self._put_blob(content, now_ms=self.clock.wall_now_ms() if now_ms is None else now_ms)
+        return f"blob:{blob_hash}"
+
+    def blob_content(self, content_ref: str) -> str | None:
+        """Resolve a ``blob:<hash>`` ref to its body. Non-blob refs return
+        the ref unchanged (legacy ``inline`` rows); unknown hashes None."""
+        if not isinstance(content_ref, str) or not content_ref.startswith("blob:"):
+            return content_ref
+        row = self.db.execute(
+            "SELECT content FROM blobs WHERE blob_hash=?", (content_ref[5:],)
+        ).fetchone()
+        return None if row is None else row["content"]
 
     # ------------------------------------------------------------------ #
     # Run ledger extensions: observation events, suppression, decision
@@ -1526,15 +1631,30 @@ class Store:
             raise PASError(ErrorCode.INVALID_CONFIG, "safe_summary must be at most 500 chars", scope="runs")
         with self.transaction():
             self._require_active_claim(lease, now_ms)
-            seq = self.db.execute(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id=?", (lease.run_id,)
-            ).fetchone()[0]
-            self.db.execute(
-                """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
-                   VALUES (?,?,?,?,?,?)""",
-                (lease.run_id, seq, kind, safe_summary, detail_ref, now_ms),
+            return self._append_run_event_row(
+                lease.run_id, kind, safe_summary, detail_ref, now_ms
             )
-            return seq
+
+    def _append_run_event_row(
+        self,
+        run_id: str,
+        kind: str,
+        safe_summary: str | None,
+        detail_ref: str | None,
+        now_ms: int,
+    ) -> int:
+        """Inside the caller's transaction: post-decision writers (policy,
+        queueing) append events without holding a run lease — the run is
+        already finalized; the guard is the run-state transition instead."""
+        seq = self.db.execute(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+        self.db.execute(
+            """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
+               VALUES (?,?,?,?,?,?)""",
+            (run_id, seq, kind, safe_summary, detail_ref, now_ms),
+        )
+        return seq
 
     def record_run_suppressed(self, lease: RunLease, *, reason: str, now_ms: int) -> None:
         """End a run before any model call with its machine reason (§5.3
@@ -1673,7 +1793,8 @@ class Store:
     def run_proposals(self, run_id: str) -> list[dict[str, Any]]:
         rows = self.db.execute(
             """SELECT proposal_id, seq, kind, fact_id, revision, body,
-                      arguments_json, evidence_refs_json, expires_at_ms, created_at_ms
+                      arguments_json, evidence_refs_json, expires_at_ms, policy_json,
+                      created_at_ms
                FROM run_proposals WHERE run_id=? ORDER BY seq""",
             (run_id,),
         ).fetchall()
@@ -1688,6 +1809,7 @@ class Store:
                 "arguments": canonical_loads(row["arguments_json"]) if row["arguments_json"] else None,
                 "evidence_refs": canonical_loads(row["evidence_refs_json"]),
                 "expires_at_ms": row["expires_at_ms"],
+                "policy": canonical_loads(row["policy_json"]) if row["policy_json"] else None,
                 "created_at_ms": row["created_at_ms"],
             }
             for row in rows
@@ -1733,6 +1855,1199 @@ class Store:
         usage_json = record.pop("usage_json")
         record["usage"] = canonical_loads(usage_json) if usage_json else None
         return record
+
+    # ------------------------------------------------------------------ #
+    # Grants, approvals, actions, outbox, inbox, feedback
+    # (P4 / SPEC §9, §10; POLICY-01, SEND-01). Every mutation here is a
+    # short BEGIN IMMEDIATE transaction; the revoke cascade and the
+    # outbox/inbox pairing are atomic by construction.
+    # ------------------------------------------------------------------ #
+
+    _GRANT_CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.]{1,63}$")
+    _ACCOUNT_REF_MAX = 256
+    _FEEDBACK_KINDS = frozenset(
+        {"handled", "not_useful", "mute_topic", "unmute_topic", "wrong_target"}
+    )
+    _ACTION_ACTIVE_STATES = ("planned", "approved", "queued")
+    _OUTBOX_SENDABLE_STATES = ("pending", "deferred", "sending")
+    _OUTBOX_DELIVERED_STATES = ("provider_accepted", "stored_in_inbox", "reconciled_delivered")
+    _PAYLOAD_MAX_BYTES = 65536
+
+    def create_grant(
+        self,
+        *,
+        capability: str,
+        account_ref: str,
+        scope: dict[str, Any],
+        consent_evidence_ref: str,
+        expires_at_ms: int | None,
+        now_ms: int,
+    ) -> GrantRecord:
+        """Record one user-consent grant. Called only from the trusted
+        setup path — nothing model-facing reaches this method."""
+        if not isinstance(capability, str) or not self._GRANT_CAPABILITY_RE.fullmatch(capability):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, f"capability {capability!r} fails naming rule", scope="grants"
+            )
+        if not isinstance(account_ref, str) or not 1 <= len(account_ref) <= self._ACCOUNT_REF_MAX:
+            raise PASError(ErrorCode.INVALID_CONFIG, "account_ref must be 1..256 chars", scope="grants")
+        if not isinstance(scope, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "scope must be an object", scope="grants")
+        if not isinstance(consent_evidence_ref, str) or not consent_evidence_ref:
+            raise PASError(ErrorCode.INVALID_CONFIG, "consent_evidence_ref is required", scope="grants")
+        if expires_at_ms is not None and (
+            not isinstance(expires_at_ms, int) or isinstance(expires_at_ms, bool)
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "expires_at_ms must be integer ms or None", scope="grants")
+        grant_id = f"gr{content_hash({'c': capability, 'a': account_ref, 's': scope, 'e': expires_at_ms, 'v': consent_evidence_ref})[:28]}"
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO grants(grant_id, account_ref, capability, scope_json, version,
+                                      expires_at_ms, revoked_at_ms, consent_evidence_ref, created_at_ms)
+                   VALUES (?,?,?,?,1,?,NULL,?,?)
+                   ON CONFLICT(grant_id) DO NOTHING""",
+                (
+                    grant_id,
+                    account_ref,
+                    capability,
+                    canonical_json(scope),
+                    expires_at_ms,
+                    consent_evidence_ref,
+                    now_ms,
+                ),
+            )
+            row = self.db.execute("SELECT * FROM grants WHERE grant_id=?", (grant_id,)).fetchone()
+        return self._grant_record(row)
+
+    def _grant_record(self, row: sqlite3.Row) -> GrantRecord:
+        return GrantRecord(
+            grant_id=row["grant_id"],
+            account_ref=row["account_ref"],
+            capability=row["capability"],
+            scope=canonical_loads(row["scope_json"]),
+            version=row["version"],
+            expires_at_ms=row["expires_at_ms"],
+            revoked_at_ms=row["revoked_at_ms"],
+            consent_evidence_ref=row["consent_evidence_ref"],
+            created_at_ms=row["created_at_ms"],
+        )
+
+    def get_grant(self, grant_id: str) -> GrantRecord | None:
+        row = self.db.execute("SELECT * FROM grants WHERE grant_id=?", (grant_id,)).fetchone()
+        return None if row is None else self._grant_record(row)
+
+    def list_grants(self, *, include_revoked: bool = False) -> list[GrantRecord]:
+        sql = "SELECT * FROM grants"
+        if not include_revoked:
+            sql += " WHERE revoked_at_ms IS NULL"
+        rows = self.db.execute(sql + " ORDER BY created_at_ms, grant_id").fetchall()
+        return [self._grant_record(row) for row in rows]
+
+    def revoke_grant(self, grant_id: str, *, now_ms: int) -> int:
+        """Revoke immediately (§9.2): the same transaction bumps the
+        version, revokes pending approvals, cancels unexecuted actions
+        and suppresses not-yet-delivered outbox messages. In-flight
+        sends are caught by the dispatcher's fence re-check."""
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT version, revoked_at_ms FROM grants WHERE grant_id=?", (grant_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown grant {grant_id!r}", scope="grants")
+            if row["revoked_at_ms"] is not None:
+                return row["version"]
+            version = row["version"] + 1
+            self.db.execute(
+                "UPDATE grants SET version=?, revoked_at_ms=? WHERE grant_id=?",
+                (version, now_ms, grant_id),
+            )
+            self.db.execute(
+                """UPDATE approvals SET state='revoked', resolved_by='grant_revocation', resolved_at_ms=?
+                   WHERE grant_id=? AND state='pending'""",
+                (now_ms, grant_id),
+            )
+            self.db.execute(
+                """UPDATE actions SET state='cancelled'
+                   WHERE grant_id=? AND state IN ('planned','approved','queued')
+                     AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.action_id=actions.action_id
+                                     AND o.state IN ('provider_accepted','stored_in_inbox','reconciled_delivered'))""",
+                (grant_id,),
+            )
+            self.db.execute(
+                """UPDATE outbox SET state='suppressed', reason='grant_revoked', lease_until_ms=0
+                   WHERE state IN ('pending','deferred','sending')
+                     AND action_id IN (SELECT action_id FROM actions WHERE grant_id=?)""",
+                (grant_id,),
+            )
+        return version
+
+    def active_capabilities(self, *, now_ms: int) -> frozenset[str]:
+        """Capabilities currently backed by a live grant — the composition
+        root wires this into the ToolBroker snapshot."""
+        rows = self.db.execute(
+            "SELECT DISTINCT capability FROM grants WHERE revoked_at_ms IS NULL"
+            " AND (expires_at_ms IS NULL OR expires_at_ms>?)",
+            (now_ms,),
+        ).fetchall()
+        return frozenset(row["capability"] for row in rows)
+
+    # -- approvals (§9.2 frozen-parameter) ------------------------------ #
+
+    def create_approval(
+        self,
+        *,
+        request: dict[str, Any],
+        grant_id: str,
+        ttl_ms: int,
+        now_ms: int,
+    ) -> ApprovalRecord:
+        """Freeze one approval request. The canonical request hash is the
+        binding anchor; re-requesting the identical frozen content while
+        the grant version is unchanged returns the existing record."""
+        request_json = canonical_json(request)
+        request_hash = _sha256_text(request_json)
+        with self.transaction():
+            grant = self.db.execute(
+                "SELECT version, revoked_at_ms, expires_at_ms FROM grants WHERE grant_id=?",
+                (grant_id,),
+            ).fetchone()
+            if grant is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown grant {grant_id!r}", scope="approvals")
+            if grant["revoked_at_ms"] is not None:
+                raise PASError(
+                    ErrorCode.PERMISSION_DENIED, "grant is revoked", scope="approvals"
+                )
+            if grant["expires_at_ms"] is not None and grant["expires_at_ms"] <= now_ms:
+                raise PASError(ErrorCode.PERMISSION_DENIED, "grant is expired", scope="approvals")
+            grant_version = grant["version"]
+            approval_id = f"ap{content_hash({'h': request_hash, 'g': grant_id, 'v': grant_version})[:28]}"
+            self.db.execute(
+                """INSERT INTO approvals(approval_id, request_hash, grant_id, grant_version,
+                                         state, expires_at_ms, request_json, created_at_ms)
+                   VALUES (?,?,?,?,'pending',?,?,?)
+                   ON CONFLICT(approval_id) DO NOTHING""",
+                (approval_id, request_hash, grant_id, grant_version, now_ms + ttl_ms, request_json, now_ms),
+            )
+            row = self.db.execute(
+                "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+        return self._approval_record(row)
+
+    def _approval_record(self, row: sqlite3.Row) -> ApprovalRecord:
+        return ApprovalRecord(
+            approval_id=row["approval_id"],
+            request_hash=row["request_hash"],
+            grant_id=row["grant_id"],
+            grant_version=row["grant_version"],
+            state=row["state"],
+            expires_at_ms=row["expires_at_ms"],
+            resolved_by=row["resolved_by"],
+            resolved_at_ms=row["resolved_at_ms"],
+            created_at_ms=row["created_at_ms"],
+        )
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        row = self.db.execute(
+            "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)
+        ).fetchone()
+        return None if row is None else self._approval_record(row)
+
+    def list_approvals(self, *, state: str | None = None) -> list[ApprovalRecord]:
+        sql = "SELECT * FROM approvals"
+        params: tuple[Any, ...] = ()
+        if state is not None:
+            sql += " WHERE state=?"
+            params = (state,)
+        rows = self.db.execute(sql + " ORDER BY created_at_ms, approval_id", params).fetchall()
+        return [self._approval_record(row) for row in rows]
+
+    def resolve_approval(
+        self, approval_id: str, *, approve: bool, actor: str, now_ms: int
+    ) -> ApprovalRecord:
+        """Resolve a pending approval. Only the authenticated control
+        plane reaches this; ``actor`` is the authenticated principal and
+        is recorded — model/hook/Skill callers have no such principal."""
+        if not isinstance(actor, str) or not actor.strip():
+            raise PASError(
+                ErrorCode.AUTH_REQUIRED,
+                "approval resolution requires an authenticated actor",
+                scope="approvals",
+            )
+        actor = actor.strip()[:128]
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown approval {approval_id!r}", scope="approvals")
+            if row["state"] == "pending" and row["expires_at_ms"] <= now_ms:
+                # Expire FIRST in its own committed transaction, then fail:
+                # raising inside the same transaction would roll the
+                # expiry marker back.
+                pass
+            elif row["state"] != "pending":
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"approval already {row['state']}; resolution is a one-time decision",
+                    scope="approvals",
+                )
+        if row["state"] == "pending" and row["expires_at_ms"] <= now_ms:
+            with self.transaction():
+                self.db.execute(
+                    "UPDATE approvals SET state='expired' WHERE approval_id=? AND state='pending'",
+                    (approval_id,),
+                )
+            raise PASError(ErrorCode.CONFLICT, "approval expired before resolution", scope="approvals")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+            if row["state"] != "pending":
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"approval already {row['state']}; resolution is a one-time decision",
+                    scope="approvals",
+                )
+            new_state = "approved" if approve else "denied"
+            self.db.execute(
+                "UPDATE approvals SET state=?, resolved_by=?, resolved_at_ms=? WHERE approval_id=?",
+                (new_state, actor, now_ms, approval_id),
+            )
+            if not approve:
+                self.db.execute(
+                    "UPDATE actions SET state='cancelled' WHERE approval_id=? AND state='planned'",
+                    (approval_id,),
+                )
+            self._refresh_run_delivery_state_tx(row["approval_id"], now_ms=now_ms)
+            final = self.db.execute(
+                "SELECT * FROM approvals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+        return self._approval_record(final)
+
+    def _refresh_run_delivery_state_tx(self, approval_id: str, *, now_ms: int) -> None:
+        """Inside the caller's transaction: settle a run that was waiting
+        for approvals. Approvals still pending keep it waiting; otherwise
+        queued messages make it actions_queued, else completed."""
+        run_row = self.db.execute(
+            """SELECT ac.run_id AS run_id FROM actions ac
+               WHERE ac.approval_id=? AND ac.run_id IS NOT NULL LIMIT 1""",
+            (approval_id,),
+        ).fetchone()
+        if run_row is None:
+            return
+        run_id = run_row["run_id"]
+        pending = self.db.execute(
+            """SELECT 1 FROM approvals a JOIN actions ac ON a.approval_id=ac.approval_id
+               WHERE ac.run_id=? AND a.state='pending' LIMIT 1""",
+            (run_id,),
+        ).fetchone()
+        if pending is not None:
+            final_state = "waiting_for_approval"
+        else:
+            queued = self.db.execute(
+                """SELECT 1 FROM outbox o JOIN actions ac ON o.action_id=ac.action_id
+                   WHERE ac.run_id=? AND o.state IN ('pending','deferred','sending') LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            final_state = "actions_queued" if queued is not None else "completed"
+        self.db.execute(
+            "UPDATE runs SET state=?, updated_at_ms=? WHERE run_id=? AND state='waiting_for_approval'",
+            (final_state, now_ms, run_id),
+        )
+
+    # -- actions + outbox queueing (§13.2 决策完成事务) ------------------ #
+
+    def record_policy_verdicts(
+        self, run_id: str, *, verdicts: dict[str, dict[str, Any]], now_ms: int
+    ) -> None:
+        """§4.3 phase A: proposed → policy_evaluated. ``verdicts`` maps
+        proposal_id → policy verdict JSON. One transaction guarded on the
+        run state; concurrent evaluators serialize on the write lock and
+        the loser is rejected by the state guard."""
+        if not verdicts:
+            raise PASError(ErrorCode.INVALID_CONFIG, "verdicts must not be empty", scope="policy")
+        with self.transaction():
+            row = self.db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown run {run_id!r}", scope="policy")
+            if row["state"] != "proposed":
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"run state is {row['state']!r}, policy evaluation needs 'proposed'",
+                    scope="policy",
+                )
+            counts: dict[str, int] = {}
+            for proposal_id, verdict in verdicts.items():
+                outcome = verdict.get("outcome")
+                counts[outcome] = counts.get(outcome, 0) + 1
+                cursor = self.db.execute(
+                    "UPDATE run_proposals SET policy_json=? WHERE proposal_id=? AND run_id=?",
+                    (canonical_json(verdict), proposal_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise PASError(
+                        ErrorCode.INTERNAL_ERROR,
+                        f"proposal {proposal_id!r} missing for run {run_id!r}",
+                        scope="policy",
+                    )
+            cursor = self.db.execute(
+                "UPDATE runs SET state='policy_evaluated', updated_at_ms=? WHERE run_id=? AND state='proposed'",
+                (now_ms, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise PASError(ErrorCode.CONFLICT, "run state moved during policy evaluation", scope="policy")
+            summary = " ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+            self._append_run_event_row(run_id, "policy_evaluated", summary[:500], None, now_ms)
+
+    def record_run_note(
+        self, run_id: str, *, kind: str, summary: str, now_ms: int
+    ) -> int:
+        """Post-decision run event without a lease (local records, policy
+        notes). The run is finalized; the guard is its terminal state."""
+        if not self._RUN_EVENT_KIND_RE.fullmatch(kind or ""):
+            raise PASError(ErrorCode.INVALID_CONFIG, "run event kind must match [a-z0-9_.]{1,64}", scope="runs")
+        if not isinstance(summary, str) or len(summary) > 500:
+            raise PASError(ErrorCode.INVALID_CONFIG, "summary must be at most 500 chars", scope="runs")
+        with self.transaction():
+            row = self.db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown run {run_id!r}", scope="runs")
+            if row["state"] not in (
+                "proposed", "policy_evaluated", "waiting_for_approval", "actions_queued", "completed",
+            ):
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"run state {row['state']!r} does not accept notes",
+                    scope="runs",
+                )
+            return self._append_run_event_row(run_id, kind, summary, None, now_ms)
+
+    def has_business_key(self, business_key: str) -> bool:
+        """Sent-ledger lookup (§10.1 two-layer dedup, business layer)."""
+        row = self.db.execute(
+            "SELECT 1 FROM actions WHERE business_key=? LIMIT 1", (business_key,)
+        ).fetchone()
+        return row is not None
+
+    def queue_run_actions(
+        self, run_id: str, *, entries: list[dict[str, Any]], now_ms: int
+    ) -> dict[str, int]:
+        """§4.3 phase B: policy_evaluated → waiting_for_approval |
+        actions_queued | completed. Creates pending approvals, action
+        rows and outbox messages in ONE transaction (§13.2: 校验状态 +
+        建 actions/outbox + 更新 run state). Business-key duplicates are
+        skipped, never double-queued. An empty entry list settles the run
+        as completed (everything suppressed locally)."""
+        counts = {"queued": 0, "approval_pending": 0, "duplicates": 0}
+        if not entries:
+            with self.transaction():
+                row = self.db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                if row is None:
+                    raise PASError(ErrorCode.INVALID_CONFIG, f"unknown run {run_id!r}", scope="policy")
+                if row["state"] == "completed":
+                    return counts
+                if row["state"] != "policy_evaluated":
+                    raise PASError(
+                        ErrorCode.CONFLICT,
+                        f"run state is {row['state']!r}, queueing needs 'policy_evaluated'",
+                        scope="policy",
+                    )
+                self.db.execute(
+                    "UPDATE runs SET state='completed', updated_at_ms=? WHERE run_id=?",
+                    (now_ms, run_id),
+                )
+                self._append_run_event_row(run_id, "actions_queued", "nothing to queue", None, now_ms)
+            return counts
+        with self.transaction():
+            row = self.db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown run {run_id!r}", scope="policy")
+            if row["state"] != "policy_evaluated":
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"run state is {row['state']!r}, queueing needs 'policy_evaluated'",
+                    scope="policy",
+                )
+            for entry in entries:
+                grant_row = self.db.execute(
+                    "SELECT version FROM grants WHERE grant_id=?", (entry["grant_id"],)
+                ).fetchone()
+                if grant_row is None:
+                    raise PASError(
+                        ErrorCode.INTERNAL_ERROR,
+                        f"grant {entry['grant_id']!r} vanished between evaluation and queueing",
+                        scope="policy",
+                    )
+                grant_version = grant_row["version"]
+                approval_id: str | None = None
+                # The binding hash is computed over the stored request
+                # JSON itself — the same value the action insert binds
+                # below, so approval and action can never diverge (§9.2).
+                request_json = canonical_json(entry["request"])
+                request_hash = _sha256_text(request_json)
+                if entry.get("approval_request") is not None:
+                    approval_id = f"ap{content_hash({'h': request_hash, 'g': entry['grant_id'], 'v': grant_version})[:28]}"
+                    self.db.execute(
+                        """INSERT INTO approvals(approval_id, request_hash, grant_id, grant_version,
+                                                 state, expires_at_ms, request_json, created_at_ms)
+                           VALUES (?,?,?,?,'pending',?,?,?)
+                           ON CONFLICT(approval_id) DO NOTHING""",
+                        (
+                            approval_id,
+                            request_hash,
+                            entry["grant_id"],
+                            grant_version,
+                            entry["approval_expires_at_ms"],
+                            request_json,
+                            now_ms,
+                        ),
+                    )
+                if approval_id is not None:
+                    action_state = "planned"
+                else:
+                    action_state = "queued"
+                action_id = f"act{content_hash({'b': entry['business_key'], 'r': run_id, 'p': entry['proposal_id']})[:28]}"
+                inserted = self.db.execute(
+                    """INSERT INTO actions(action_id, run_id, business_key, kind, request_json,
+                                           request_hash, grant_id, grant_version, approval_id,
+                                           policy_version, state, expires_at_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(business_key) DO NOTHING""",
+                    (
+                        action_id,
+                        run_id,
+                        entry["business_key"],
+                        entry["kind"],
+                        request_json,
+                        request_hash,
+                        entry["grant_id"],
+                        grant_version,
+                        approval_id,
+                        entry["policy_version"],
+                        action_state,
+                        entry["expires_at_ms"],
+                    ),
+                )
+                if inserted.rowcount != 1:
+                    counts["duplicates"] += 1
+                    continue
+                if action_state == "queued":
+                    self._insert_outbox_tx(
+                        action_id=action_id,
+                        business_key=entry["business_key"],
+                        destination_ref=entry["destination_ref"],
+                        payload=entry["payload"],
+                        not_before_ms=entry["not_before_ms"],
+                        expires_at_ms=entry["expires_at_ms"],
+                        now_ms=now_ms,
+                        reason=entry.get("reason"),
+                    )
+                    counts["queued"] += 1
+                else:
+                    counts["approval_pending"] += 1
+            if counts["approval_pending"]:
+                final_state = "waiting_for_approval"
+            elif counts["queued"]:
+                final_state = "actions_queued"
+            else:
+                final_state = "completed"
+            cursor = self.db.execute(
+                "UPDATE runs SET state=?, updated_at_ms=? WHERE run_id=? AND state='policy_evaluated'",
+                (final_state, now_ms, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise PASError(ErrorCode.CONFLICT, "run state moved during queueing", scope="policy")
+            summary = " ".join(f"{key}={value}" for key, value in sorted(counts.items()) if value)
+            self._append_run_event_row(run_id, "actions_queued", summary[:500], None, now_ms)
+        return counts
+
+    def queue_approved_actions(
+        self, items: list[dict[str, Any]], *, now_ms: int
+    ) -> int:
+        """Queue outbox messages for approved actions (approval resolution
+        → dispatch). Each item: action_id, destination_ref, payload,
+        not_before_ms, expires_at_ms, business_key. Only actions still
+        'planned' with an 'approved' approval are queued."""
+        queued = 0
+        with self.transaction():
+            for item in items:
+                action = self.db.execute(
+                    """SELECT ac.action_id, ac.business_key, ac.request_hash, a.state AS approval_state,
+                              a.request_hash AS approval_request_hash, ac.grant_id,
+                              g.revoked_at_ms, g.expires_at_ms AS grant_expires_ms
+                       FROM actions ac JOIN approvals a ON a.approval_id=ac.approval_id
+                       JOIN grants g ON g.grant_id=ac.grant_id
+                       WHERE ac.action_id=?""",
+                    (item["action_id"],),
+                ).fetchone()
+                if action is None:
+                    raise PASError(
+                        ErrorCode.INVALID_CONFIG, f"unknown action {item['action_id']!r}", scope="policy"
+                    )
+                if action["approval_state"] != "approved":
+                    continue
+                if action["request_hash"] != action["approval_request_hash"]:
+                    # Tampered or mismatched binding (§9.2): refuse, never execute.
+                    self.db.execute(
+                        "UPDATE actions SET state='failed' WHERE action_id=? AND state='planned'",
+                        (item["action_id"],),
+                    )
+                    continue
+                if action["revoked_at_ms"] is not None or (
+                    action["grant_expires_ms"] is not None and action["grant_expires_ms"] <= now_ms
+                ):
+                    self.db.execute(
+                        "UPDATE actions SET state='cancelled' WHERE action_id=? AND state='planned'",
+                        (item["action_id"],),
+                    )
+                    continue
+                cursor = self.db.execute(
+                    "UPDATE actions SET state='queued' WHERE action_id=? AND state='planned'",
+                    (item["action_id"],),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                self._insert_outbox_tx(
+                    action_id=action["action_id"],
+                    business_key=action["business_key"],
+                    destination_ref=item["destination_ref"],
+                    payload=item["payload"],
+                    not_before_ms=item["not_before_ms"],
+                    expires_at_ms=item["expires_at_ms"],
+                    now_ms=now_ms,
+                )
+                queued += 1
+        return queued
+
+    def _insert_outbox_tx(
+        self,
+        *,
+        action_id: str,
+        business_key: str,
+        destination_ref: str,
+        payload: dict[str, Any],
+        not_before_ms: int,
+        expires_at_ms: int,
+        now_ms: int,
+        reason: str | None = None,
+    ) -> str:
+        """Inside the caller's transaction: one outbox message per action.
+        delivery_key = business key ⇒ the UNIQUE index is the second
+        dedup layer behind actions.business_key."""
+        payload_json = canonical_json(payload)
+        if len(payload_json.encode("utf-8")) > self._PAYLOAD_MAX_BYTES:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"outbox payload exceeds {self._PAYLOAD_MAX_BYTES} bytes",
+                scope="outbox",
+            )
+        payload_hash = _sha256_text(payload_json)
+        blob_hash = self._put_blob(payload_json, now_ms=now_ms)
+        message_id = f"msg{content_hash({'d': business_key})[:28]}"
+        self.db.execute(
+            """INSERT INTO outbox(message_id, action_id, delivery_key, destination_ref,
+                                  payload_ref, payload_json, state, not_before_ms, expires_at_ms,
+                                  provider_key, reason, created_at_ms)
+               VALUES (?,?,?,?,?,?,'pending',?,?,?,?,?)
+               ON CONFLICT(delivery_key) DO NOTHING""",
+            (
+                message_id,
+                action_id,
+                business_key,
+                destination_ref,
+                f"blob:{blob_hash}",
+                payload_json,
+                not_before_ms,
+                expires_at_ms,
+                f"pas-{action_id}",
+                reason,
+                now_ms,
+            ),
+        )
+        return message_id
+
+    def get_action(self, action_id: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            """SELECT action_id, run_id, business_key, kind, request_json, request_hash,
+                      grant_id, grant_version, approval_id, policy_version, state, expires_at_ms
+               FROM actions WHERE action_id=?""",
+            (action_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["request"] = canonical_loads(row["request_json"])
+        return record
+
+    def list_actions(
+        self,
+        *,
+        state: str | None = None,
+        approval_state: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sql = """SELECT ac.action_id, ac.run_id, ac.business_key, ac.kind, ac.request_json,
+                        ac.request_hash, ac.grant_id, ac.grant_version, ac.approval_id,
+                        ac.policy_version, ac.state, ac.expires_at_ms, a.state AS approval_state
+                 FROM actions ac LEFT JOIN approvals a ON a.approval_id=ac.approval_id"""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if state is not None:
+            conditions.append("ac.state=?")
+            params.append(state)
+        if approval_state is not None:
+            conditions.append("a.state=?")
+            params.append(approval_state)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        rows = self.db.execute(sql + " ORDER BY ac.rowid LIMIT ?", (*params, int(limit))).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record["request"] = canonical_loads(row["request_json"])
+            record.pop("request_json")
+            out.append(record)
+        return out
+
+    # -- outbox dispatch (SEND-01) -------------------------------------- #
+
+    def claim_outbox_message(self, *, now_ms: int, ttl_ms: int) -> OutboxLease | None:
+        """Claim one due message: fence+1 and state='sending' in one
+        transaction, with the grant re-check INSIDE the transaction so a
+        revocation that committed earlier is seen here (§10.4 投递前复验)."""
+        if ttl_ms <= 0:
+            raise PASError(ErrorCode.INVALID_CONFIG, "lease TTL must be positive", scope="outbox")
+        with self.transaction():
+            rows = self.db.execute(
+                """SELECT m.message_id, m.action_id, m.delivery_key, m.destination_ref,
+                          m.payload_json, m.provider_key, m.fence, a.kind, a.grant_id,
+                          c.kind AS channel_kind
+                   FROM outbox m
+                   JOIN actions a ON a.action_id=m.action_id
+                   LEFT JOIN owner_channels c ON c.channel_ref=m.destination_ref
+                   WHERE m.state='pending' AND m.not_before_ms<=? AND m.expires_at_ms>?
+                   ORDER BY m.not_before_ms, m.rowid LIMIT 16""",
+                (now_ms, now_ms),
+            ).fetchall()
+            for row in rows:
+                grant = self.db.execute(
+                    "SELECT revoked_at_ms, expires_at_ms FROM grants WHERE grant_id=?",
+                    (row["grant_id"],),
+                ).fetchone()
+                if grant is None or grant["revoked_at_ms"] is not None or (
+                    grant["expires_at_ms"] is not None and grant["expires_at_ms"] <= now_ms
+                ):
+                    self.db.execute(
+                        """UPDATE outbox SET state='suppressed', reason='grant_revoked', lease_until_ms=0
+                           WHERE message_id=? AND state='pending'""",
+                        (row["message_id"],),
+                    )
+                    continue
+                fence = row["fence"] + 1
+                cursor = self.db.execute(
+                    """UPDATE outbox SET state='sending', fence=?, lease_until_ms=?
+                       WHERE message_id=? AND state='pending'""",
+                    (fence, now_ms + ttl_ms, row["message_id"]),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                payload = canonical_loads(row["payload_json"]) if row["payload_json"] else {}
+                return OutboxLease(
+                    message_id=row["message_id"],
+                    action_id=row["action_id"],
+                    fence=fence,
+                    lease_until_ms=now_ms + ttl_ms,
+                    delivery_key=row["delivery_key"],
+                    destination_ref=row["destination_ref"],
+                    channel_kind=row["channel_kind"] or "unknown",
+                    payload=payload,
+                    provider_key=row["provider_key"] or f"pas-{row['action_id']}",
+                )
+        return None
+
+    def finish_outbox_attempt(
+        self,
+        lease: OutboxLease,
+        *,
+        outcome: str,
+        started_at_ms: int,
+        now_ms: int,
+        receipt: dict[str, Any] | None = None,
+        error_class: str | None = None,
+        retry_not_before_ms: int | None = None,
+        max_attempts: int = 5,
+        inbox_message: dict[str, Any] | None = None,
+    ) -> str:
+        """Journal one delivery attempt and conditionally transition the
+        message (§10.2). The attempt row is written even when the message
+        moved on mid-flight (revoked/superseded): the ledger keeps what
+        actually happened. Returns the message's resulting state, or
+        'aborted' when the fence no longer holds."""
+        if outcome not in (
+            "provider_accepted",
+            "stored_in_inbox",
+            "failed_retryable",
+            "failed_terminal",
+            "delivery_unknown",
+            "suppressed",
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, f"outcome {outcome!r} invalid", scope="outbox")
+        receipt_ref = canonical_json(receipt) if receipt else None
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT state, fence, attempts, action_id FROM outbox WHERE message_id=?",
+                (lease.message_id,),
+            ).fetchone()
+            if row is None:
+                raise PASError(
+                    ErrorCode.INTERNAL_ERROR, f"outbox message {lease.message_id!r} missing", scope="outbox"
+                )
+            attempt_id = f"at{content_hash({'m': lease.message_id, 'f': lease.fence})[:28]}"
+            self.db.execute(
+                """INSERT INTO delivery_attempts(attempt_id, message_id, fence, provider_key,
+                                                state, started_at_ms, completed_at_ms, receipt_ref, error_class)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(attempt_id) DO NOTHING""",
+                (
+                    attempt_id,
+                    lease.message_id,
+                    lease.fence,
+                    lease.provider_key,
+                    outcome,
+                    started_at_ms,
+                    now_ms,
+                    receipt_ref,
+                    error_class,
+                ),
+            )
+            if not (row["state"] == "sending" and row["fence"] == lease.fence):
+                return "aborted"
+            if outcome == "failed_retryable":
+                attempts = row["attempts"] + 1
+                if attempts >= max_attempts:
+                    self.db.execute(
+                        """UPDATE outbox SET state='failed_terminal', attempts=?, lease_until_ms=0,
+                              reason=?, receipt_ref=? WHERE message_id=?""",
+                        (attempts, error_class or "retry_budget_exhausted", receipt_ref, lease.message_id),
+                    )
+                    return "failed_terminal"
+                not_before = retry_not_before_ms if retry_not_before_ms is not None else now_ms
+                self.db.execute(
+                    """UPDATE outbox SET state='pending', attempts=?, not_before_ms=?, lease_until_ms=0,
+                          reason=?, receipt_ref=? WHERE message_id=?""",
+                    (attempts, not_before, error_class, receipt_ref, lease.message_id),
+                )
+                return "pending"
+            if outcome == "delivery_unknown":
+                self.db.execute(
+                    """UPDATE outbox SET state='delivery_unknown', lease_until_ms=0,
+                          reason='ack_missing', receipt_ref=? WHERE message_id=?""",
+                    (receipt_ref, lease.message_id),
+                )
+                return "delivery_unknown"
+            if outcome == "suppressed":
+                self.db.execute(
+                    """UPDATE outbox SET state='suppressed', lease_until_ms=0,
+                          reason=? WHERE message_id=?""",
+                    (error_class or "policy_suppressed", lease.message_id),
+                )
+                return "suppressed"
+            if outcome == "stored_in_inbox":
+                if inbox_message is not None:
+                    action_row = self.db.execute(
+                        "SELECT run_id, kind, request_json FROM actions WHERE action_id=?",
+                        (row["action_id"],),
+                    ).fetchone()
+                    request = canonical_loads(action_row["request_json"]) if action_row else {}
+                    self.db.execute(
+                        """INSERT INTO inbox(inbox_id, message_id, title, body, fact_id, revision,
+                                             run_id, delivered_at_ms)
+                           VALUES (?,?,?,?,?,?,?,?)
+                           ON CONFLICT(message_id) DO NOTHING""",
+                        (
+                            f"inb{content_hash({'m': lease.message_id})[:28]}",
+                            lease.message_id,
+                            (inbox_message.get("title") or request.get("title") or "notification")[:200],
+                            inbox_message.get("body"),
+                            request.get("fact_id"),
+                            request.get("revision"),
+                            action_row["run_id"] if action_row else None,
+                            now_ms,
+                        ),
+                    )
+                self.db.execute(
+                    "UPDATE outbox SET state='stored_in_inbox', lease_until_ms=0, receipt_ref=? WHERE message_id=?",
+                    (receipt_ref, lease.message_id),
+                )
+                return "stored_in_inbox"
+            self.db.execute(
+                "UPDATE outbox SET state=?, lease_until_ms=0, receipt_ref=? WHERE message_id=?",
+                (outcome, receipt_ref, lease.message_id),
+            )
+            return outcome
+
+    def reconcile_outbox_message(
+        self,
+        message_id: str,
+        *,
+        delivered: bool | None,
+        receipt: dict[str, Any] | None = None,
+        now_ms: int,
+    ) -> str:
+        """Apply an authoritative (or absent) reconciliation result to one
+        message (§10.2). ``delivered=None`` means the provider could not
+        answer authoritatively — the message stays delivery_unknown."""
+        receipt_ref = canonical_json(receipt) if receipt else None
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT state, attempts FROM outbox WHERE message_id=?", (message_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown message {message_id!r}", scope="outbox")
+            state = row["state"]
+            if state == "delivery_unknown":
+                if delivered is True:
+                    self.db.execute(
+                        "UPDATE outbox SET state='reconciled_delivered', receipt_ref=?, reason='reconciled' WHERE message_id=?",
+                        (receipt_ref, message_id),
+                    )
+                    return "reconciled_delivered"
+                if delivered is False:
+                    # Authoritative not-delivered: retry is now safe, same
+                    # provider key, fence-free requeue (§10.2).
+                    self.db.execute(
+                        "UPDATE outbox SET state='pending', not_before_ms=?, reason='reconciled_not_delivered' WHERE message_id=?",
+                        (now_ms, message_id),
+                    )
+                    return "pending"
+                return "delivery_unknown"
+            if state in self._OUTBOX_DELIVERED_STATES:
+                if receipt_ref is not None:
+                    self.db.execute(
+                        "UPDATE outbox SET receipt_ref=? WHERE message_id=?", (receipt_ref, message_id)
+                    )
+                return "already_delivered"
+            if state in ("suppressed", "expired", "failed_terminal"):
+                attempted = self.db.execute(
+                    "SELECT 1 FROM delivery_attempts WHERE message_id=? LIMIT 1",
+                    (message_id,),
+                ).fetchone() is not None
+                if delivered is True and attempted:
+                    # A late real receipt (§10.3): our earlier belief was
+                    # wrong — reconcile, never discard the fact.
+                    self.db.execute(
+                        "UPDATE outbox SET state='reconciled_delivered', receipt_ref=?, reason='late_receipt' WHERE message_id=?",
+                        (receipt_ref, message_id),
+                    )
+                    return "reconciled_delivered"
+                return state
+            # pending / deferred / sending: a real receipt beats the
+            # in-flight ambiguity — but only if a send was ever attempted
+            # (journaled). A receipt for a never-sent message is
+            # unsolicited and changes nothing.
+            if delivered is True and (
+                state == "sending"
+                or self.db.execute(
+                    "SELECT 1 FROM delivery_attempts WHERE message_id=? LIMIT 1",
+                    (message_id,),
+                ).fetchone()
+                is not None
+            ):
+                self.db.execute(
+                    "UPDATE outbox SET state='provider_accepted', receipt_ref=?, lease_until_ms=0 WHERE message_id=?",
+                    (receipt_ref, message_id),
+                )
+                return "provider_accepted"
+            return state
+
+    def get_outbox_message(self, message_id: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            """SELECT message_id, action_id, delivery_key, destination_ref, payload_ref, payload_json,
+                      state, not_before_ms, expires_at_ms, fence, lease_until_ms, receipt_ref,
+                      provider_key, attempts, reason, created_at_ms
+               FROM outbox WHERE message_id=?""",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._outbox_record(row)
+
+    def list_outbox(self, *, state: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        sql = """SELECT message_id, action_id, delivery_key, destination_ref, payload_ref, payload_json,
+                        state, not_before_ms, expires_at_ms, fence, lease_until_ms, receipt_ref,
+                        provider_key, attempts, reason, created_at_ms
+                 FROM outbox"""
+        params: tuple[Any, ...] = ()
+        if state is not None:
+            sql += " WHERE state=?"
+            params = (state,)
+        rows = self.db.execute(sql + " ORDER BY created_at_ms, rowid LIMIT ?", (*params, int(limit))).fetchall()
+        return [self._outbox_record(row) for row in rows]
+
+    @staticmethod
+    def _outbox_record(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        record["payload"] = canonical_loads(row["payload_json"]) if row["payload_json"] else None
+        record.pop("payload_json")
+        return record
+
+    def promote_deferred(self, *, now_ms: int) -> int:
+        """deferred → pending once the deferral (quiet hours) has passed."""
+        with self.transaction():
+            cursor = self.db.execute(
+                "UPDATE outbox SET state='pending' WHERE state='deferred' AND not_before_ms<=?",
+                (now_ms,),
+            )
+        return cursor.rowcount
+
+    def expire_due_messages(self, *, now_ms: int) -> int:
+        """pending/deferred → expired once past their validity (§10.2).
+        delivery_unknown is deliberately NOT expired here: an unknown
+        outcome stays reconcileable, not silently written off."""
+        with self.transaction():
+            cursor = self.db.execute(
+                """UPDATE outbox SET state='expired', reason='validity_passed', lease_until_ms=0
+                   WHERE state IN ('pending','deferred') AND expires_at_ms<=?""",
+                (now_ms,),
+            )
+        return cursor.rowcount
+
+    def delivery_attempts_for(self, message_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """SELECT attempt_id, message_id, fence, provider_key, state, started_at_ms,
+                      completed_at_ms, receipt_ref, error_class
+               FROM delivery_attempts WHERE message_id=? ORDER BY started_at_ms, attempt_id""",
+            (message_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # -- owner channels (§9.1 trusted binding) --------------------------- #
+
+    def register_owner_channel(
+        self,
+        *,
+        channel_ref: str,
+        kind: str,
+        endpoint: dict[str, Any],
+        push_summary_only: bool = True,
+        enabled: bool = True,
+        now_ms: int,
+    ) -> None:
+        """Trusted-setup binding of a personal channel. Same-ref
+        re-registration with different content is a conflict (§13.2)."""
+        if not isinstance(channel_ref, str) or not 1 <= len(channel_ref) <= 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "channel_ref must be 1..128 chars", scope="channels")
+        if kind not in ("local_inbox", "webhook"):
+            raise PASError(ErrorCode.INVALID_CONFIG, f"channel kind {kind!r} must be local_inbox|webhook", scope="channels")
+        if not isinstance(endpoint, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "endpoint must be an object", scope="channels")
+        with self.transaction():
+            existing = self.db.execute(
+                "SELECT kind, endpoint_json, push_summary_only, enabled FROM owner_channels WHERE channel_ref=?",
+                (channel_ref,),
+            ).fetchone()
+            if existing is not None:
+                same = (
+                    existing["kind"] == kind
+                    and existing["endpoint_json"] == canonical_json(endpoint)
+                    and bool(existing["push_summary_only"]) == push_summary_only
+                    and bool(existing["enabled"]) == enabled
+                )
+                if not same:
+                    raise PASError(
+                        ErrorCode.CONFLICT,
+                        f"channel {channel_ref!r} already registered with different content",
+                        scope="channels",
+                    )
+                return
+            self.db.execute(
+                """INSERT INTO owner_channels(channel_ref, kind, endpoint_json, push_summary_only,
+                                              enabled, created_at_ms)
+                   VALUES (?,?,?,?,?,?)""",
+                (channel_ref, kind, canonical_json(endpoint), int(push_summary_only), int(enabled), now_ms),
+            )
+
+    def get_owner_channel(self, channel_ref: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT channel_ref, kind, endpoint_json, push_summary_only, enabled FROM owner_channels WHERE channel_ref=?",
+            (channel_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["endpoint"] = canonical_loads(row["endpoint_json"])
+        record.pop("endpoint_json")
+        record["push_summary_only"] = bool(record["push_summary_only"])
+        record["enabled"] = bool(record["enabled"])
+        return record
+
+    def list_owner_channels(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT channel_ref, kind, endpoint_json, push_summary_only, enabled FROM owner_channels ORDER BY channel_ref"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record["endpoint"] = canonical_loads(row["endpoint_json"])
+            record.pop("endpoint_json")
+            record["push_summary_only"] = bool(record["push_summary_only"])
+            record["enabled"] = bool(record["enabled"])
+            out.append(record)
+        return out
+
+    # -- topic mutes (§10.1) --------------------------------------------- #
+
+    def mute_topic(
+        self, topic: str, *, reason: str | None = None, until_ms: int | None = None, now_ms: int
+    ) -> None:
+        if not isinstance(topic, str) or not 1 <= len(topic) <= 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "topic must be 1..128 chars", scope="feedback")
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO topic_mutes(topic, muted_until_ms, reason, created_at_ms)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(topic) DO UPDATE SET muted_until_ms=excluded.muted_until_ms,
+                                                   reason=excluded.reason""",
+                (topic, until_ms, reason, now_ms),
+            )
+
+    def unmute_topic(self, topic: str, *, now_ms: int) -> bool:
+        with self.transaction():
+            cursor = self.db.execute(
+                "DELETE FROM topic_mutes WHERE topic=?", (topic,)
+            )
+        return cursor.rowcount > 0
+
+    def topic_is_muted(self, topic: str, *, now_ms: int) -> bool:
+        if not isinstance(topic, str) or not topic:
+            return False
+        row = self.db.execute(
+            "SELECT muted_until_ms FROM topic_mutes WHERE topic=?", (topic,)
+        ).fetchone()
+        if row is None:
+            return False
+        return row["muted_until_ms"] is None or row["muted_until_ms"] > now_ms
+
+    def list_topic_mutes(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT topic, muted_until_ms, reason, created_at_ms FROM topic_mutes ORDER BY topic"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # -- feedback (§14.2 notifications.feedback) -------------------------- #
+
+    def record_feedback(
+        self,
+        *,
+        kind: str,
+        scope: dict[str, Any],
+        actor: str,
+        message_id: str | None = None,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """Record authenticated user feedback. mute_topic/unmute_topic
+        update the mute table in the SAME transaction as the audit row."""
+        if kind not in self._FEEDBACK_KINDS:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, f"feedback kind {kind!r} not in {sorted(self._FEEDBACK_KINDS)}", scope="feedback"
+            )
+        if not isinstance(scope, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "scope must be an object", scope="feedback")
+        scope_json = canonical_json(scope)
+        if len(scope_json.encode("utf-8")) > 4096:
+            raise PASError(ErrorCode.INVALID_CONFIG, "feedback scope exceeds 4096 bytes", scope="feedback")
+        if not isinstance(actor, str) or not actor.strip():
+            raise PASError(ErrorCode.AUTH_REQUIRED, "feedback requires an authenticated actor", scope="feedback")
+        actor = actor.strip()[:128]
+        with self.transaction():
+            if message_id is not None:
+                exists = self.db.execute(
+                    "SELECT 1 FROM outbox WHERE message_id=?", (message_id,)
+                ).fetchone()
+                if exists is None:
+                    raise PASError(ErrorCode.INVALID_CONFIG, f"unknown message {message_id!r}", scope="feedback")
+            if kind == "mute_topic":
+                topic = scope.get("topic")
+                if not isinstance(topic, str) or not 1 <= len(topic) <= 128:
+                    raise PASError(ErrorCode.INVALID_CONFIG, "mute_topic scope needs a topic", scope="feedback")
+                self.db.execute(
+                    """INSERT INTO topic_mutes(topic, muted_until_ms, reason, created_at_ms)
+                       VALUES (?,?,'feedback',?)
+                       ON CONFLICT(topic) DO UPDATE SET muted_until_ms=excluded.muted_until_ms""",
+                    (topic, scope.get("until_ms"), now_ms),
+                )
+            elif kind == "unmute_topic":
+                topic = scope.get("topic")
+                if not isinstance(topic, str) or not topic:
+                    raise PASError(ErrorCode.INVALID_CONFIG, "unmute_topic scope needs a topic", scope="feedback")
+                self.db.execute("DELETE FROM topic_mutes WHERE topic=?", (topic,))
+            feedback_id = f"fb{content_hash({'k': kind, 's': scope, 'a': actor, 'm': message_id, 't': now_ms})[:28]}"
+            self.db.execute(
+                """INSERT INTO feedback(feedback_id, message_id, kind, scope_json, authenticated_actor, created_at_ms)
+                   VALUES (?,?,?,?,?,?)""",
+                (feedback_id, message_id, kind, scope_json, actor, now_ms),
+            )
+        return {
+            "feedback_id": feedback_id,
+            "kind": kind,
+            "scope": scope,
+            "message_id": message_id,
+            "actor": actor,
+            "created_at_ms": now_ms,
+        }
+
+    def fact_handled(self, fact_id: str) -> bool:
+        """True when the user already handled this fact (§10.1 suppression)."""
+        if not isinstance(fact_id, str) or not fact_id:
+            return False
+        row = self.db.execute(
+            """SELECT 1 FROM feedback WHERE kind='handled'
+               AND json_extract(scope_json,'$.fact_id')=? LIMIT 1""",
+            (fact_id,),
+        ).fetchone()
+        return row is not None
+
+    def list_feedback(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """SELECT feedback_id, message_id, kind, scope_json, authenticated_actor, created_at_ms
+               FROM feedback ORDER BY created_at_ms DESC, feedback_id LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record["scope"] = canonical_loads(row["scope_json"])
+            record.pop("scope_json")
+            out.append(record)
+        return out
+
+    # -- local inbox (§10.2 reliable once-inbox) --------------------------- #
+
+    def list_inbox(self, *, unread_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+        sql = """SELECT inbox_id, message_id, title, body, fact_id, revision, run_id,
+                        delivered_at_ms, read_at_ms FROM inbox"""
+        if unread_only:
+            sql += " WHERE read_at_ms IS NULL"
+        rows = self.db.execute(sql + " ORDER BY delivered_at_ms DESC, inbox_id LIMIT ?", (int(limit),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_inbox_read(self, inbox_id: str, *, now_ms: int) -> bool:
+        with self.transaction():
+            cursor = self.db.execute(
+                "UPDATE inbox SET read_at_ms=? WHERE inbox_id=? AND read_at_ms IS NULL",
+                (now_ms, inbox_id),
+            )
+        return cursor.rowcount > 0
+
+    def notifications_today(self, *, day_start_ms: int, now_ms: int) -> int:
+        """Quota input (§10.4 额度): messages queued since local day start,
+        excluding suppressed ones."""
+        row = self.db.execute(
+            """SELECT COUNT(*) FROM outbox
+               WHERE created_at_ms>=? AND created_at_ms<=? AND state!='suppressed'""",
+            (day_start_ms, now_ms),
+        ).fetchone()
+        return int(row[0])
 
     # ------------------------------------------------------------------ #
     # Internals
