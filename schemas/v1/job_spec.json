@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/job_spec.json",
+  "title": "JobSpec",
+  "description": "SPEC §4.1 JobSpec. Per-kind required schedule fields (interval=>anchor+every_seconds; daily/monthly=>local_time+timezone; weekly=>weekdays+local_time+timezone; runonce=>at) are enforced in contracts.validate_schedule, not in this schema. DST/fold policy persists per job revision (SPEC §5.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "job_id", "revision", "owner", "mode", "schedule", "task", "enabled"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "job_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "owner": { "enum": ["pas", "host"] },
+    "mode": { "enum": ["heartbeat", "task"] },
+    "schedule": { "$ref": "#/$defs/schedule" },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instruction"],
+      "properties": {
+        "instruction": { "type": "string", "minLength": 1, "maxLength": 10000 },
+        "goal_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "skill_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 128 }, "maxItems": 64 }
+      }
+    },
+    "grant_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "maxItems": 64
+    },
+    "delivery_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "notification_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "quiet_hours_respected": { "type": "boolean", "default": true },
+        "expire_after_s": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "misfire_policy": { "enum": ["coalesce_latest", "grace_once", "expire"] },
+    "deadline": { "type": "string", "format": "date-time" },
+    "enabled": { "type": "boolean" }
+  },
+  "$defs": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "timezone": {
+      "description": "IANA zone name; never a machine-local inference (SPEC §14.3).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["interval", "daily", "weekly", "monthly", "runonce"] },
+        "anchor": { "type": "string", "format": "date-time" },
+        "every_seconds": { "type": "integer", "minimum": 1, "maximum": 31536000 },
+        "local_time": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+        "timezone": { "$ref": "#/$defs/timezone" },
+        "weekdays": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 7,
+          "items": { "type": "integer", "minimum": 1, "maximum": 7 }
+        },
+        "day_of_month": { "type": "integer", "minimum": 1, "maximum": 31 },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

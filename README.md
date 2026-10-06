@@ -13,11 +13,16 @@
 
 ```text
 SPEC.md / AUDIT_AND_REUSE.md / AGENTS.md / VALIDATION.md
-examples/          参考代码切片与 schema 起点
-tests/             可执行参考测试
-audit/             88 个 Skill 的元数据审计与来源 hash（不含 Skill 正文）
-reuse/             受限的私有提取与测试脚本
-private-vendor/    本地私有素材，不进入 git（见下）
+LICENSE / pyproject.toml
+src/proactive_sdk/  契约与工具库（P0：contracts / pathsafe / schema_validate）
+schemas/v1/         JSON Schema 2020-12 契约（10 个对象）+ 说明
+examples/           参考代码切片与 schema 起点
+tests/              可执行参考测试与 P0 契约测试
+audit/              88 个 Skill 的元数据审计与来源 hash（不含 Skill 正文）
+reuse/              受限的私有提取与测试脚本
+tools/              reproduce_audit.py（审计复现）、license_gate.py（许可门禁）
+docs/               LICENSES.md（许可清单+门禁标记）、PROGRESS.md（阶段进度）
+private-vendor/     本地私有素材，不进入 git（见下）
 ```
 
 `private-vendor/`（git 不跟踪，保留在本地）：

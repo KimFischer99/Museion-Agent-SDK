@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/run_handle.json",
+  "title": "RunHandle",
+  "description": "SPEC §4.1 RunHandle. Declared capabilities are claims, not proof: conformance tests and deployment-side isolation checks remain mandatory (SPEC §4.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "executor_id", "state", "capabilities"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "executor_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "host_run_id": { "type": ["string", "null"], "maxLength": 256 },
+    "state": {
+      "enum": ["accepted", "running", "waiting_for_approval", "completed", "failed", "cancelled"]
+    },
+    "resume_token": { "type": ["string", "null"], "maxLength": 4096 },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "streaming",
+          "cancellation",
+          "resumption",
+          "external_tool_broker",
+          "read_only_enforcement",
+          "usage_reporting"
+        ]
+      },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" }
+  }
+}

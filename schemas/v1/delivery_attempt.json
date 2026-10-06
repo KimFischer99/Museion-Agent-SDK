@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/delivery_attempt.json",
+  "title": "DeliveryAttempt",
+  "description": "SPEC §4.1 DeliveryAttempt with the §10.2 outbox state machine. delivery_unknown is never auto-retried; late receipts are reconciled, not discarded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "message_id", "attempt_id", "fence", "provider_key", "state"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "message_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "attempt_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "fence": { "type": "integer", "minimum": 0 },
+    "provider_key": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "state": {
+      "enum": [
+        "pending",
+        "sending",
+        "provider_accepted",
+        "stored_in_inbox",
+        "failed_retryable",
+        "failed_terminal",
+        "delivery_unknown",
+        "deferred",
+        "suppressed",
+        "expired",
+        "reconciled_delivered"
+      ]
+    },
+    "receipt": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "external_id": { "type": ["string", "null"], "maxLength": 256 },
+        "received_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "last_error_class": { "type": ["string", "null"], "maxLength": 64 },
+    "not_before": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "$defs": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" }
+  }
+}

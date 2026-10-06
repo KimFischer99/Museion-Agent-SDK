@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/run_request.json",
+  "title": "RunRequest",
+  "description": "SPEC §4.1 RunRequest. The fence is monotonic per run and must be re-checked on every commit; an old fence must not be able to submit (SPEC §10.3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "run_id", "attempt", "fence", "context_ref", "budget", "deadline", "policy_version"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "run_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "fence": { "type": "integer", "minimum": 0 },
+    "context_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "skill_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "maxItems": 64
+    },
+    "tool_allowlist": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "maxItems": 256
+    },
+    "budget": { "$ref": "#/$defs/budget" },
+    "deadline": { "type": "string", "format": "date-time" },
+    "policy_version": { "type": "string", "minLength": 1, "maxLength": 64 }
+  },
+  "$defs": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_model_turns", "max_tool_calls", "wall_time_s", "max_proposals"],
+      "properties": {
+        "max_model_turns": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "max_tool_calls": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "wall_time_s": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "max_proposals": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    }
+  }
+}

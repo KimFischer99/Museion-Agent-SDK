@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/wake_event.json",
+  "title": "WakeEvent",
+  "description": "SPEC §4.1 WakeEvent. A wake is not a notification and not a run; it is a deduplicated candidate signal admitted into the EventStore (SPEC §5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "event_id", "origin", "occurrence_id", "observed_at", "expires_at", "cause", "dedupe_key"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "event_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "origin": { "enum": ["scheduler", "hook", "manual", "host_delegate"] },
+    "occurrence_id": { "type": "string", "minLength": 8, "maxLength": 200 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "source_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "maxItems": 128
+    },
+    "cause": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "dedupe_key": { "type": "string", "minLength": 8, "maxLength": 256 },
+    "payload": { "description": "Legacy hook mode keeps arbitrary JSON values (SPEC §6.1); new envelope events should attach typed refs instead.", "type": ["object", "array", "string", "number", "boolean", "null"] }
+  },
+  "$defs": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" }
+  }
+}

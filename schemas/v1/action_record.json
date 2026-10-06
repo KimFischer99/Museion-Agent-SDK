@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/action_record.json",
+  "title": "ActionRecord",
+  "description": "SPEC §4.1 ActionRecord. canonical_arguments_hash is the SHA-256 of the canonical JSON of the frozen action arguments; approvals bind this hash, not a verbal category (SPEC §9.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "action_id", "kind", "canonical_arguments_hash", "state"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "action_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "kind": {
+      "enum": ["notify_self", "draft", "internal_record", "suggest_watch", "request_external_action"]
+    },
+    "canonical_arguments_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "grant_id": { "type": ["string", "null"], "maxLength": 128 },
+    "approval_id": { "type": ["string", "null"], "maxLength": 128 },
+    "policy_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "state": {
+      "enum": ["planned", "approved", "queued", "executed", "failed", "cancelled", "reconciled"]
+    },
+    "fact_id": { "type": ["string", "null"], "maxLength": 256 },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/context_pack.json",
+  "title": "ContextPack",
+  "description": "SPEC §4.1 / §7.1 ContextPack. Immutable snapshot for one run. All ids and timestamps in documents using this schema are fake examples unless issued by a live system.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task", "locale", "timezone", "preferences_ref", "sources", "pending_refs", "sent_fact_refs", "memory_refs", "untrusted_content_policy"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal_id", "scope"],
+      "properties": {
+        "goal_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "locale": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$", "maxLength": 32 },
+    "timezone": { "type": "string", "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$", "minLength": 1, "maxLength": 64 },
+    "preferences_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sources": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/source_snapshot" }
+    },
+    "pending_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 256 }, "maxItems": 256 },
+    "sent_fact_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 256 }, "maxItems": 256 },
+    "memory_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 256 }, "maxItems": 256 },
+    "untrusted_content_policy": { "enum": ["data_only"] }
+  },
+  "$defs": {
+    "source_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "account_ref", "snapshot_ref", "observed_at", "fresh_until", "sensitivity"],
+      "properties": {
+        "source_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "account_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "snapshot_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "fresh_until": { "type": "string", "format": "date-time" },
+        "sensitivity": { "enum": ["public", "private", "sensitive"] }
+      }
+    }
+  }
+}

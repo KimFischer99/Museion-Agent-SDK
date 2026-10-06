@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proactive-agent-sdk.invalid/schemas/v1/error.json",
+  "title": "PASError",
+  "description": "SPEC §4.4 unified error envelope. Carries safe fields only; tokens, mail bodies and raw HTTP bodies must never be placed in safe_message.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "code", "safe_message", "retryable", "correlation_id"],
+  "properties": {
+    "protocol_version": { "$ref": "#/$defs/protocol_version" },
+    "code": {
+      "enum": [
+        "invalid_config",
+        "unsupported_capability",
+        "dependency_missing",
+        "permission_denied",
+        "approval_required",
+        "auth_required",
+        "rate_limited",
+        "budget_exceeded",
+        "deadline_exceeded",
+        "stale_context",
+        "provider_unavailable",
+        "conflict",
+        "effect_unknown",
+        "internal_error"
+      ]
+    },
+    "safe_message": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "retryable": { "type": "boolean" },
+    "retry_after_s": { "type": "integer", "minimum": 0 },
+    "scope": { "enum": ["request", "run", "job", "profile", "provider"] },
+    "correlation_id": { "type": "string", "minLength": 8, "maxLength": 128 }
+  },
+  "$defs": {
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    }
+  }
+}
