@@ -4,8 +4,10 @@ Design-stage package. P0 froze contracts, path safety and schema
 validation; P1 adds the persistence layer (store, migrations, clock,
 schedules, misfire, claim/fencing, jobs API); P2 adds the hook runtime
 (legacy protocol parser, sandbox runner, staging + CAS state machine,
-dry-run). The executor/policy service layers continue with P3–P4.
-Importing this package must never start threads, daemons or I/O.
+dry-run); P3 adds the independent agent loop (typed source/memory ports,
+ContextPack, bounded ToolLoopExecutor, OpenAI-compatible ModelPort,
+L0/L1 coordinator). Policy, grants, outbox and delivery continue with
+P4. Importing this package must never start threads, daemons or I/O.
 """
 
 from __future__ import annotations
@@ -15,19 +17,45 @@ __version__ = "0.1.0.dev0"
 
 from .clock import Clock, FakeClock, SystemClock
 from .contracts import (
+    ActionProposal,
+    ContextPack,
+    ContextSource,
+    Decision,
     ErrorCode,
+    ExecutorCapabilities,
     JobSpec,
+    MemoryEntry,
+    ModelRequest,
+    ModelResponse,
+    ModelToolCall,
     PASError,
     ProfileConfig,
+    RunBudget,
+    RunRequest,
     RuntimeConfig,
+    SourceBatch,
+    SourceItem,
+    SourceRequest,
     assert_single_profile,
     canonical_json,
     content_hash,
     error_for_code,
     require_utc_timestamp,
+    validate_context_pack,
     validate_decision,
     validate_schedule,
 )
+from .context import (
+    ContextPackBuilder,
+    EphemeralMemoryPort,
+    MemoryPort,
+    SnapshotMaterializer,
+    SourceEntry,
+    SourceRegistry,
+    render_context_blocks,
+)
+from .coordinator import CoordinatorConfig, ProactiveCoordinator, RunReport
+from .executor import ExecutorConfig, ExecutorOutcome, RunCancelled, ToolLoopExecutor
 from .hooks import (
     BubblewrapSandbox,
     HookProtocolError,
@@ -44,6 +72,7 @@ from .hooks import (
     parse_hook_result,
     platform_sandbox,
 )
+from .model import OpenAICompatibleModel
 from .pathsafe import (
     PathSafetyError,
     ensure_within,
@@ -59,7 +88,25 @@ from .scheduler import (
     parse_schedule,
     resolve_local_wall,
 )
-from .store import HookClaim, HookCommitResult, HookRecord, JobRecord, RunLease, Store
+from .store import (
+    EventRecord,
+    HookClaim,
+    HookCommitResult,
+    HookRecord,
+    JobRecord,
+    RunLease,
+    SnapshotRecord,
+    SourceStateRecord,
+    Store,
+)
+from .tools import (
+    AuthorizedToolCall,
+    BrokerCallContext,
+    LocalToolBroker,
+    ToolCallAttempt,
+    ToolResult,
+    ToolSpec,
+)
 
 __all__ = [
     "PAS_PROTOCOL_VERSION",
@@ -76,6 +123,7 @@ __all__ = [
     "error_for_code",
     "require_utc_timestamp",
     "validate_decision",
+    "validate_context_pack",
     "validate_schedule",
     "PathSafetyError",
     "ensure_within",
@@ -89,6 +137,9 @@ __all__ = [
     "Store",
     "JobRecord",
     "RunLease",
+    "EventRecord",
+    "SourceStateRecord",
+    "SnapshotRecord",
     # P1 scheduler
     "Schedule",
     "Scheduler",
@@ -115,4 +166,42 @@ __all__ = [
     "HookRecord",
     "HookClaim",
     "HookCommitResult",
+    # P3 contracts (typed records)
+    "ActionProposal",
+    "ContextPack",
+    "ContextSource",
+    "Decision",
+    "ExecutorCapabilities",
+    "MemoryEntry",
+    "ModelRequest",
+    "ModelResponse",
+    "ModelToolCall",
+    "RunBudget",
+    "RunRequest",
+    "SourceBatch",
+    "SourceItem",
+    "SourceRequest",
+    # P3 context
+    "ContextPackBuilder",
+    "EphemeralMemoryPort",
+    "MemoryPort",
+    "SnapshotMaterializer",
+    "SourceEntry",
+    "SourceRegistry",
+    "render_context_blocks",
+    # P3 model / tools / executor / coordinator
+    "OpenAICompatibleModel",
+    "AuthorizedToolCall",
+    "BrokerCallContext",
+    "LocalToolBroker",
+    "ToolCallAttempt",
+    "ToolResult",
+    "ToolSpec",
+    "ExecutorConfig",
+    "ExecutorOutcome",
+    "RunCancelled",
+    "ToolLoopExecutor",
+    "CoordinatorConfig",
+    "ProactiveCoordinator",
+    "RunReport",
 ]

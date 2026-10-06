@@ -6,8 +6,8 @@
 
 | 工具 | 实测版本 |
 |---|---|
-| Python | 3.14.4（P1/P2 复测时；交接时为 3.13.5） |
-| Python 链接的 SQLite | 3.50.4（P1/P2 复测时；交接时为 3.46.1） |
+| Python | 3.14.4（P1–P3 复测时；交接时为 3.13.5） |
+| Python 链接的 SQLite | 3.50.4（P1–P3 复测时；交接时为 3.46.1） |
 | Node.js | 24.14.0（交接时为 22.16.0） |
 | TypeScript compiler | 5.8.3（经 npx 固定版本调用） |
 | 原 helper 依赖 | Bash、jq，环境中可用 |
@@ -162,6 +162,69 @@ P2 未做/边界（如实记录）：hook 常驻轮询 daemon 属 P7，`run_due_
 为 Apple 已弃用接口，若未来失效 runner 会探测失败并 fail-closed（不会静默降级
 为无隔离运行）；沙盒 profile 未做内存/CPU 硬隔离（rlimit 兜底 FSIZE/CPU），
 容器/cgroup 方案按 SPEC 属 P7 运维层。
+
+## 5c. P3 独立 Agent 闭环（新增，2026-10-06）
+
+实际命令（同前两节的全量命令，另加 demo）：
+
+- `python3 -m unittest discover -s tests -v` → **311 项全部通过**（交接 52 +
+  P1 125 + P2 76 + P3 新增 58），参考 demo 输出不变；审计复现 OK；license gate
+  PASS；TypeScript strict + 4 项结构检查照旧通过。
+- `python3 examples/agent_loop_demo.py` → 三个场景断言全过，退出码 0：
+  `no_change`（第二拍 `l0_no_source_change`，该拍 0 次模型调用）、
+  `task`（run=proposed、1 条提案、usage 记账 1 次工具调用、delivered=0）、
+  `malicious`（伪造证据提案被拒，run=failed/invalid_config，权限集合不变、
+  0 条提案落库）。
+
+P3 新增覆盖（对应 SPEC §8 / §15.1 P3 行 / EXEC-01）：
+
+- **executor（23 项）**：Decision 严格解析（重复键/NaN/未知字段/未知 kind/
+  接收者字段拒绝）；silent⇒空提案、propose⇒≥1、notify_self⇒证据+过期时间；
+  伪造证据（不在本 run 证据闭包内）整条 Decision 拒绝；恰好一次有预算的
+  修复后仍失败则 run 失败，不从文本猜动作；工具调用回环（call_id/参数
+  schema 校验、结果以 data-only 消息回传、证据进入闭包）；未注册/不在
+  allowlist/能力缺失/参数非法四类拒绝路径均 tool_denied 记账且 run 继续；
+  预算（max_model_turns、最后一回合被工具占用、max_tool_calls、
+  wall_time_s 单调钟口径）全部生效；run 墙钟 deadline 过期拒绝且零模型
+  调用；cancel event 生效；usage 聚合（measured 求和；任一回合未知→整体
+  unknown 且字段为 None 不写零）；reasoning 链路不进消息、不持久化。
+- **model adapter（9 项）**：OpenAI 兼容适配器对**本地脚本化 HTTP 服务器**
+  （真实 loopback HTTP，非 in-process mock transport）验证请求形状
+  （model/messages/tools、Authorization 头、adapter_namespace 合并）、
+  tool_calls/usage 解析、缺 usage ⇒ unknown 不写零、401/429/500/400 错误
+  映射（Retry-After 解析、响应体与凭据不进错误消息）、非 JSON/坏 tool
+  arguments ⇒ provider_unavailable、连接拒绝映射、reasoning 字段丢弃；
+  FakeModel fixture 的 provider="fake" 标签与无 measured usage 有断言
+  （不冒充真实 provider）。
+- **context（14 项）**：ContextPack `to_dict()` 对照冻结的
+  `schemas/v1/context_pack.json` 通过；data_only 常量不可改；来源过期 +
+  `require_fresh` ⇒ stale_context 阻塞，允许过期时双时间戳随 pack 呈现；
+  证据闭包 = 快照 + 记忆 + 本 run 工具证据；快照内容寻址（同内容同 ref、
+  重观察刷新元数据）；注入文本以数据块框架渲染（框架文本是纵深防御，
+  真正的门禁是 broker/证据闭包，有测试同时覆盖两者）。
+- **coordinator（12 项）**：心跳无变化 ⇒ suppressed + `l0_no_source_change`
+  + 该拍零模型调用 + cursor 已推进；心跳有变化 ⇒ proposed + ContextPack/
+  提案/usage/run_events 单事务落库且 seq 单调；显式任务无视变化照常进
+  L1；任务 + 授权缺失 ⇒ failed/permission_denied（可见失败而非静默）、
+  任务 + 来源全部故障 ⇒ failed/provider_unavailable、心跳 + 未授权 ⇒
+  suppressed `l0_source_unauthorized`；hook wake（无 job）按显式信号运行
+  且 reason 成为任务指令；**恶意来源端到端**：注入文本 + 配合注入的脚本
+  模型（最坏情况）伪造证据 ⇒ 两次修复后 run failed、0 提案落库、能力
+  集合不变、模型请求里注入文本始终以数据框架出现；模型调用未注册工具
+  （send_email）⇒ 拒绝记账、run 继续；真实 lease 过期 + 第二 claimant
+  接管 + 旧 fence 决策提交被拒；coordinator 对崩溃 run 以 attempt+1 重收
+  且不产生重复 run。
+
+P3 未做/边界（如实记录）：**真实模型只做了传输层契约**——
+`OpenAICompatibleModel` 通过本地脚本化 HTTP 服务器验证请求/响应逻辑，
+未对任何在线 provider 的锁定版本做真实联调（该验证属 P5/P7 门禁，此处
+不做兼容声明）；usage 的 token 级预留未实现（仅回合/工具/墙钟/提案四项
+上限，§8.3 记为缺口）；MemoryPort 默认实现为进程内有界条目、**不持久化**
+（§7.3 持久后端后补）；Source 连接器（日历/邮件）为测试 fixture，真实
+连接器随 P4/P6；`snapshot_content` 仅返回 ref，正文 blob store 属 P4；
+profile 级预算与 runs.cancel 控制面 API 未实现（executor 已支持 cancel
+flag）；run 状态机推进到 `proposed`，`policy_evaluated/actions_queued/
+completed` 属 P4；公共 facade（api.py）与 JSON-RPC 控制面未开工。
 
 ## 6. 明确未做（交接包历史记录，继续有效）
 

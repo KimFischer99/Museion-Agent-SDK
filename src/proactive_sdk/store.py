@@ -37,12 +37,16 @@ from .contracts import (
     PASError,
     canonical_json,
     content_hash,
+    validate_context_pack,
 )
 
 __all__ = [
     "Store",
     "JobRecord",
     "RunLease",
+    "EventRecord",
+    "SourceStateRecord",
+    "SnapshotRecord",
     "HookRecord",
     "HookClaim",
     "HookCommitResult",
@@ -137,6 +141,49 @@ class RunLease:
     event_id: str
     fence: int
     lease_until_ms: int
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    """One admitted event (schema §13.1 ``events`` + payload)."""
+
+    event_id: str
+    idempotency_key: str
+    origin: str
+    job_id: str | None
+    job_revision: int | None
+    occurrence_id: str | None
+    payload: dict[str, Any]
+    observed_at_ms: int
+    expires_at_ms: int
+
+
+@dataclass(frozen=True)
+class SourceStateRecord:
+    """Per-(source, account) delta cursor and detection watermark (§7.1:
+    已读取来源的 cursor 是独立进度，不等于已通知)."""
+
+    source_id: str
+    account_ref: str
+    cursor_ref: str | None
+    detected_watermark: str | None
+    version: int
+    updated_at_ms: int
+
+
+@dataclass(frozen=True)
+class SnapshotRecord:
+    """One observed source snapshot (content-addressed, §13.1)."""
+
+    snapshot_id: str
+    source_id: str
+    account_ref: str
+    content_ref: str
+    content_hash: str
+    observed_at_ms: int
+    fresh_until_ms: int
+    sensitivity: str
+    tombstone: bool
 
 
 @dataclass(frozen=True)
@@ -1268,6 +1315,424 @@ class Store:
                 " updated_at_ms=? WHERE run_id=?",
                 (error_class, now_ms, lease.run_id),
             )
+
+    # ------------------------------------------------------------------ #
+    # Events, sources, snapshots (P3 / SPEC §7)
+    # ------------------------------------------------------------------ #
+
+    def get_event(self, event_id: str) -> EventRecord | None:
+        row = self.db.execute(
+            """SELECT event_id, idempotency_key, origin, job_id, job_revision,
+                      occurrence_id, payload_json, observed_at_ms, expires_at_ms
+               FROM events WHERE event_id=?""",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return EventRecord(
+            event_id=row["event_id"],
+            idempotency_key=row["idempotency_key"],
+            origin=row["origin"],
+            job_id=row["job_id"],
+            job_revision=row["job_revision"],
+            occurrence_id=row["occurrence_id"],
+            payload=canonical_loads(row["payload_json"]) if row["payload_json"] else {},
+            observed_at_ms=row["observed_at_ms"],
+            expires_at_ms=row["expires_at_ms"],
+        )
+
+    def get_source_state(self, source_id: str, account_ref: str) -> SourceStateRecord | None:
+        row = self.db.execute(
+            """SELECT cursor_ref, detected_watermark, version, updated_at_ms
+               FROM source_state WHERE source_id=? AND account_ref=?""",
+            (source_id, account_ref),
+        ).fetchone()
+        if row is None:
+            return None
+        return SourceStateRecord(
+            source_id=source_id,
+            account_ref=account_ref,
+            cursor_ref=row["cursor_ref"],
+            detected_watermark=row["detected_watermark"],
+            version=row["version"],
+            updated_at_ms=row["updated_at_ms"],
+        )
+
+    def set_source_state(
+        self,
+        source_id: str,
+        account_ref: str,
+        *,
+        cursor_ref: str | None,
+        watermark: str | None = None,
+        now_ms: int,
+    ) -> SourceStateRecord:
+        """Persist the fetch cursor after a delta was consumed. The row
+        version increases on every write; the detection watermark is what
+        L0 compares against on the next tick."""
+        if cursor_ref is not None and (
+            not isinstance(cursor_ref, str) or not 1 <= len(cursor_ref) <= 256
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "cursor_ref must be 1..256 chars or None", scope="sources")
+        if watermark is not None and (not isinstance(watermark, str) or not 1 <= len(watermark) <= 256):
+            raise PASError(ErrorCode.INVALID_CONFIG, "watermark must be 1..256 chars or None", scope="sources")
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO source_state(source_id, account_ref, cursor_ref,
+                                            detected_watermark, version, updated_at_ms)
+                   VALUES (?,?,?,?,1,?)
+                   ON CONFLICT(source_id, account_ref) DO UPDATE SET
+                     cursor_ref=excluded.cursor_ref,
+                     detected_watermark=excluded.detected_watermark,
+                     version=version+1,
+                     updated_at_ms=excluded.updated_at_ms""",
+                (source_id, account_ref, cursor_ref, watermark, now_ms),
+            )
+            row = self.db.execute(
+                """SELECT cursor_ref, detected_watermark, version, updated_at_ms
+                   FROM source_state WHERE source_id=? AND account_ref=?""",
+                (source_id, account_ref),
+            ).fetchone()
+            return SourceStateRecord(
+                source_id=source_id,
+                account_ref=account_ref,
+                cursor_ref=row["cursor_ref"],
+                detected_watermark=row["detected_watermark"],
+                version=row["version"],
+                updated_at_ms=row["updated_at_ms"],
+            )
+
+    def put_snapshot(
+        self,
+        source_id: str,
+        account_ref: str,
+        *,
+        content: str,
+        observed_at_ms: int,
+        fresh_until_ms: int,
+        sensitivity: str,
+        tombstone: bool = False,
+    ) -> SnapshotRecord:
+        """Content-address an observed item. Re-observing identical
+        content refreshes the observation metadata (content itself is
+        immutable); the snapshot ref is stable across runs."""
+        if sensitivity not in ("public", "private", "sensitive"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "sensitivity must be public|private|sensitive", scope="sources")
+        content_hash = _sha256_text(content)
+        snapshot_id = f"snap{content_hash[:28]}"
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO snapshots(snapshot_id, source_id, account_ref, content_ref,
+                                         content_hash, observed_at_ms, fresh_until_ms,
+                                         sensitivity, tombstone)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(snapshot_id) DO UPDATE SET
+                     observed_at_ms=excluded.observed_at_ms,
+                     fresh_until_ms=excluded.fresh_until_ms,
+                     sensitivity=excluded.sensitivity,
+                     tombstone=excluded.tombstone""",
+                (
+                    snapshot_id,
+                    source_id,
+                    account_ref,
+                    "inline",
+                    content_hash,
+                    observed_at_ms,
+                    fresh_until_ms,
+                    sensitivity,
+                    int(tombstone),
+                ),
+            )
+        return SnapshotRecord(
+            snapshot_id=snapshot_id,
+            source_id=source_id,
+            account_ref=account_ref,
+            content_ref="inline",
+            content_hash=content_hash,
+            observed_at_ms=observed_at_ms,
+            fresh_until_ms=fresh_until_ms,
+            sensitivity=sensitivity,
+            tombstone=tombstone,
+        )
+
+    def snapshots_for(self, source_id: str, account_ref: str, *, limit: int = 32) -> list[SnapshotRecord]:
+        rows = self.db.execute(
+            """SELECT * FROM snapshots WHERE source_id=? AND account_ref=?
+               ORDER BY observed_at_ms DESC, snapshot_id LIMIT ?""",
+            (source_id, account_ref, int(limit)),
+        ).fetchall()
+        return [
+            SnapshotRecord(
+                snapshot_id=row["snapshot_id"],
+                source_id=row["source_id"],
+                account_ref=row["account_ref"],
+                content_ref=row["content_ref"],
+                content_hash=row["content_hash"],
+                observed_at_ms=row["observed_at_ms"],
+                fresh_until_ms=row["fresh_until_ms"],
+                sensitivity=row["sensitivity"],
+                tombstone=bool(row["tombstone"]),
+            )
+            for row in rows
+        ]
+
+    def snapshot_content(self, snapshot_id: str) -> str | None:
+        """Snapshot bodies stay with the source items that produced them
+        in P3 (the coordinator keeps them for evidence); a shared blob
+        store arrives with P4. Unknown ids return None."""
+        row = self.db.execute(
+            "SELECT content_ref FROM snapshots WHERE snapshot_id=?", (snapshot_id,)
+        ).fetchone()
+        return None if row is None else row["content_ref"]
+
+    # ------------------------------------------------------------------ #
+    # Run ledger extensions: observation events, suppression, decision
+    # (P3 / SPEC §4.3, §8; fence-checked like every other commit)
+    # ------------------------------------------------------------------ #
+
+    _RUN_EVENT_KIND_RE = re.compile(r"^[a-z0-9_.]{1,64}$")
+
+    def _require_active_claim(self, lease: RunLease, now_ms: int) -> None:
+        row = self.db.execute(
+            "SELECT state, fence, lease_until_ms FROM runs WHERE run_id=?", (lease.run_id,)
+        ).fetchone()
+        if (
+            row is None
+            or row["state"] != "running"
+            or row["fence"] != lease.fence
+            or row["lease_until_ms"] <= now_ms
+        ):
+            raise PASError(
+                ErrorCode.CONFLICT,
+                "run fence expired or superseded; write rejected",
+                scope="runs",
+            )
+
+    def append_run_event(
+        self,
+        lease: RunLease,
+        *,
+        kind: str,
+        safe_summary: str | None = None,
+        detail_ref: str | None = None,
+        now_ms: int,
+    ) -> int:
+        """Append one observation event (§13.1 run_events). Summaries are
+        machine-safe: counts, refs, reasons — never source bodies or
+        reasoning text (§7.3). Stale-fence writers are rejected."""
+        if not self._RUN_EVENT_KIND_RE.fullmatch(kind or ""):
+            raise PASError(ErrorCode.INVALID_CONFIG, "run event kind must match [a-z0-9_.]{1,64}", scope="runs")
+        if safe_summary is not None and (not isinstance(safe_summary, str) or len(safe_summary) > 500):
+            raise PASError(ErrorCode.INVALID_CONFIG, "safe_summary must be at most 500 chars", scope="runs")
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            seq = self.db.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id=?", (lease.run_id,)
+            ).fetchone()[0]
+            self.db.execute(
+                """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
+                   VALUES (?,?,?,?,?,?)""",
+                (lease.run_id, seq, kind, safe_summary, detail_ref, now_ms),
+            )
+            return seq
+
+    def record_run_suppressed(self, lease: RunLease, *, reason: str, now_ms: int) -> None:
+        """End a run before any model call with its machine reason (§5.3
+        L0: 空清单、无变化、未授权等直接结束，记录机器原因但不通知)."""
+        if not reason or len(reason) > 500:
+            raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="runs")
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            seq = self.db.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id=?", (lease.run_id,)
+            ).fetchone()[0]
+            self.db.execute(
+                """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
+                   VALUES (?,?, 'suppressed', ?, NULL, ?)""",
+                (lease.run_id, seq, reason, now_ms),
+            )
+            self.db.execute(
+                "UPDATE runs SET state='suppressed', lease_until_ms=0, updated_at_ms=? WHERE run_id=?",
+                (now_ms, lease.run_id),
+            )
+
+    def record_run_decision(
+        self,
+        lease: RunLease,
+        *,
+        context_pack: dict[str, Any],
+        decision: dict[str, Any],
+        proposals: list[dict[str, Any]],
+        usage: dict[str, Any] | None,
+        now_ms: int,
+    ) -> str:
+        """Commit one finished analysis in a single transaction (§13.2:
+        决策完成 = 校验 run fence + 保存审计 + 建 proposals + 更新 run state).
+
+        ``context_pack`` / ``decision`` / ``proposals`` / ``usage`` are the
+        validated wire dicts (schemas/v1). The run transitions to
+        ``proposed`` — downstream policy evaluation, actions and delivery
+        stay P4. Same-fence idempotency is NOT provided here: a committed
+        decision finalizes the claim; a retried writer holds a stale fence
+        and is rejected by ``_require_active_claim``."""
+        problems = validate_context_pack(context_pack)
+        if problems:
+            raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems), scope="runs")
+        summary = decision.get("summary")
+        if not isinstance(summary, str) or not 1 <= len(summary) <= 500:
+            raise PASError(ErrorCode.INVALID_CONFIG, "decision.summary must be 1..500 chars", scope="runs")
+        context_ref = f"ctx:{lease.run_id}"
+        pack_json = canonical_json(context_pack)
+        pack_hash = _sha256_text(pack_json)
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            run = self.db.execute(
+                "SELECT event_id FROM runs WHERE run_id=?", (lease.run_id,)
+            ).fetchone()
+            self.db.execute(
+                """INSERT INTO context_packs(context_ref, run_id, event_id,
+                                            pack_json, content_hash, created_at_ms)
+                   VALUES (?,?,?,?,?,?)""",
+                (context_ref, lease.run_id, run["event_id"], pack_json, pack_hash, now_ms),
+            )
+            self.db.execute(
+                "UPDATE runs SET context_ref=? WHERE run_id=?", (context_ref, lease.run_id)
+            )
+            seq = self.db.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id=?", (lease.run_id,)
+            ).fetchone()[0]
+            seq += 1
+            self.db.execute(
+                """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
+                   VALUES (?,?, 'decision', ?, ?, ?)""",
+                (
+                    lease.run_id,
+                    seq,
+                    f"{decision.get('decision')}: {summary}"[:500],
+                    context_ref,
+                    now_ms,
+                ),
+            )
+            seq += 1
+            self.db.execute(
+                """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
+                   VALUES (?,?, 'usage', ?, NULL, ?)""",
+                (lease.run_id, seq, canonical_json(usage) if usage is not None else "unknown", now_ms),
+            )
+            for index, proposal in enumerate(proposals, start=1):
+                kind = proposal.get("kind")
+                if kind not in (
+                    "notify_self",
+                    "draft",
+                    "internal_record",
+                    "suggest_watch",
+                    "request_external_action",
+                ):
+                    raise PASError(ErrorCode.INVALID_CONFIG, f"proposal kind {kind!r} invalid", scope="runs")
+                fact_id = proposal.get("fact_id")
+                if not isinstance(fact_id, str) or not 1 <= len(fact_id) <= 256:
+                    raise PASError(ErrorCode.INVALID_CONFIG, "proposal fact_id must be 1..256 chars", scope="runs")
+                body = proposal.get("body")
+                if body is not None and (not isinstance(body, str) or len(body) > 20000):
+                    raise PASError(ErrorCode.INVALID_CONFIG, "proposal body must be at most 20000 chars", scope="runs")
+                self.db.execute(
+                    """INSERT INTO run_proposals(
+                           proposal_id, run_id, seq, kind, fact_id, revision, body,
+                           arguments_json, evidence_refs_json, expires_at_ms, created_at_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        f"prop{content_hash({'run': lease.run_id, 'seq': index, 'fact': fact_id, 'kind': kind})[:28]}",
+                        lease.run_id,
+                        index,
+                        kind,
+                        fact_id,
+                        proposal.get("revision"),
+                        body,
+                        canonical_json(proposal["arguments"]) if proposal.get("arguments") is not None else None,
+                        canonical_json(proposal.get("evidence_refs") or []),
+                        self._deadline_to_ms(proposal.get("expires_at")),
+                        now_ms,
+                    ),
+                )
+            self.db.execute(
+                """UPDATE runs SET state='proposed', lease_until_ms=0,
+                       decision_summary=?, proposal_count=?, usage_json=?, updated_at_ms=?
+                   WHERE run_id=?""",
+                (summary, len(proposals), canonical_json(usage) if usage is not None else None, now_ms, lease.run_id),
+            )
+            return context_ref
+
+    def run_events(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """SELECT seq, kind, safe_summary, detail_ref, created_at_ms
+               FROM run_events WHERE run_id=? ORDER BY seq""",
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def run_proposals(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """SELECT proposal_id, seq, kind, fact_id, revision, body,
+                      arguments_json, evidence_refs_json, expires_at_ms, created_at_ms
+               FROM run_proposals WHERE run_id=? ORDER BY seq""",
+            (run_id,),
+        ).fetchall()
+        return [
+            {
+                "proposal_id": row["proposal_id"],
+                "seq": row["seq"],
+                "kind": row["kind"],
+                "fact_id": row["fact_id"],
+                "revision": row["revision"],
+                "body": row["body"],
+                "arguments": canonical_loads(row["arguments_json"]) if row["arguments_json"] else None,
+                "evidence_refs": canonical_loads(row["evidence_refs_json"]),
+                "expires_at_ms": row["expires_at_ms"],
+                "created_at_ms": row["created_at_ms"],
+            }
+            for row in rows
+        ]
+
+    def get_context_pack(self, context_ref: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT pack_json, content_hash FROM context_packs WHERE context_ref=?", (context_ref,)
+        ).fetchone()
+        if row is None:
+            return None
+        if _sha256_text(row["pack_json"]) != row["content_hash"]:
+            raise PASError(ErrorCode.INTERNAL_ERROR, "context pack content hash mismatch", scope="runs")
+        return canonical_loads(row["pack_json"])
+
+    def list_runs(self, *, state: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if state is not None:
+            rows = self.db.execute(
+                """SELECT run_id, event_id, state, attempt, fence, error_class,
+                          decision_summary, proposal_count, context_ref, deadline_ms
+                   FROM runs WHERE state=? ORDER BY rowid LIMIT ?""",
+                (state, int(limit)),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                """SELECT run_id, event_id, state, attempt, fence, error_class,
+                          decision_summary, proposal_count, context_ref, deadline_ms
+                   FROM runs ORDER BY rowid LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            """SELECT run_id, event_id, state, attempt, fence, lease_until_ms, deadline_ms,
+                      error_class, decision_summary, proposal_count, usage_json, context_ref
+               FROM runs WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        usage_json = record.pop("usage_json")
+        record["usage"] = canonical_loads(usage_json) if usage_json else None
+        return record
 
     # ------------------------------------------------------------------ #
     # Internals

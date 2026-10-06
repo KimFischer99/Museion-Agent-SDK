@@ -8,7 +8,7 @@
 | P0 边界与来源 | **done** | 2026-10-06 | contracts/schema、许可清单与门禁、审计复现命令、zip-slip 防护、单 profile 边界；详见下 |
 | P1 持久化与时钟 | **done** | 2026-10-06 | store、migrations、Clock、五类 schedule、misfire、claim/fencing、jobs API；验收测试见下 |
 | P2 Hooks 与事件 | **done** | 2026-10-06 | 沙盒 runner、legacy parser、staging + CAS、hook 状态机；验收测试见下 |
-| P3 独立 Agent 闭环 | not started | — | Source/Memory ports、ContextPack 运行链路、ToolLoopExecutor、ModelPort |
+| P3 独立 Agent 闭环 | **done** | 2026-10-06 | Source/Memory ports、ContextPack、ToolLoopExecutor、OpenAI 兼容 ModelPort、L0/L1 coordinator；验收测试见下 |
 | P4 策略与投递 | not started | — | grants、审批、outbox、本人 inbox、真实通知 sink、对账 |
 | P5 宿主适配 | not started | — | Hermes Runs / Pi worker，锁定版本真实联调 |
 | P6 Skills 能力 | not started | — | legacy importer、aliases、依赖闭包、Gmail/Calendar 最小兼容 |
@@ -150,3 +150,98 @@
   deny，不做域名白名单。
 - hook 定义尚无公开 schema 对象（§4.1 十对象不含 HookSpec），P3 冻结 facade
   时再定。
+
+## P3 记录（2026-10-06）
+
+实现（对应 SPEC §8 / §15.1 P3 行 / 工单 B + EXEC-01）：
+
+- **`src/proactive_sdk/contracts.py`（扩展）**：类型化记录 RunBudget / RunRequest /
+  ContextPack / ContextSource / SourceRequest / SourceItem / SourceBatch /
+  MemoryEntry / ActionProposal / Decision / ExecutorCapabilities / ModelToolCall；
+  Decision 增加证据闭包校验入口；`validate_context_pack` 跨字段规则与
+  `schemas/v1/context_pack.json` 对齐；ModelResponse 增加 `reasoning` 字段
+  （显式声明永不解析为动作、不持久化）。
+- **`src/proactive_sdk/model.py`**：`OpenAICompatibleModel` —— 唯一真实 provider
+  实现（OpenAI Chat Completions 形状）。HTTP transport 可注入；API key 经
+  `api_key_provider` 注入（可接 OS keychain，不落日志）；错误映射到统一错误
+  词表（401/403→auth_required、429→rate_limited+Retry-After、5xx→
+  provider_unavailable、4xx→invalid_config），响应体与凭据永不进错误消息；
+  usage 规范化为 §4.1 Usage（provider 未报则 unknown，不写零）；
+  adapter_namespace 承载供应商专有参数，不污染公共协议；reasoning 原地丢弃。
+- **`src/proactive_sdk/tools.py`**：`ToolSpec`（P3 只接受 read_only=True，写工具
+  在注册即拒，fail-closed）+ `LocalToolBroker`。`AuthorizedToolCall` 只能由
+  broker 在复检（注册表 ⊆ run allowlist ⊆ 能力快照、参数 schema、剩余预算）
+  之后构造——模型输出永远是 attempt，不能反序列化成授权对象；输出有界截断
+  并带 evidence ref；拒绝路径全部可计数。
+- **`src/proactive_sdk/context.py`**：`MemoryPort`/`EphemeralMemoryPort`（§7.3
+  默认：有界、带证据的短条目，明确标注不持久化）；`SourceRegistry`（绑定
+  source_id+account+所需能力，逐批校验返回形状）；`SnapshotMaterializer`
+  （内容寻址快照，重观察刷新元数据）；`ContextPackBuilder`（不可变 pack，
+  fresh_until 双时间戳，`allow_stale=False` 时过期即 stale_context 阻塞）；
+  `render_context_blocks` 把来源内容渲染为 data-only 块。
+- **`src/proactive_sdk/executor.py`**：`ToolLoopExecutor`——每回合按 §8.2 顺序：
+  deadline/cancel/预算检查 → ModelPort.generate（asyncio 硬超时防挂死）→
+  工具调用形状校验 → broker 复检执行 → data-only 结果回传 → 直到合法
+  Decision 或预算耗尽。Decision 校验：严格 JSON（重复键/NaN 拒）+ 未知字段
+  拒绝 + kind 枚举 + 类型化字段校验 + 证据闭包（提案只能引用本 run 的快照/
+  记忆/工具证据）+ 提案数预算；解析失败恰好一次有预算修复，再失败 run 失败。
+  预算四项（turns/tools/wall_time/proposals）+ 墙钟 deadline 全部生效；
+  wall_time 用注入 Clock 的 monotonic（基础设施时间，FakeClock 冻结不会拉长
+  挂死调用）。usage 聚合：任一回合 unknown ⇒ 整体 unknown 且字段 None。
+- **`src/proactive_sdk/coordinator.py`**：`ProactiveCoordinator`——领取单个
+  queued run（单飞）后：**L0**（零模型）：来源注册检查、逐源能力/授权检查、
+  delta 拉取（错误分类记因）、cursor 比较判定变化；心跳模式无变化/无来源/
+  未授权/来源故障 ⇒ `record_run_suppressed`（机器原因可查询），显式任务与
+  hook wake 按语义直进 L1（授权缺失则是可见 failed 而非静默）。**L1**：
+  快照物化 + ContextPack 构建（require_fresh_sources 任务过期即阻塞）→
+  executor 闭环 → 决策/提案/usage/事件在**单事务**内以 lease fence 提交
+  （§13.2），run 终态 `proposed`。
+- **`src/proactive_sdk/store.py` + `migrations/m004_p3_executor.sql`**：additive
+  迁移（runs.usage_json/decision_summary/proposal_count、context_packs、
+  run_proposals）；store 新增 EventRecord/get_event、source_state 读写
+  （版本自增）、快照 upsert/查询、run_events 追加（fence 复核 + 安全摘要
+  上限）、record_run_suppressed / record_run_decision（fence+状态复核、
+  context pack 内容 hash、提案落库）、run_proposals/run_events/get_run/
+  list_runs 读路径。P1 的 `planned` 参考路径保持不动。
+- **`examples/agent_loop_demo.py`**：独立 Agent demo（工单 B 要求），三场景
+  断言式输出；测试替身全部显式声明（fake/scripted），delivered 恒 0。
+
+关键语义决定（与 SPEC 的对应）：
+
+- “没变化零 LLM”是结构性质而非提示词性质：L0 用 cursor 比较 + watermark
+  判定，suppressed run 携带机器原因（§5.3/§16.3 hard gate），测试断言
+  `model.calls == 0`。
+- 恶意来源不改权限靠三层结构门禁：broker 能力集合为代码写死；工具
+  allowlist 显式传入 RunRequest（空 = 无工具，不是"全部"）；提案证据必须
+  属于本 run 证据闭包。测试用"配合注入的脚本模型"模拟最坏情况。
+- hook wake 无 job 可依：以 hook reason 为任务指令、goal_id=`hook:<id>`，
+  按显式信号进 L1（§6.2 hook 的 wake 本就是显式检测信号）。
+- 分析完成（proposed）与动作执行/通知投递严格分账：提案落 `run_proposals`
+  （非 actions 表，无 grant/approval 字段——那是 P4 策略产物）。
+- 心跳的未授权/来源故障记 suppressed（机会检查不告警），显式任务记 failed
+  （用户必须看见失败）——同一检查两种口径，按 mode 语义分流。
+
+验收（§15.1 P3 行）：
+
+- **没变化零 LLM**：coordinator 测试 + demo 场景 1 双覆盖（0 模型调用、
+  cursor 已推进、原因可查询）。
+- **显式任务会运行**：task 模式无变化照常进 L1；hook wake 同理。
+- **恶意来源不改权限**：注入内容 + 配合注入模型 ⇒ 提案拒绝、run failed、
+  0 提案落库、能力集合不变、注入文本始终为数据框架；未注册工具调用被拒。
+- **deadline/预算有效**：turns/tools/wall_time/proposals 四预算 + 墙钟
+  deadline + asyncio 硬超时 + cancel flag，各有测试。
+- **真实模型 fixture 不冒充**：FakeModel 标签（provider=fake、无 measured
+  usage）有断言；真实适配器仅本地脚本化 HTTP 服务器契约测试，VALIDATION.md
+  明确记录未做在线 provider 联调、不做兼容声明。
+
+已知缺口（不阻塞 P4，按阶段补）：
+
+- 在线模型 provider 的锁定版本真实联调属 P5/P7 门禁；token 级预算预留、
+  profile 级预算账本未实现（现仅 run 级四项上限）。
+- MemoryPort 默认实现不持久化；真实 Source 连接器（日历/邮件）随 P4/P6；
+  快照正文 blob store 随 P4。
+- run 状态机至 `proposed` 为止；grants/approvals/outbox 写入路径与
+  policy_evaluated/actions_queued/completed 状态随 P4。
+- 公共 facade（api.py）、`pas serve`、JSON-RPC 控制面随 P4/P7；runs.cancel
+  控制面 API 未实现（executor 已支持 cancel flag，等待控制面接入）。
+- hook 定义公开 schema（§4.1 之外的对象）仍待 facade 冻结时定。
