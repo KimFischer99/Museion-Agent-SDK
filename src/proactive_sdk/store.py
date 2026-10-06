@@ -43,6 +43,9 @@ __all__ = [
     "Store",
     "JobRecord",
     "RunLease",
+    "HookRecord",
+    "HookClaim",
+    "HookCommitResult",
     "MIGRATION_COUNT",
 ]
 
@@ -134,6 +137,65 @@ class RunLease:
     event_id: str
     fence: int
     lease_until_ms: int
+
+
+@dataclass(frozen=True)
+class HookRecord:
+    """Stored hook state (schema §13.1 ``hooks`` + P2 error accounting)."""
+
+    hook_id: str
+    definition_hash: str
+    definition: dict[str, Any]
+    enabled: bool
+    state_version: int
+    state: dict[str, Any]
+    lease_fence: int
+    lease_until_ms: int
+    next_due_ms: int | None
+    poll_interval_ms: int | None
+    timeout_ms: int | None
+    created_at_ms: int
+    updated_at_ms: int
+    last_run_at_ms: int | None
+    last_decision: str | None
+    consecutive_errors: int
+    last_error_class: str | None
+    last_error_at_ms: int | None
+    error_backoff_until_ms: int
+
+
+@dataclass(frozen=True)
+class HookClaim:
+    """Lease token for one hook invocation (SPEC §6.2 step 1).
+
+    ``fence`` is the hook-level exclusion primitive: a later claim bumps
+    it, and only the current fence may commit state or record errors.
+    The canonical state snapshot travels with the claim so the runner
+    stages exactly the state this lease saw.
+    """
+
+    hook_id: str
+    state_version: int
+    state: dict[str, Any]
+    fence: int
+    lease_until_ms: int
+    definition_hash: str
+    definition: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class HookCommitResult:
+    """Outcome of one hook invocation commit.
+
+    ``committed_wake`` / ``committed_silent`` advanced the hook state;
+    ``idempotent_replay`` found the same invocation already committed
+    with identical content and returns the original ``event_id``;
+    ``skipped_*`` outcomes mean nothing was written (disabled hook, lost
+    fence race, unexpected state move).
+    """
+
+    outcome: str
+    event_id: str | None
 
 
 class Store:
@@ -668,6 +730,35 @@ class Store:
             raise PASError(ErrorCode.INVALID_CONFIG, f"unknown event origin {origin!r}")
         if not dedupe_key or len(dedupe_key) > 256:
             raise PASError(ErrorCode.INVALID_CONFIG, "dedupe_key must be 1..256 chars")
+        with self.transaction():
+            return self._insert_event_tx(
+                dedupe_key,
+                origin=origin,
+                payload=payload,
+                observed_at_ms=observed_at_ms,
+                expires_at_ms=expires_at_ms,
+                occurrence_id=occurrence_id,
+                job_id=job_id,
+                job_revision=job_revision,
+                create_run=create_run,
+            )
+
+    def _insert_event_tx(
+        self,
+        dedupe_key: str,
+        *,
+        origin: str,
+        payload: Any,
+        observed_at_ms: int,
+        expires_at_ms: int,
+        occurrence_id: str | None = None,
+        job_id: str | None = None,
+        job_revision: int | None = None,
+        create_run: bool = True,
+    ) -> str:
+        """Insert one event + optional queued run inside the caller's
+        transaction (shared by :meth:`admit_event` and the hook commit
+        path, SPEC §6.2 step 4)."""
         payload_json = canonical_json(payload)
         if len(payload_json.encode("utf-8")) > _EVENT_PAYLOAD_MAX_BYTES:
             raise PASError(
@@ -675,56 +766,425 @@ class Store:
             )
         payload_hash = _sha256_text(payload_json)
         event_id = self._event_id(dedupe_key)
-        with self.transaction():
-            prior = self.db.execute(
-                "SELECT payload_hash FROM events WHERE idempotency_key=?", (dedupe_key,)
-            ).fetchone()
-            if prior is not None:
-                if prior["payload_hash"] != payload_hash:
-                    raise PASError(
-                        ErrorCode.CONFLICT,
-                        "event dedupe key reused with different content",
-                        scope="events",
-                    )
-                return event_id
-            self.db.execute(
-                """INSERT INTO events(
-                       event_id, idempotency_key, origin, job_id, job_revision,
-                       occurrence_id, payload_hash, payload_ref, payload_json,
-                       observed_at_ms, expires_at_ms)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    event_id,
-                    dedupe_key,
-                    origin,
-                    job_id,
-                    job_revision,
-                    occurrence_id,
-                    payload_hash,
-                    "inline",
-                    payload_json,
-                    observed_at_ms,
-                    expires_at_ms,
-                ),
-            )
-            if create_run:
-                run_id = self._run_id(event_id)
-                self.db.execute(
-                    """INSERT INTO runs(
-                           run_id, event_id, state, deadline_ms, policy_version,
-                           created_at_ms, updated_at_ms)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (
-                        run_id,
-                        event_id,
-                        "queued",
-                        observed_at_ms + _RUN_DEFAULT_DEADLINE_MS,
-                        _POLICY_VERSION,
-                        observed_at_ms,
-                        observed_at_ms,
-                    ),
+        prior = self.db.execute(
+            "SELECT payload_hash FROM events WHERE idempotency_key=?", (dedupe_key,)
+        ).fetchone()
+        if prior is not None:
+            if prior["payload_hash"] != payload_hash:
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    "event dedupe key reused with different content",
+                    scope="events",
                 )
             return event_id
+        self.db.execute(
+            """INSERT INTO events(
+                   event_id, idempotency_key, origin, job_id, job_revision,
+                   occurrence_id, payload_hash, payload_ref, payload_json,
+                   observed_at_ms, expires_at_ms)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event_id,
+                dedupe_key,
+                origin,
+                job_id,
+                job_revision,
+                occurrence_id,
+                payload_hash,
+                "inline",
+                payload_json,
+                observed_at_ms,
+                expires_at_ms,
+            ),
+        )
+        if create_run:
+            run_id = self._run_id(event_id)
+            self.db.execute(
+                """INSERT INTO runs(
+                       run_id, event_id, state, deadline_ms, policy_version,
+                       created_at_ms, updated_at_ms)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    run_id,
+                    event_id,
+                    "queued",
+                    observed_at_ms + _RUN_DEFAULT_DEADLINE_MS,
+                    _POLICY_VERSION,
+                    observed_at_ms,
+                    observed_at_ms,
+                ),
+            )
+        return event_id
+
+    # ------------------------------------------------------------------ #
+    # Hooks (P2 / SPEC §6, HOOK-01)
+    # ------------------------------------------------------------------ #
+
+    def register_hook(
+        self,
+        hook_id: str,
+        *,
+        definition_hash: str,
+        definition: dict[str, Any],
+        poll_interval_ms: int,
+        timeout_ms: int | None = None,
+        initial_state: dict[str, Any] | None = None,
+        now_ms: int | None = None,
+    ) -> HookRecord:
+        """Register a hook definition. Re-registering the identical
+        definition is idempotent; a different definition under the same
+        hook id is a conflict (definitions are immutable — new behaviour
+        means a new hook id). The stored definition is verified against
+        ``definition_hash`` so the runnable definition cannot drift from
+        its integrity anchor."""
+        now = self.clock.wall_now_ms() if now_ms is None else now_ms
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", hook_id or ""):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, f"hook_id {hook_id!r} fails naming rule", scope="hooks"
+            )
+        if not isinstance(definition, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "definition must be an object", scope="hooks")
+        if content_hash(definition) != definition_hash:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "definition_hash does not match definition", scope="hooks"
+            )
+        if poll_interval_ms <= 0:
+            raise PASError(ErrorCode.INVALID_CONFIG, "poll_interval_ms must be positive", scope="hooks")
+        if timeout_ms is not None and timeout_ms <= 0:
+            raise PASError(ErrorCode.INVALID_CONFIG, "timeout_ms must be positive", scope="hooks")
+        state = initial_state if initial_state is not None else {}
+        if not isinstance(state, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "initial_state must be an object", scope="hooks")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT definition_hash FROM hooks WHERE hook_id=?", (hook_id,)
+            ).fetchone()
+            if row is not None:
+                if row["definition_hash"] != definition_hash:
+                    raise PASError(
+                        ErrorCode.CONFLICT,
+                        f"hook {hook_id!r} already registered with a different definition",
+                        scope="hooks",
+                    )
+                return self._read_hook(hook_id)  # type: ignore[return-value]
+            self.db.execute(
+                """INSERT INTO hooks(
+                       hook_id, definition_hash, definition_json, enabled, state_version,
+                       state_json, poll_interval_ms, timeout_ms, created_at_ms, updated_at_ms,
+                       next_due_ms)
+                   VALUES (?,?,?,1,0,?,?,?,?,?,?)""",
+                (
+                    hook_id,
+                    definition_hash,
+                    canonical_json(definition),
+                    canonical_json(state),
+                    poll_interval_ms,
+                    timeout_ms,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            record = self._read_hook(hook_id)
+            assert record is not None
+            return record
+
+    def get_hook(self, hook_id: str) -> HookRecord | None:
+        return self._read_hook(hook_id)
+
+    def list_hooks(self, *, enabled: bool | None = None) -> list[HookRecord]:
+        if enabled is None:
+            rows = self.db.execute("SELECT hook_id FROM hooks ORDER BY hook_id").fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT hook_id FROM hooks WHERE enabled=? ORDER BY hook_id", (int(enabled),)
+            ).fetchall()
+        records = [self._read_hook(row["hook_id"]) for row in rows]
+        return [record for record in records if record is not None]
+
+    def set_hook_enabled(self, hook_id: str, *, enabled: bool, now_ms: int | None = None) -> HookRecord:
+        """Stop or resume a hook (admin/API action, SPEC §6.2).
+
+        Disabling never deletes admitted events or queued runs — stopping
+        a probe leaves the notifications it already created pending
+        (SPEC §6.2). An in-flight invocation cannot commit afterwards:
+        the commit re-checks ``enabled`` inside its transaction, so
+        disable wins over in-flight work (mirrors job pause).
+        """
+        now = self.clock.wall_now_ms() if now_ms is None else now_ms
+        with self.transaction():
+            cursor = self.db.execute(
+                "UPDATE hooks SET enabled=?, updated_at_ms=? WHERE hook_id=?",
+                (int(enabled), now, hook_id),
+            )
+            if cursor.rowcount != 1:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"unknown hook {hook_id!r}", scope="hooks"
+                )
+            record = self._read_hook(hook_id)
+            assert record is not None
+            return record
+
+    def delete_hook(self, hook_id: str) -> None:
+        """Delete a hook that never admitted anything.
+
+        Hooks with committed invocations keep their audit trail
+        (``hook_invocations`` references them); disable those instead.
+        """
+        with self.transaction():
+            referenced = self.db.execute(
+                "SELECT 1 FROM hook_invocations WHERE hook_id=? LIMIT 1", (hook_id,)
+            ).fetchone()
+            if referenced is not None:
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    "hook has committed invocations; disable it instead of deleting",
+                    scope="hooks",
+                )
+            cursor = self.db.execute("DELETE FROM hooks WHERE hook_id=?", (hook_id,))
+            if cursor.rowcount != 1:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown hook {hook_id!r}", scope="hooks")
+
+    def due_hook_ids(self, now_ms: int) -> list[str]:
+        """Enabled hooks whose poll time has arrived (uses ``hooks_due``)."""
+        rows = self.db.execute(
+            """SELECT hook_id FROM hooks
+               WHERE enabled=1 AND next_due_ms IS NOT NULL AND next_due_ms<=?
+               ORDER BY next_due_ms, hook_id""",
+            (now_ms,),
+        ).fetchall()
+        return [row["hook_id"] for row in rows]
+
+    def claim_hook(
+        self, hook_id: str, *, now_ms: int, ttl_ms: int, force: bool = False
+    ) -> HookClaim | None:
+        """Claim one hook invocation lease (SPEC §6.2 step 1).
+
+        Refuses while the hook is disabled, still leased, or — unless
+        ``force`` (admin-triggered diagnostic run) — inside its error
+        cooldown, so one hook never has two parallel writers. Bumping
+        ``lease_fence`` is what makes later commits from stale claimants
+        rejectable.
+        """
+        if ttl_ms <= 0:
+            raise PASError(ErrorCode.INVALID_CONFIG, "lease TTL must be positive", scope="hooks")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT enabled, lease_fence, lease_until_ms, error_backoff_until_ms"
+                " FROM hooks WHERE hook_id=?",
+                (hook_id,),
+            ).fetchone()
+            if row is None or not row["enabled"]:
+                return None
+            if row["lease_until_ms"] > now_ms:
+                return None
+            if not force and row["error_backoff_until_ms"] > now_ms:
+                return None
+            fence = row["lease_fence"] + 1
+            self.db.execute(
+                "UPDATE hooks SET lease_fence=?, lease_until_ms=? WHERE hook_id=?",
+                (fence, now_ms + ttl_ms, hook_id),
+            )
+            record = self._read_hook(hook_id)
+            assert record is not None
+            return HookClaim(
+                hook_id=record.hook_id,
+                state_version=record.state_version,
+                state=record.state,
+                fence=fence,
+                lease_until_ms=now_ms + ttl_ms,
+                definition_hash=record.definition_hash,
+                definition=record.definition,
+            )
+
+    def defer_hook(self, hook_id: str, *, next_due_ms: int, now_ms: int) -> str:
+        """Push a hook's next poll without running it (error-cooldown
+        skipping). Best-effort: races with a real run are resolved by
+        whichever commit touches ``next_due_ms`` last."""
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT enabled FROM hooks WHERE hook_id=?", (hook_id,)
+            ).fetchone()
+            if row is None:
+                return "skipped_missing"
+            if not row["enabled"]:
+                return "skipped_disabled"
+            self.db.execute(
+                "UPDATE hooks SET next_due_ms=?, updated_at_ms=? WHERE hook_id=?",
+                (next_due_ms, now_ms, hook_id),
+            )
+            return "deferred"
+
+    def commit_hook_invocation(
+        self,
+        hook_id: str,
+        invocation_id: str,
+        *,
+        expected_state_version: int,
+        fence: int,
+        request_hash: str,
+        new_state: dict[str, Any],
+        decision: str,
+        reason: str,
+        payload: Any,
+        disable_after_run: bool,
+        next_due_ms: int,
+        now_ms: int,
+    ) -> HookCommitResult:
+        """CAS-commit one hook invocation (SPEC §6.2 step 4, HOOK-01).
+
+        One transaction: invocation dedupe (same id + same content is an
+        idempotent replay returning the original event; same id with
+        different content is a conflict), fence/version/enabled re-check,
+        wake-event admission, state update and ``disable_after_run`` —
+        so a one-shot watch is disabled exactly when its wake event is
+        durable, never before and never without it.
+        """
+        if decision not in ("silent", "wake"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "decision must be silent|wake", scope="hooks")
+        if not isinstance(new_state, dict):
+            raise PASError(ErrorCode.INVALID_CONFIG, "hook state must be an object", scope="hooks")
+        with self.transaction():
+            prior = self.db.execute(
+                "SELECT request_hash, event_id FROM hook_invocations WHERE invocation_id=?",
+                (invocation_id,),
+            ).fetchone()
+            if prior is not None:
+                if prior["request_hash"] != request_hash:
+                    raise PASError(
+                        ErrorCode.CONFLICT,
+                        "invocation_id replayed with different content",
+                        scope="hooks",
+                    )
+                return HookCommitResult("idempotent_replay", prior["event_id"])
+            row = self.db.execute(
+                "SELECT enabled, state_version, lease_fence FROM hooks WHERE hook_id=?",
+                (hook_id,),
+            ).fetchone()
+            if row is None:
+                return HookCommitResult("skipped_missing", None)
+            if not row["enabled"]:
+                return HookCommitResult("skipped_disabled", None)
+            if row["lease_fence"] != fence:
+                return HookCommitResult("skipped_fence", None)
+            if row["state_version"] != expected_state_version:
+                return HookCommitResult("skipped_version", None)
+            event_id = None
+            if decision == "wake":
+                event_id = self._insert_event_tx(
+                    f"hook:{invocation_id}",
+                    origin="hook",
+                    payload={
+                        "hook_id": hook_id,
+                        "invocation_id": invocation_id,
+                        "reason": reason,
+                        "payload": payload,
+                    },
+                    observed_at_ms=now_ms,
+                    expires_at_ms=now_ms + _EVENT_TTL_MS,
+                )
+            new_enabled = 0 if disable_after_run else 1
+            self.db.execute(
+                """UPDATE hooks SET state_version=state_version+1, state_json=?,
+                       enabled=?, next_due_ms=?, last_run_at_ms=?, last_decision=?,
+                       consecutive_errors=0, last_error_class=NULL, last_error_at_ms=NULL,
+                       error_backoff_until_ms=0, updated_at_ms=?
+                   WHERE hook_id=? AND lease_fence=?""",
+                (
+                    canonical_json(new_state),
+                    new_enabled,
+                    next_due_ms,
+                    now_ms,
+                    decision,
+                    now_ms,
+                    hook_id,
+                    fence,
+                ),
+            )
+            self.db.execute(
+                """INSERT INTO hook_invocations(
+                       invocation_id, hook_id, request_hash, state_version,
+                       event_id, committed_at_ms)
+                   VALUES (?,?,?,?,?,?)""",
+                (invocation_id, hook_id, request_hash, expected_state_version, event_id, now_ms),
+            )
+            outcome = "committed_wake" if decision == "wake" else "committed_silent"
+            return HookCommitResult(outcome, event_id)
+
+    def record_hook_error(
+        self,
+        hook_id: str,
+        *,
+        fence: int,
+        error_class: str,
+        error_detail: str,
+        backoff_until_ms: int,
+        next_due_ms: int,
+        now_ms: int,
+    ) -> str:
+        """Count one failed invocation and start its cooldown.
+
+        Errors never admit wake events and never advance hook state
+        (SPEC §6.1: 失败不唤醒). The backoff is the probe's own retry
+        cooldown; admin diagnostics read these fields directly and are
+        not throttled by it.
+        """
+        if not error_class or len(error_class) > 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "error_class must be 1..128 chars", scope="hooks")
+        if len(error_detail) > 500:
+            raise PASError(ErrorCode.INVALID_CONFIG, "error_detail must be <=500 chars", scope="hooks")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT enabled, lease_fence FROM hooks WHERE hook_id=?", (hook_id,)
+            ).fetchone()
+            if row is None:
+                return "skipped_missing"
+            if not row["enabled"]:
+                return "skipped_disabled"
+            if row["lease_fence"] != fence:
+                return "skipped_fence"
+            self.db.execute(
+                """UPDATE hooks SET consecutive_errors=consecutive_errors+1,
+                       last_error_class=?, last_error_at_ms=?, error_backoff_until_ms=?,
+                       next_due_ms=?, updated_at_ms=?
+                   WHERE hook_id=? AND lease_fence=?""",
+                (error_class, now_ms, backoff_until_ms, next_due_ms, now_ms, hook_id, fence),
+            )
+            return "recorded"
+
+    def hook_invocation(self, invocation_id: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT invocation_id, hook_id, request_hash, state_version, event_id,"
+            " committed_at_ms FROM hook_invocations WHERE invocation_id=?",
+            (invocation_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _read_hook(self, hook_id: str) -> HookRecord | None:
+        row = self.db.execute("SELECT * FROM hooks WHERE hook_id=?", (hook_id,)).fetchone()
+        if row is None:
+            return None
+        return HookRecord(
+            hook_id=row["hook_id"],
+            definition_hash=row["definition_hash"],
+            definition=canonical_loads(row["definition_json"]) if row["definition_json"] else {},
+            enabled=bool(row["enabled"]),
+            state_version=row["state_version"],
+            state=canonical_loads(row["state_json"]),
+            lease_fence=row["lease_fence"],
+            lease_until_ms=row["lease_until_ms"],
+            next_due_ms=row["next_due_ms"],
+            poll_interval_ms=row["poll_interval_ms"],
+            timeout_ms=row["timeout_ms"],
+            created_at_ms=row["created_at_ms"],
+            updated_at_ms=row["updated_at_ms"],
+            last_run_at_ms=row["last_run_at_ms"],
+            last_decision=row["last_decision"],
+            consecutive_errors=row["consecutive_errors"],
+            last_error_class=row["last_error_class"],
+            last_error_at_ms=row["last_error_at_ms"],
+            error_backoff_until_ms=row["error_backoff_until_ms"],
+        )
 
     # ------------------------------------------------------------------ #
     # Run claim / completion with fencing (SPEC §10.3, §13.2)
