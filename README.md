@@ -1,6 +1,6 @@
-# Proactive Personal Agent SDK — 施工仓库
+# Museion Agent SDK v0.1.0 — 施工仓库
 
-自用施工仓库（2026-10-06 整理）。目标：按 `SPEC.md` 的 P0–P7 阶段实现独立的主动 Agent 内核（工作名 `proactive-agent-sdk`，简称 PAS）。P0–P7 已全部施工完成；本仓库是施工现场，不是已发布的成品。
+自用施工仓库（2026-10-06 整理）。产品名与版本为 **Museion Agent SDK v0.1.0**；Python distribution/import 名称 `proactive-sdk`/`proactive_sdk`、CLI `pas` 和协议简称 PAS 暂沿用已有接口。P0–P7 已全部施工完成；本仓库是施工现场，不是已发布的成品。
 
 **兼容层状态（如实声明）**：Skills 兼容层完成了 88 个入口的审计一致导入（scan→sidecar→install），但端到端能力验证为 **0 个**（`e2e_verified` 均为 false，需真实授权逐项联调）。Gmail/Calendar/Webhook 通道只到传输层契约测试。不要把本包描述成"88 个能力全部实现"。详见 `docs/COMPATIBILITY.md` 与 `VALIDATION.md`。
 
@@ -38,6 +38,8 @@ tools/               reproduce_audit / license_gate / validate_p5_real /
                      gen_client_ts / package_gate / gen_sbom / install_smoke
 docs/                LICENSES / PROGRESS / COMPATIBILITY / SECURITY / CONTRIBUTING
 private-vendor/      本地私有素材，不进入 git（见下）
+muse-refer/          本地参考文档，不进入 git；不随 wheel 分发
+OPTIMIZATION_PLAN.md 本地 Ling 对照施工计划，不进入 git
 ```
 
 `private-vendor/`（git 不跟踪，保留在本地）：
@@ -115,5 +117,4 @@ tracked files）。若日后转为公开发布：恢复 AGENTS.md 的分发约�
 SPEC P0/P7 门禁（license gate、SBOM、隐私扫描），且不得直接公开 Muse
 原文件；第三方代码再分发授权核验仍是一项未完成的前置义务。
 
-工作名 `proactive-agent-sdk`、Python 包名和 CLI 名字都是设计占位名称，
-不代表已经存在或可安装的官方产品。
+Museion Agent SDK v0.1.0 是本仓库的自用版本标识，不代表已在 PyPI/npm 发布或已完成真实用户流程回归。

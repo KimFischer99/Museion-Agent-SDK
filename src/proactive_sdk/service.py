@@ -731,7 +731,7 @@ def _cmd_rpc(args: argparse.Namespace) -> int:
 def _cmd_version(_args: argparse.Namespace) -> int:
     from . import PAS_PROTOCOL_VERSION
 
-    print(f"pas {__version__} (protocol {PAS_PROTOCOL_VERSION})")
+    print(f"Museion Agent SDK v{__version__} (protocol {PAS_PROTOCOL_VERSION}; CLI: pas)")
     return 0
 
 

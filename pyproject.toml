@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proactive-sdk"
-version = "0.1.0.dev0"
-description = "Proactive personal agent runtime kernel (PAS). Single-profile runtime with scheduler, hooks, bounded agent loop, policy and delivery; daemon CLI included."
+version = "0.1.0"
+description = "Museion Agent SDK: single-profile proactive agent runtime with scheduler, hooks, bounded agent loop, policy, delivery and daemon CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

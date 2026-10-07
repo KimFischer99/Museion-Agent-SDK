@@ -1,6 +1,6 @@
 {
   "name": "@proactive-sdk/client-ts",
-  "version": "0.5.0",
+  "version": "0.1.0",
   "description": "Generated TypeScript client for the PAS JSON-RPC 2.0 control plane (SPEC §14.2). Compatibility claims require the locked-version end-to-end tests (AGENTS.md); source-distributed until P7.",
   "type": "module",
   "main": "src/index.ts",
