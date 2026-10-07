@@ -11,7 +11,7 @@
 | P3 独立 Agent 闭环 | **done** | 2026-10-06 | Source/Memory ports、ContextPack、ToolLoopExecutor、OpenAI 兼容 ModelPort、L0/L1 coordinator；验收测试见下 |
 | P4 策略与投递 | **done** | 2026-10-06 | grants、冻结参数审批、owner channels、outbox 派发（attempt journal/幂等 key/unknown 对账）、本人 inbox、真实 webhook 通知 sink、feedback；验收测试见下 |
 | P5 宿主适配 | **done** | 2026-10-07 | Hermes Runs executor、Pi worker 桥、JSON-RPC 2.0 控制面协议 + client-ts 生成、Hermes proactive 插件；锁定版本真实服务验证 8/8 PASS；验收测试见下 |
-| P6 Skills 能力 | not started | — | legacy importer、aliases、依赖闭包、Gmail/Calendar 最小兼容 |
+| P6 Skills 能力 | **done** | 2026-10-07 | legacy importer（88/88 审计一致）、canonical id/aliases、依赖闭包、sidecar、GWS 受限 grammar + 邮件/日历连接器、出站 broker、公开资料跟踪、四链路闭环 demo、Pi extension；验收测试见下 |
 | P7 产品化与发布 | not started | — | daemon、备份恢复、SBOM、license gate、兼容矩阵 |
 
 ## P0 记录（2026-10-06）
@@ -312,6 +312,87 @@ delivered 后同 key 重试/无权威源永远停摆/权威 delivered 收口）�
   webhook sink 目前仅禁跟随重定向 + 默认 TLS 验证；属 P4/P6 之间的网络层工作。
 - profile 级配额只有每日条数口径；预算账本（token/费用）仍待 P5+。
 - 快照正文已入 blobs；大附件的分块/外置 blob 存储策略在 P6 随连接器补齐。
+
+## P6 记录（2026-10-07）
+
+实现（对应 SPEC §11 / §9 网络边界 / 工单 C 的适配部分）：
+
+- **`src/proactive_sdk/skills.py`**：Muse legacy importer（BYO、原目录只读）。
+  零依赖 frontmatter 解析（inline JSON / 块映射 / 块列表 / 续行）；
+  canonical id（下划线→连字符、碰撞加短 hash 后缀无碰撞）+ aliases
+  （原名与目录名都可检索）；依赖闭包（SKILL.md 目录树 + 正文引用的
+  共享 references/scripts，嵌套 artifacts 层共享资产入闭包，不复制单个
+  SKILL.md）；§11.3 sidecar（source/canonical_name/aliases/requirements/
+  compatibility/distribution + legacy 扩展记录）；`audit_consistency`
+  对照 audit/skills.json。符号链接逃逸在扫描与闭包两侧都被拒绝
+  （pathsafe ensure_within against 扫描基）。
+- **store**：`record_skill_install` / `get_skill_install` /
+  `list_skill_installs`——同 (name, hash) 幂等、状态可推进
+  （parsed→contract_tested→…）、不同 hash 冲突拒绝（§11.3 技术状态与
+  再分发状态独立，installed ≠ e2e_verified）。
+- **`src/proactive_sdk/gws.py`**：`hatch_gws_cli` 受限 grammar。argv 列表
+  only；只读子集（gmail status/+triage/+read、calendar status/+agenda）；
+  其余（含全部写操作）→ `unsupported_command`，不猜测不放行——写入走
+  PAS 审批链；not_connected 时原样转发 provider 的 connect_url，没有 URL
+  就如实 unavailable（不伪造授权或链接）；auth 错误 → reauth_required；
+  provider 内部异常只泄类名。
+- **`src/proactive_sdk/connectors.py`**：`GmailMailSource` /
+  `CalendarAgendaSource` / `PublicMaterialSource`（§11.5 首版闭环的三个
+  读取源）。Delta 统一走 cursor：页面 (fact_id, revision) 的 hash 存
+  source_state，相同即空批 → L0 抑制零模型；gmail/calendar 未连接如实
+  AUTH_REQUIRED（连接是用户的动作）；公开资料 sensitivity=public，内容
+  hash 变化才有新 revision，fact_id 稳定。
+- **coordinator（加量）**：`_source_request` 现在把存量 cursor_ref 传给
+  连接器（SourceRequest 语义本来如此），补齐连接器的增量判定基础。
+- **`src/proactive_sdk/net.py`**：出站 broker 第一块（P4 遗留缺口）。
+  HTTPS-only、显式域名 allowlist（精确+子域）、本地解析并钉扎 IP
+  （SNI=allowlisted host）、私网/回环/链路本地拒绝（SSRF guard）、
+  禁跟随重定向、有界响应、内容类型白名单、自定义 trust anchor 可注入
+  （永不关闭校验）。残余风险如实记录（TOCTOU 双解析比对未做）。
+- **`examples/pas_pi_extension/`**：Pi 方式 B extension（registerTool
+  官方入口）注册 proactive_schedule/status/pause/resume/skills_inspect，
+  全部落 PAS RPC；自含最小客户端（回环/https 校验、无凭据泄漏）；
+  未配置 fail closed。契约测试 6 项（stub pi + loopback 脚本服务器）。
+- **`examples/skills_loop_demo.py`**：四链路闭环——import（真实语料
+  88/88 审计一致 + installs 记账）、mail（提案→策略→outbox→本地 inbox
+  一次入箱，摘要按用户 locale 而非 skill 固定英文）、calendar（tick1
+  proposed、tick2 零模型抑制）、material（内容变化才新 revision）。
+
+关键语义决定（与 SPEC 的对应）：
+
+- `includeInPrompt` 只进 sidecar，永不解释为每轮全文注入（§11.2）。
+- 技术状态从 `parsed` 起步：本阶段 gmail/google-calendar 通过 grammar
+  契约测试（contract_tested 语义），`e2e_verified` 留给有真实授权的
+  部署——导入/测试不构成授权。
+- grammar 只按 argv 白名单放行；"+send 等写命令 unsupported" 是能力
+  缺口陈述而非故障（§11.4 首版缺失时明确 adapter_required/blocked）。
+- L0 变更判定补齐 cursor 透传后，连接器统一"页面 hash = cursor"的
+  delta 语义；无 delta 语义的源会每拍进 L1（与 L0 的 `bool(items)`
+  分支一致），连接器默认不做这种事。
+
+验收（§15.1 P6 行）：
+
+- **88 入口审计一致**：`audit_consistency` 在真实 private-vendor 语料上
+  match=true（count 88、issue 计数 43/41/88/1、全部 sha256/名称/路径）。
+- **邮件/日历/资料跟踪/本人通知闭环**：skills_loop_demo 四链路全绿
+  （mail: proposed→actions_queued→inbox 1 条；calendar/material: 变化
+  proposed、不变 suppressed 零模型）。
+- **其余缺口透明**：report 的 issue_counts/compatibility 分布、sidecar
+  requirements/compatibility/distribution 字段、PROGRESS/VALIDATION
+  已知缺口清单。
+- **不得模拟已授权**：not_connected/unavailable 语义测试、无 URL 不编造、
+  distribution 恒 permission_unverified、写命令一律 unsupported。
+
+已知缺口（不阻塞 P7，按阶段补）：
+
+- gmail/calendar 的 `e2e_verified` 与真实 Google 授权联调未做（无授权
+  凭据；需要部署方提供 connect 流程）；outlook 系同理。
+- Hermes 插件/Pi extension 仍未安装进活跃宿主 profile（操作者决定 +
+  PAS daemon P7）。
+- EgressBroker 的重定向目标主机不重评（直接拒绝）、TOCTOU 双解析比对
+  未做；cookie/凭据注入类宿主场景不在首版范围。
+- 大附件分块/外置 blob 策略仍留 P6→P7（当前附件不落 PAS 存储，gmail
+  +read 只回 inventory 元数据）。
 
 ## P5 记录（2026-10-07）
 

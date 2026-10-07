@@ -3099,5 +3099,110 @@ class Store:
         return f"run{digest[:28]}"
 
 
+
+    # ------------------------------------------------------------------ #
+    # Skill installs (§11; P6). Manifest hash is the store-computed
+    # canonical value; a sidecar that does not match the stored hash is a
+    # conflict, never a silent update.
+    # ------------------------------------------------------------------ #
+
+    def record_skill_install(
+        self,
+        *,
+        canonical_name: str,
+        source_hash: str,
+        sidecar: dict[str, Any],
+        technical_status: str,
+        distribution_status: str,
+        now_ms: int,
+    ) -> str:
+        """Insert or advance one skill install; idempotent on the same
+        (name, hash) pair, conflict on a different hash for the same name
+        (删除/改写走显式流程，不在这里静默覆盖)."""
+        import json as _json
+        import uuid as _uuid
+
+        if not canonical_name or not 1 <= len(canonical_name) <= 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "canonical_name must be 1..128 chars", scope="skills")
+        if not source_hash or len(source_hash) > 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "source_hash must be 1..128 chars", scope="skills")
+        manifest = _json.dumps(sidecar, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        if len(manifest) > 256 * 1024:
+            raise PASError(ErrorCode.INVALID_CONFIG, "sidecar exceeds 256KiB", scope="skills")
+        known_status = ("discovered", "parsed", "dependencies_resolved",
+                        "contract_tested", "e2e_verified", "blocked")
+        if technical_status not in known_status:
+            raise PASError(ErrorCode.INVALID_CONFIG,
+                           f"technical_status must be one of {known_status}", scope="skills")
+        if not distribution_status:
+            raise PASError(ErrorCode.INVALID_CONFIG, "distribution_status is required", scope="skills")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT install_id, source_hash FROM skill_installs WHERE canonical_name=?",
+                (canonical_name,),
+            ).fetchone()
+            if row is not None:
+                if row["source_hash"] != source_hash:
+                    raise PASError(
+                        ErrorCode.CONFLICT,
+                        f"skill {canonical_name!r} already installed from a different source hash",
+                        scope="skills",
+                    )
+                install_id = row["install_id"]
+                self.db.execute(
+                    """UPDATE skill_installs
+                       SET manifest_json=?, technical_status=?, distribution_status=?, updated_at_ms=?
+                       WHERE install_id=?""",
+                    (manifest, technical_status, distribution_status, now_ms, install_id),
+                )
+                return install_id
+            install_id = "skill_" + _uuid.uuid4().hex
+            self.db.execute(
+                """INSERT INTO skill_installs
+                   (install_id, canonical_name, source_hash, manifest_json,
+                    technical_status, distribution_status, updated_at_ms)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (install_id, canonical_name, source_hash, manifest,
+                 technical_status, distribution_status, now_ms),
+            )
+            return install_id
+
+    def get_skill_install(self, canonical_name: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT install_id, canonical_name, source_hash, manifest_json, technical_status,"
+            " distribution_status, updated_at_ms FROM skill_installs WHERE canonical_name=?",
+            (canonical_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "install_id": row["install_id"],
+            "canonical_name": row["canonical_name"],
+            "source_hash": row["source_hash"],
+            "sidecar": json.loads(row["manifest_json"]),
+            "technical_status": row["technical_status"],
+            "distribution_status": row["distribution_status"],
+            "updated_at_ms": row["updated_at_ms"],
+        }
+
+    def list_skill_installs(self) -> tuple[dict[str, Any], ...]:
+        rows = self.db.execute(
+            "SELECT install_id, canonical_name, source_hash, manifest_json, technical_status,"
+            " distribution_status, updated_at_ms FROM skill_installs ORDER BY canonical_name"
+        ).fetchall()
+        return tuple(
+            {
+                "install_id": row["install_id"],
+                "canonical_name": row["canonical_name"],
+                "source_hash": row["source_hash"],
+                "sidecar": json.loads(row["manifest_json"]),
+                "technical_status": row["technical_status"],
+                "distribution_status": row["distribution_status"],
+                "updated_at_ms": row["updated_at_ms"],
+            }
+            for row in rows
+        )
+
+
 def canonical_loads(text: str) -> Any:
     return json.loads(text)

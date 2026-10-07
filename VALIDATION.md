@@ -348,6 +348,67 @@ systemd；runs.events 仅轮询观察，SSE 流式未实现（SPEC 允许：SSE 
 Pi 方式 B（extension 注册 proactive.*）随 P6；idempotency 超期（>86400s）
 对账未自动化；token/费用预算账本未实现。
 
+## 5f. P6 Skills 能力（新增，2026-10-07）
+
+实际命令（本机）：
+
+- `python3 -m unittest discover -s tests` → **486 项全部通过**（交接 52 +
+  P1 125 + P2 76 + P3 58 + P4 63 + P5 61 + P6 新增 51：skills 13、gws 19、
+  net 12、connectors 7），参考 demo 输出不变；审计复现 OK；license gate
+  PASS（96 tracked files）。
+- `python3 examples/skills_loop_demo.py` → 四场景断言全过：import（真实
+  88 语料 audit_match=true、installs=2）、mail_loop（proposed→
+  actions_queued→本地 inbox 1 条）、calendar_loop（tick1 proposed、tick2
+  suppressed `l0_no_source_change`、模型调用共 1 次）、material_loop
+  （tick1 proposed、tick2 suppressed 零模型）。
+- TS：`tsc --strict --outDir /tmp/pas-ts-build examples/pi_executor.ts
+  tests/pi_contract_test.ts tests/pi_extension_contract_test.ts
+  examples/pas_pi_extension/index.ts` → 4 + 6 项契约检查通过；
+  `tsc -p packages/client-ts/tsconfig.json` 照旧通过。
+
+88 入口审计一致性（private-vendor Muse 快照存在时执行；缺席则显式 skip）：
+
+- `audit_consistency(importer.scan→report, audit/skills.json)` →
+  **match=true**：count 88；issue_counts {invalid_name 43,
+  name_directory_mismatch 41, metadata_values_not_all_strings 88,
+  invalid_description 1} 与审计完全一致；全部 source_path/sha256/
+  original_name/canonical_name_proposed 逐项一致；零多余路径。
+- gmail → capabilities [gmail.read]、tools [hatch_gws_cli]、grants
+  [selected_mail_account]；google-calendar → [calendar.read]/…
+  [selected_calendar_account]（§11.3 sidecar）。
+
+P6 新增覆盖：
+
+- **skills（13）**：frontmatter 三种形态 + 续行 + 缺失记录；canonical
+  无碰撞（gmail/gmail-2）与 aliases；嵌套 artifacts 共享 references 进
+  闭包；sidecar 结构与 distribution 独立（permission_unverified）；store
+  幂等推进与异 hash 冲突；符号链接逃逸拒绝；真实语料审计一致性。
+- **gws（19）**：非 hatch/未知 service/未知命令/写命令（+send、
+  events.insert）→ unsupported；+triage 需 query、--max 限 50（成本
+  口径）、+read 需 id、坏 flag 类型化拒绝；not_connected 转发 provider
+  connect_url、无 URL → unavailable 且 `connect_url` 恒 None（不编造）；
+  `--for-command` 透传；provider auth 错误 → reauth_required；连接器
+  崩溃只泄类名。
+- **net（12）**：allowlist 强制、http/非 443/URL 凭据拒绝、无显式
+  allow_loopback 时回环拒绝（SSRF guard）、子域策略通过但传输仍受门；
+  回环 TLS 快乐路径（openssl 自签 + CA 装载，校验开启）经钉扎 IP 取回
+  正文；重定向/超尺寸/不允许 content-type 拒绝。
+- **connectors（7）**：not_connected 无 URL → AUTH_REQUIRED（"unavailable"，
+  异常文本不含任何 https://，即不编造 URL）；带 URL 时如实报告存在；
+  delta cursor：相同页面 → 空批、变化页 → 同 fact_id 新 revision；
+  账户绑定校验；公开资料 sensitivity=public。
+- **pi extension TS（6）**：官方 registerTool 注册 5 工具；schedule 落
+  PAS（jobs.create 到达脚本服务器）；status/skills inspect 正常；未配置
+  fail closed 且安全消息无 URL 泄漏。
+
+P6 未做/边界（如实记录）：gmail/calendar/outlook 的 `e2e_verified` 与
+真实 Google/Microsoft 授权联调未做（无授权凭据；连接流程属部署方）；
+Hermes 插件与 Pi extension 未安装进活跃 profile（操作者决定 + PAS
+daemon P7）；EgressBroker 不跟随重定向（目标主机重评不需要）、TOCTOU
+双解析比对未做；大附件分块/外置 blob 策略留 P7（gmail +read 只回
+inventory 元数据，附件字节不入 PAS）；`pas skills import/explain` CLI
+壳属 P7 facade； Muse 全量目录不内置（BYO 模式）。
+
 ## 6. 明确未做（交接包历史记录，继续有效）
 
 交接包阶段（至 2026-10-06）没有对真实 Hermes gateway、真实 Pi SDK、Muse 后台、邮箱、日历、设备、push 服务或付费模型执行联调；没有发布、安装或提交到用户的仓库；没有验证全部 88 个 Skill 的实际功能；没有完成第三方代码再分发授权核验。

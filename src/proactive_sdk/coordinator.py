@@ -343,11 +343,13 @@ class ProactiveCoordinator:
         from .contracts import SourceRequest
 
         deadline = _ms_to_rfc3339(now_ms + self.config.source_fetch_deadline_s * 1000)
+        previous = self.store.get_source_state(entry.source_id, entry.account_ref)
         return SourceRequest(
             source_id=entry.source_id,
             account_ref=entry.account_ref,
             deadline=deadline,
             scope=dict(entry.scope),
+            cursor_ref=previous.cursor_ref if previous is not None else None,
         )
 
     @staticmethod
