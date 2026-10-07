@@ -12,7 +12,7 @@
 | P4 策略与投递 | **done** | 2026-10-06 | grants、冻结参数审批、owner channels、outbox 派发（attempt journal/幂等 key/unknown 对账）、本人 inbox、真实 webhook 通知 sink、feedback；验收测试见下 |
 | P5 宿主适配 | **done** | 2026-10-07 | Hermes Runs executor、Pi worker 桥、JSON-RPC 2.0 控制面协议 + client-ts 生成、Hermes proactive 插件；锁定版本真实服务验证 8/8 PASS；验收测试见下 |
 | P6 Skills 能力 | **done** | 2026-10-07 | legacy importer（88/88 审计一致）、canonical id/aliases、依赖闭包、sidecar、GWS 受限 grammar + 邮件/日历连接器、出站 broker、公开资料跟踪、四链路闭环 demo、Pi extension；验收测试见下 |
-| P7 产品化与发布 | not started | — | daemon、备份恢复、SBOM、license gate、兼容矩阵 |
+| P7 产品化与发布 | **done** | 2026-10-07 | 公共 facade（ProactiveAgent）、常驻 daemon（单实例锁/恢复/drain 停机/磁盘满报警/health.json）、Unix socket 控制面 + 认证、CLI（pas serve/doctor/jobs/…）、备份恢复/导出/删除、结构化日志与指标、systemd/container/launchd 示例、wheel 构建产物门禁 + SBOM、兼容矩阵；安装 smoke PASS；验收测试见下 |
 
 ## P0 记录（2026-10-06）
 
@@ -475,3 +475,94 @@ pi-coding-agent 1.0.4、node v22.19.0、tokenrhythm/glm-5.3-flash）真实
 - Pi 侧方式 B（Pi extension 注册 proactive.* 工具）未开工，随 P6 skills。
 - 验证期真实 provider 调用约 9 次微小 run（glm-5.3-flash，合计约
   2.5k 输入 tokens 量级）；token/费用级预算账本仍未实现（P3 缺口延续）。
+
+## P7 记录（2026-10-07）
+
+实现（对应 §14 / §17 / OPS-01 / 工单集成负责人）：
+
+- **`src/proactive_sdk/facade.py`**：`ProactiveAgent` 公共 facade（§14.1）。
+  tick（准入→L0/L1→策略→派发，无到期任务零模型调用）、jobs CRUD +
+  pause/resume + manual trigger、runs get/list/cancel（取消请求持久化
+  m006，排队 run 原子转 suppressed、在途 run 通知 cancel_event、终态
+  如实报 not_cancellable）、grants（仅可信 UI 入口）/approvals/feedback/
+  inbox、skills audit/import/explain（explain 输出 capabilities 缺口与
+  授权状态）、hooks 注册/运行、status/health、export/delete-data、
+  backup/restore、start/stop/close + async context manager；stop 区分
+  drain 与 force（force 中断的 run 保持 running+lease，由下一实例以
+  attempt+1 恢复，绝不改写为 completed）。
+- **`src/proactive_sdk/daemon.py`**：§17.1 生命周期。启动 = 单实例锁
+  （PID 锁，死进程 stale 接管、不可读 fail-closed）→ 恢复（cancel flag
+  清扫、过期投递清扫、deferred 提升、hook staging 清理、重算到期）→
+  serve。停机 = 停止准入 → drain（grace 内等在途 run）→ 强制第二次信号
+  → 关连接，停止报告如实区分 drained/interrupted。磁盘满两级报警
+  （warn 降级 / critical 停止准入但保持读服务）。health.json 每轮原子
+  刷新（readiness 无需 RPC 客户端）。
+- **`src/proactive_sdk/rpc_server.py`**：§14.2 方法集绑定 facade，Unix
+  socket（0600）+ newline-JSON 帧。认证 fail-closed：同 UID peer 凭据
+  （Linux SO_PEERCRED / macOS LOCAL_PEERCRED）或 token_file bearer
+  （constant-time 比较）；非 hello 首帧拒绝并断连；token 不进日志。
+- **`src/proactive_sdk/service.py`**：`pas` CLI（pyproject console
+  script）。serve/tick（--app module:factory 装配）/doctor/status/jobs/
+  runs/approvals/notifications/skills/hooks/backup/restore/export/
+  delete-data/config/rpc/version；全部子命令帮助文本；破坏性命令需
+  `--yes`；操作类命令直连 store（与 daemon 共用 fencing，无第二
+  scheduler owner）。
+- **`src/proactive_sdk/config.py`**：§14.3 配置（自包含 YAML 子集解析，
+  零依赖）。未知键拒绝（顶层+嵌套）、tab/重复键/语法错误拒绝、
+  timezone 校验；`redacted()` 打印视图隐藏家目录路径与 secret 引用；
+  profile 时区来自配置，不推断开发机。
+- **`src/proactive_sdk/observability.py`**：§17.2。结构化 JSON 日志
+  （run_id/event_id/action_id/job_id/phase/duration + 脱敏：bearer/
+  API key/私钥块/长熵串）；SPEC 命名指标（wake/suppressed/model_calls/
+  tool_denied/outbox_pending/delivery_unknown/grant_revoked/
+  scheduler_lateness）；health = liveness vs readiness（磁盘低/
+  delivery_unknown/来源故障/调度停滞 → degraded + 机器原因）。
+- **`src/proactive_sdk/backup.py`**：在线备份（SQLite backup API，
+  0600 + sha256 sidecar）；restore 五重校验（sidecar/hash/integrity/
+  schema≤二进制/identity）+ 原子替换 + daemon 锁拒绝。
+- **store**：m006（runs.cancel_requested）；`request_run_cancel`/
+  `resolve_cancel_requested`/`run_state_counts`/`outbox_state_counts`/
+  `integrity_check`/`schema_version`/`export_profile_data`/
+  `wipe_profile_data`。
+- **部署与发布**：`deploy/`（systemd 加固 unit、Containerfile + compose
+  含 healthcheck、launchd plist、README）；`compatibility-lock.json` +
+  `docs/COMPATIBILITY.md`（Hermes 0.21.5 / Pi 1.0.4 锁定、e2e_verified
+  如实为 false）；`tools/package_gate.py`（对 wheel/sdist 本体做禁止
+  路径/hash/密钥扫描，PEM 检测为完整块结构避免误报）；`tools/gen_sbom.py`
+  （CycloneDX 1.5，逐成员 sha256）；`tools/install_smoke.py`（全新 venv
+  安装 → CLI 流程 → 嵌入 tick）→ **INSTALL SMOKE: PASS**；
+  `docs/SECURITY.md`（威胁模型边界 + 已知缺口）、`docs/CONTRIBUTING.md`
+  （提交前门禁清单）。
+
+验收（§15.1 P7 行）：
+
+- `python3 -m unittest discover -s tests` → **532 项全部通过**（交接 52
+  + P1 125 + P2 76 + P3 58 + P4 63 + P5 61 + P6 51 + P7 新增 46：
+  product 27、daemon/RPC/CLI 19）。
+- 重启故障（真实子进程 kill -9 在途 run → 重启实例以 attempt+1 回收，
+  不伪造 completed）、「取消请求 ≠ 成功完成」（queued→suppressed/
+  running→requested/终态→not_cancellable）、drain vs force、备份五重
+  校验（identity/schema/篡改/hash/daemon 锁）、认证拒绝（非 hello 首帧/
+  错 token）、配置未知键、日志脱敏、CLI 破坏性命令确认——均有断言。
+- 全量 conformance 命令照旧：参考 demo 输出不变；审计复现 OK；
+  license gate PASS；`tsc -p packages/client-ts` 通过；package_gate
+  PASS；SBOM 生成；install smoke PASS。
+
+P7 未做/边界（如实记录，不作为已完成能力）：
+
+- **真实用户流程人工回归未做**——SPEC §15.1 P7 行的最后一项验收
+  （真人按 README 用例操作）需要操作者执行，本阶段仅机器门禁。
+- 未发布到 PyPI/npm（自用项目，无发布动作；wheel/sdist 构建与产物
+  门禁就绪）。npm 发布与 client-ts 的 registry 分发未做。
+- 控制面远程 TLS HTTP 未实现（SPEC §14.2：本地 socket 默认，远程才
+  需要 TLS——留待部署需要时）。
+- `event_retention_days` 应用于运行日志账本（delivery_attempts/
+  hook_invocations 等清扫）未实现；事件/run 决策账本保留至
+  export/delete（边界在 SECURITY.md 声明）。
+- 大附件分块/外置 blob 策略未实现（P6 缺口延续，gmail +read 只回
+  inventory 元数据）。
+- runs.cancel 对 actions_queued 之后的消息不生效（outbox 撤销走
+  grant 撤销/feedback 路径，文档已注明语义边界）。
+- skills.explain 的 `binaries` 字段依赖 sidecar 记录；运行时 PATH 探测
+  未实现（技术状态到 parsed 为止）。
+

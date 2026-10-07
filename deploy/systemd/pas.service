@@ -1,0 +1,54 @@
+# PAS daemon — systemd unit example (SPEC §17.1).
+#
+# Install: copy to /etc/systemd/system/pas.service, adjust User /
+# WorkingDirectory / ExecStart, then `systemctl daemon-reload && systemctl
+# enable --now pas`. The daemon runs in the FOREGROUND — this is the
+# contract: systemd owns restart, pas owns drain.
+#
+# ExecStart needs an app module (--app module:factory) that wires the
+# executor/sources/sinks into a ProactiveAgent; see examples/pas_app.py.
+# Do NOT point --app at examples.pas_app in production: its executor is
+# an inert demo.
+
+[Unit]
+Description=Proactive personal agent runtime (PAS)
+Documentation=file:///opt/pas/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=pas
+Group=pas
+WorkingDirectory=/opt/pas/app
+# The factory returns a ProactiveAgent; the CLI owns the event loop.
+ExecStart=/opt/pas/venv/bin/pas serve --app app.wiring:build_agent --config /etc/pas/pas.yaml
+# Graceful drain on TERM (runtime.shutdown_grace_seconds, default 20s);
+# after TimeoutStopSec systemd escalates to SIGKILL — in-flight runs
+# stay `running` with a live lease and are recovered (attempt+1) on the
+# next start. Nothing is faked as completed.
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+# A crash loop must page a human, not spin silently.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- hardening (checked with `systemd-analyze security pas`) -----------
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pas
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

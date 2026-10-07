@@ -1309,13 +1309,15 @@ class Store:
             if run_id is not None:
                 row = self.db.execute(
                     """SELECT run_id, event_id, fence FROM runs WHERE run_id=?
+                       AND cancel_requested=0
                        AND (state='queued' OR (state='running' AND lease_until_ms<=?))""",
                     (run_id, now_ms),
                 ).fetchone()
             else:
                 row = self.db.execute(
                     """SELECT run_id, event_id, fence FROM runs
-                       WHERE state='queued' OR (state='running' AND lease_until_ms<=?)
+                       WHERE cancel_requested=0
+                       AND (state='queued' OR (state='running' AND lease_until_ms<=?))
                        ORDER BY rowid LIMIT 1""",
                     (now_ms,),
                 ).fetchone()
@@ -3202,6 +3204,133 @@ class Store:
             }
             for row in rows
         )
+
+    # ------------------------------------------------------------------ #
+    # P7 operations: cancel requests, health counters, backup/export.
+    # ------------------------------------------------------------------ #
+
+    _RUN_TERMINAL_STATES = frozenset(
+        {"planned", "proposed", "policy_evaluated", "actions_queued",
+         "waiting_for_approval", "completed", "failed", "suppressed"}
+    )
+
+    def request_run_cancel(self, run_id: str, *, now_ms: int) -> dict[str, Any]:
+        """Record a durable cancel request (SPEC §14.2 runs.cancel).
+
+        The return value names what actually happened — a request is not
+        a completion: queued runs are resolved to ``suppressed`` here
+        (they never reach the model), running runs keep the flag and the
+        in-flight worker decides the final state. Anything past the
+        running phase is not cancellable from here; queued actions are
+        governed by policy/outbox, not by runs.cancel.
+        """
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT state, cancel_requested FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown run {run_id!r}", scope="runs")
+            state = row["state"]
+            if state == "queued":
+                self.db.execute(
+                    "UPDATE runs SET state='suppressed', error_class='cancelled_by_request',"
+                    " cancel_requested=1, cancel_requested_ms=?, lease_until_ms=0, updated_at_ms=?"
+                    " WHERE run_id=?",
+                    (now_ms, now_ms, run_id),
+                )
+                return {"run_id": run_id, "outcome": "cancelled", "state": "suppressed"}
+            if state == "running":
+                if row["cancel_requested"]:
+                    return {"run_id": run_id, "outcome": "already_requested", "state": state}
+                self.db.execute(
+                    "UPDATE runs SET cancel_requested=1, cancel_requested_ms=?, updated_at_ms=?"
+                    " WHERE run_id=?",
+                    (now_ms, now_ms, run_id),
+                )
+                return {"run_id": run_id, "outcome": "cancel_requested", "state": state}
+            return {"run_id": run_id, "outcome": "not_cancellable", "state": state}
+
+    def resolve_cancel_requested(self, *, now_ms: int) -> int:
+        """Resolve cancel flags the in-flight worker can no longer observe
+        (queued-with-flag leftovers and expired-lease running runs). The
+        final state stays honest: suppressed with a machine reason, never
+        rewritten to completed."""
+        with self.transaction():
+            rows = self.db.execute(
+                "SELECT run_id, state FROM runs WHERE cancel_requested=1"
+                " AND (state='queued' OR (state='running' AND lease_until_ms<=?))",
+                (now_ms,),
+            ).fetchall()
+            for row in rows:
+                self.db.execute(
+                    "UPDATE runs SET state='suppressed', error_class='cancelled_by_request',"
+                    " lease_until_ms=0, updated_at_ms=? WHERE run_id=?",
+                    (now_ms, row["run_id"]),
+                )
+            return len(rows)
+
+    def run_state_counts(self) -> dict[str, int]:
+        rows = self.db.execute(
+            "SELECT state, COUNT(*) AS n FROM runs GROUP BY state"
+        ).fetchall()
+        return {row["state"]: row["n"] for row in rows}
+
+    def outbox_state_counts(self) -> dict[str, int]:
+        rows = self.db.execute(
+            "SELECT state, COUNT(*) AS n FROM outbox GROUP BY state"
+        ).fetchall()
+        return {row["state"]: row["n"] for row in rows}
+
+    def integrity_check(self) -> str:
+        row = self.db.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0]) if row is not None else "unknown"
+
+    def schema_version(self) -> int:
+        row = self.db.execute(
+            "SELECT MAX(version) AS v FROM schema_migrations"
+        ).fetchone()
+        return int(row["v"]) if row is not None and row["v"] is not None else 0
+
+    def export_profile_data(self) -> dict[str, Any]:
+        """Full logical dump of this profile's tables as plain JSON-able
+        structures. Explicit user-initiated data portability (§14.1
+        export); not a substitute for backup/restore, which preserves the
+        database byte-level state."""
+        tables = (
+            "jobs", "events", "runs", "run_events", "run_proposals",
+            "hooks", "hook_invocations", "grants", "approvals",
+            "actions", "outbox", "delivery_attempts", "owner_channels",
+            "topic_mutes", "feedback", "inbox", "skill_installs",
+        )
+        dump: dict[str, Any] = {}
+        for table in tables:
+            try:
+                rows = self.db.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608 — fixed set
+            except sqlite3.Error:
+                continue  # table absent in older schemas
+            dump[table] = [dict(row) for row in rows]
+        return dump
+
+    def wipe_profile_data(self) -> dict[str, int]:
+        """Delete all profile data rows (§14.1 delete), keeping the schema
+        and identity binding. Called only by explicit user confirmation
+        through the trusted control plane."""
+        tables = (
+            "delivery_attempts", "outbox", "actions", "approvals", "grants",
+            "inbox", "feedback", "topic_mutes", "owner_channels",
+            "run_proposals", "run_events", "runs", "events", "hook_invocations",
+            "hooks", "snapshots", "source_state", "job_occurrences",
+            "jobs_idempotency", "jobs", "skill_installs", "blobs",
+        )
+        deleted: dict[str, int] = {}
+        with self.transaction():
+            for table in tables:
+                try:
+                    cur = self.db.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed set
+                    deleted[table] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                except sqlite3.Error:
+                    continue
+        return deleted
 
 
 def canonical_loads(text: str) -> Any:

@@ -409,6 +409,82 @@ daemon P7）；EgressBroker 不跟随重定向（目标主机重评不需要）�
 inventory 元数据，附件字节不入 PAS）；`pas skills import/explain` CLI
 壳属 P7 facade； Muse 全量目录不内置（BYO 模式）。
 
+## 5g. P7 产品化与发布（新增，2026-10-07）
+
+实际命令（本机 macOS，Python 3.14.4 / SQLite 3.50.4）：
+
+- `python3 -m unittest discover -s tests` → **532 项全部通过**（交接 52 +
+  P1 125 + P2 76 + P3 58 + P4 63 + P5 61 + P6 51 + P7 新增 46：
+  test_p7_product 27 + test_p7_daemon 19）。参考 demo（reference_core /
+  agent_loop_demo / policy_delivery_demo / skills_loop_demo）输出不变；
+  审计复现 OK；license gate PASS。
+- `python3 -m pip wheel . -w dist --no-deps` → wheel 构建成功；
+  `python3 tools/package_gate.py dist/*.whl` → **PACKAGE GATE: PASS**
+  （对 wheel 成员做禁止路径（private-vendor/muse 系）、Muse 审计 hash、
+  密钥形文件名、完整 PEM 私钥块（header+base64 body+END，避免把本包
+  自身的脱敏正则误判为密钥）扫描——扫的是产物本体，不是 git）。
+- `python3 tools/gen_sbom.py dist/*.whl -o dist/sbom.cdx.json` →
+  CycloneDX 1.5 SBOM 生成（包自身 + optional extras + 逐成员 sha256；
+  运行时依赖如实记录为 stdlib only）。
+- `python3 tools/install_smoke.py dist` → **INSTALL SMOKE: PASS**（全新
+  venv → 装 wheel → `pas --help`/`version` → `doctor --json` 全绿 →
+  jobs create/list/backup/restore/export → 嵌入模式 tick（脚本化
+  executor，零模型调用）→ 全生命周期关闭）。
+- `tsc -p packages/client-ts/tsconfig.json`（strict + 
+  noUncheckedIndexedAccess + exactOptionalPropertyTypes）通过；
+  pi_executor/pi_extension 契约检查照旧通过。
+
+P7 新增覆盖（对应 SPEC §14 / §15.1 P7 行 / §17 / OPS-01）：
+
+- **facade（§14.1）**：tick 全链（准入→L0/L1→策略→派发；无到期任务零
+  模型调用；同一时钟推进一步只跑一个槽）；jobs CRUD + pause（暂停拒绝
+  手动触发）/resume/manual trigger；runs.cancel 三态如实（queued→
+  suppressed 原子、running→cancel_requested、终态→not_cancellable，
+  cancel_requested 落库）；grants 仅可信入口、profile 不匹配 reopen
+  拒绝；export/delete（确认短语强制）；context manager 关闭 store。
+- **daemon（§17.1）**：单实例锁（活锁拒绝/死 pid 接管/不可读
+  fail-closed）；嵌入 start/stop 与 serve 同锁仲裁；**重启故障——真实
+  子进程 kill -9 在途 run，重启实例 tick 以 attempt+1 回收且不产生
+  completed**；force stop 报告 interrupted 且无 run 被改写为 completed；
+  health.json 每轮原子刷新、ready 无降级原因。
+- **控制面（§14.2）**：Unix socket 0600；20 个 §14.2 方法全绑定（jobs
+  create/list/pause/resume/delete、runs list、notifications.list、
+  system.hello/health 在测试中逐条应答）；非 hello 首帧 → auth_required
+  并断连；token 认证单测（正确 token → principal token: 前缀、错
+  token/缺 token 拒绝，constant-time 路径）；同 UID peer 凭据信任。
+- **备份恢复（OPS-01）**：roundtrip 行数一致 + 0600 权限 + sha256
+  sidecar；restore 拒绝：profile 不匹配、daemon 锁存在、meta 声称
+  schema 比数据库新（999）、payload 单字节篡改（hash 不符）。
+- **可观察性（§17.2）**：日志行为结构化 JSON 且 bearer/sk- 密钥被
+  [REDACTED]（写前脱敏，测试含"不落盘未脱敏"探针）；指标名与 SPEC
+  对齐；health 降级原因（disk_low/delivery_unknown/scheduler_stale）
+  可机读。
+- **config（§14.3）**：全量样例加载、未知顶层/嵌套键拒绝、坏时区/坏
+  时间窗/坏 misfire 拒绝、tab 与重复键拒绝、redacted 视图无家目录路径、
+  YAML 子集 roundtrip；CLI `config check/print` 同路径。
+- **CLI**：help/version/doctor（缺 state 目录如实 exit 1 并点名）、
+  jobs create/list/trigger、runs cancel（queued→cancelled）、backup/
+  restore（无 --yes 拒绝 exit 2）、export、delete-data（无 --yes
+  拒绝）、config 未知键 exit 2。
+
+P7 未做/边界（如实记录）：
+
+- **真实用户流程人工回归未做**（SPEC P7 行最后一项验收需要真人按
+  README 用例操作——机器门禁全部就绪，人工回归待操作者执行）。
+- **未发布**：无 PyPI/npm 上传动作（自用项目）；wheel/sdist 构建与
+  产物门禁就绪，"包发布"在自用语境下落地为可构建+可扫描+可安装 smoke。
+- 控制面远程 TLS HTTP 未实现；`event_retention_days` 的运行账本清扫
+  未实现（决策账本保留至 export/delete）；大附件分块/外置 blob 未实现；
+  runs.cancel 不触及 actions_queued 之后的 outbox 消息（语义边界在
+  SECURITY.md/COMPATIBILITY.md 注明）；skills.explain 不做运行时 PATH
+  探测。
+- daemon 的 hook 执行在事件循环内联运行（store 连接绑定创建线程；
+  runner 本就单飞）——长 hook 会推迟同拍后续任务，属已知取舍。
+- P5 遗留移交至此关闭：PAS RPC 服务端 facade（本轮 §14.2 绑定）、
+  `pas skills import/explain` CLI 壳（本轮 skills 子命令）、控制面
+  bearer/token 认证（本轮 token_file）；client-ts npm 发布仍未做（无
+  registry 账号，见上"未发布"）。
+
 ## 6. 明确未做（交接包历史记录，继续有效）
 
 交接包阶段（至 2026-10-06）没有对真实 Hermes gateway、真实 Pi SDK、Muse 后台、邮箱、日历、设备、push 服务或付费模型执行联调；没有发布、安装或提交到用户的仓库；没有验证全部 88 个 Skill 的实际功能；没有完成第三方代码再分发授权核验。

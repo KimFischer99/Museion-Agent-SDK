@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd example (SPEC §17.1: macOS 可用单独 launchd 配置).
+  Install:
+    cp deploy/launchd/com.proactive.pas.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.proactive.pas.plist
+  Stop (drains like SIGTERM):
+    launchctl stop com.proactive.pas
+
+  NOTE: a sleeping laptop stops the agent — local sleep is not
+  continuous availability. Keep the heartbeat schedules compatible
+  with the machine's awake pattern, or run the daemon on an always-on
+  host instead.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.proactive.pas</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/pas-venv/bin/pas</string>
+        <string>serve</string>
+        <string>--app</string>
+        <string>app.wiring:build_agent</string>
+        <string>--config</string>
+        <string>/Users/YOU/etc/pas.yaml</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/pas.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/pas.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

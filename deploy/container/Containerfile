@@ -1,0 +1,37 @@
+# PAS daemon container image example (SPEC §17.1 / §17.3.2).
+#
+# Supply-chain rules this file deliberately follows:
+# - the image contains ONLY the public package and the deployment's own
+#   app module — no private-vendor/, no Muse originals, no user config,
+#   no tokens (license_gate / package_gate scan the build context);
+# - pinned base image + no cache mounts that could smuggle state;
+# - the state directory is a volume, so a container stays replaceable.
+#
+# Build from the repo root:
+#   docker build -f deploy/container/Containerfile -t pas-daemon:local .
+#
+# The deployment's wiring module must be present at ./app/wiring.py
+# (factory build_agent(config) -> ProactiveAgent; see examples/pas_app.py).
+
+FROM python:3.12-slim-bookworm
+
+# Run as the dedicated user; state volume is chowned at runtime.
+RUN useradd --system --create-home --home-dir /var/lib/pas pas
+
+WORKDIR /opt/pas
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+# Deployment-owned wiring (NOT part of the SDK distribution):
+COPY app ./app
+
+RUN python -m pip install --no-cache-dir . \
+ && python -m pip check
+
+USER pas
+ENV PAS_STATE_DIR=/var/lib/pas/state
+VOLUME ["/var/lib/pas"]
+
+# Foreground; supervisor semantics live in the compose/systemd layer.
+# --app points at the deployment's own wiring module.
+ENTRYPOINT ["/usr/local/bin/pas"]
+CMD ["serve", "--app", "app.wiring:build_agent", "--config", "/var/lib/pas/pas.yaml"]

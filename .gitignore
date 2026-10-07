@@ -20,3 +20,6 @@ build/
 
 # macOS / 编辑器
 .DS_Store
+
+# 打包中间产物
+src/*.egg-info/

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "proactive-sdk"
 version = "0.1.0.dev0"
-description = "Proactive personal agent runtime kernel (design name proactive-agent-sdk / PAS). Design-stage package; not yet a published product."
+description = "Proactive personal agent runtime kernel (PAS). Single-profile runtime with scheduler, hooks, bounded agent loop, policy and delivery; daemon CLI included."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -18,7 +18,6 @@ dependencies = []
 schema = ["jsonschema>=4.18"]
 
 [project.scripts]
-# Reserved for P7; the CLI does not exist yet. Do not advertise as usable.
 pas = "proactive_sdk.service:main"
 
 [tool.setuptools.packages.find]
@@ -26,3 +25,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 proactive_sdk = ["py.typed", "migrations/*.sql"]
+
+[tool.setuptools]
+# private-vendor/ and any user material live outside src/ and are never
+# packaged; tools/package_gate.py verifies the built artifacts anyway.

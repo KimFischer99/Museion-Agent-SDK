@@ -135,6 +135,29 @@ from .tools import (
     ToolResult,
     ToolSpec,
 )
+from .config import (
+    CONFIG_VERSION,
+    ControlPlaneSection,
+    HeartbeatSection,
+    PasConfig,
+    PolicySection,
+    RuntimeSection,
+    SkillsSection,
+    build_config,
+    config_to_yaml_subset,
+    load_config,
+    parse_config_text,
+)
+from .observability import (
+    Metrics,
+    StructuredLogger,
+    contains_unredacted_secret,
+    free_disk_mb,
+    health_snapshot,
+    redact_text,
+)
+from .backup import BackupError, create_backup, read_backup_meta, restore_backup
+from .facade import ChannelSink, Job, ProactiveAgent
 
 __all__ = [
     "PAS_PROTOCOL_VERSION",
@@ -254,4 +277,32 @@ __all__ = [
     "DispatchReport",
     "OutboxDispatcher",
     "FeedbackManager",
+    # P7 config
+    "CONFIG_VERSION",
+    "PasConfig",
+    "RuntimeSection",
+    "HeartbeatSection",
+    "PolicySection",
+    "SkillsSection",
+    "ControlPlaneSection",
+    "build_config",
+    "load_config",
+    "parse_config_text",
+    "config_to_yaml_subset",
+    # P7 observability
+    "Metrics",
+    "StructuredLogger",
+    "redact_text",
+    "contains_unredacted_secret",
+    "health_snapshot",
+    "free_disk_mb",
+    # P7 backup
+    "BackupError",
+    "create_backup",
+    "read_backup_meta",
+    "restore_backup",
+    # P7 facade
+    "ProactiveAgent",
+    "Job",
+    "ChannelSink",
 ]
