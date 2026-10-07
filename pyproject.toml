@@ -1,5 +1,9 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 is where PEP 639 landed: an SPDX `license` string and
+# `license-files` are only interpreted as such from that version on. The
+# repo previously pinned >=68 and used the `license = { file = ... }` table,
+# which setuptools now warns is removed by 2027-02.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +12,8 @@ version = "0.1.2"
 description = "Museion Agent SDK: single-profile proactive agent runtime with scheduler, hooks, bounded agent loop, policy, delivery and daemon CLI."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Kim Fischer" }]
 dependencies = []
 
