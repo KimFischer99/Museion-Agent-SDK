@@ -2,8 +2,8 @@
 """P0 release gate (SPEC §15.1 P0 / §17.3).
 
 Blocks a release when:
-  1. any Muse-original path is tracked by git (private-vendor/, muse-sdk/,
-     muse-reuse/, __MACOSX/, .DS_Store);
+  1. any private-source path is tracked by git (the vendor snapshot
+     prefixes in BANNED_PREFIXES, plus __MACOSX/, .DS_Store);
   2. any tracked file's SHA-256 matches a hash recorded in the audit
      manifests (selected-source-manifest.json, skills.json) or the known
      private helper hash;
@@ -47,7 +47,7 @@ def collect_forbidden_hashes(manifest: dict, skills_doc: dict) -> set[str]:
     return hashes
 
 
-def find_muse_hash_matches(tracked_hashes: dict[str, str], forbidden: set[str]) -> list[str]:
+def find_forbidden_hash_matches(tracked_hashes: dict[str, str], forbidden: set[str]) -> list[str]:
     return sorted(path for path, digest in tracked_hashes.items() if digest in forbidden)
 
 
@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
 
     path_violations = banned_tracked_paths(tracked)
     if path_violations:
-        blocked.append(f"Muse-original paths tracked in git: {path_violations}")
+        blocked.append(f"Private-source paths tracked in git: {path_violations}")
 
     tracked_hashes: dict[str, str] = {}
     for relpath in tracked:
@@ -101,9 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     skills_doc = json.loads(skills_path.read_text(encoding="utf-8"))
     forbidden = collect_forbidden_hashes(manifest, skills_doc)
-    hash_matches = find_muse_hash_matches(tracked_hashes, forbidden)
+    hash_matches = find_forbidden_hash_matches(tracked_hashes, forbidden)
     if hash_matches:
-        blocked.append(f"tracked files match recorded Muse hashes: {hash_matches}")
+        blocked.append(f"tracked files match recorded private-source hashes: {hash_matches}")
 
     licenses_path = repo / "docs/LICENSES.md"
     if not licenses_path.is_file():

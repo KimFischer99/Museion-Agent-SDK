@@ -1,4 +1,4 @@
-"""Muse legacy Skill importer (SPEC §11; P6 Skills 能力).
+"""Legacy Skill importer (SPEC §11; P6 Skills 能力).
 
 BYO 导入流程（§11.2）：本地显式选择目录 → 安全遍历与 hash → legacy
 frontmatter 解析 → 无碰撞 canonical id / aliases → 依赖闭包 →
@@ -60,7 +60,6 @@ _TOOL_TOKENS = (
     "hatch_permission_label",
     "hatch_permission_overrides",
     "hatch_command",
-    "muse.read",
     "authd",
 )
 
@@ -73,7 +72,6 @@ _CAPABILITY_MAP: dict[str, tuple[list[str], list[str], str]] = {
     "outlook-calendar": (["calendar.read"], ["hatch_gws_cli"], "adapter_required"),
     "google-contacts": (["contacts.read"], ["hatch_gws_cli"], "adapter_required"),
     "google-tasks": (["tasks.read"], ["hatch_gws_cli"], "adapter_required"),
-    "muse_db": ([], [], "blocked"),
     "authd": ([], [], "blocked"),
     "wide-research": ([], [], "unsupported"),
 }
@@ -232,7 +230,7 @@ class ScannedSkill:
         return {
             "schema_version": "1.0",
             "source": {
-                "format": "muse-legacy",
+                "format": "legacy",
                 "original_name": self.original_name,
                 "original_path": self.rel_path,
                 "sha256": self.sha256,
@@ -278,7 +276,7 @@ def _strict_name_invalid(name: str) -> bool:
 
 
 class LegacySkillImporter:
-    """Read-only scanner for a user-provided Muse skills directory.
+    """Read-only scanner for a user-provided legacy skills directory.
 
     The scan base is the ``skills/`` subtree when present (paths in the
     report then match the audit's ``skills/<name>/SKILL.md`` scheme);

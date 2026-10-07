@@ -3,7 +3,7 @@
 Cover the parsing dialect (inline JSON, block maps, block lists,
 continuations), canonical ids/aliases/collisions, dependency closure
 (including nested-artifact shared assets), sidecar shape, store
-recording, and — when the private-vendor Muse snapshot is present —
+recording, and — when the private-vendor snapshot is present —
 exact consistency with audit/skills.json (88 entries, issue counts,
 hashes).
 """
@@ -152,7 +152,7 @@ class ImporterTests(unittest.TestCase):
         gmail = self.by_canonical["gmail"]
         sidecar = gmail.sidecar()
         self.assertEqual(sidecar["schema_version"], "1.0")
-        self.assertEqual(sidecar["source"]["format"], "muse-legacy")
+        self.assertEqual(sidecar["source"]["format"], "legacy")
         self.assertEqual(sidecar["source"]["original_path"], "skills/gmail/SKILL.md")
         self.assertEqual(sidecar["canonical_name"], "gmail")
         self.assertEqual(sidecar["requirements"]["grants"], ["selected_mail_account"])
@@ -209,7 +209,7 @@ class StoreSkillInstallTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    VENDOR.is_dir(), "private-vendor Muse snapshot not present; audit-consistency run is skipped, not faked"
+    VENDOR.is_dir(), "private-vendor snapshot not present; audit-consistency run is skipped, not faked"
 )
 class AuditConsistencyTests(unittest.TestCase):
     def test_full_corpus_matches_audit_exactly(self):

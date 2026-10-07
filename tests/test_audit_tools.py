@@ -21,8 +21,8 @@ reproduce_audit = _load_tool("reproduce_audit")
 license_gate = _load_tool("license_gate")
 
 
-def build_fixture_muse(root: Path) -> None:
-    """Tiny stand-in for the Muse skills tree: one clean skill, one nested,
+def build_fixture_tree(root: Path) -> None:
+    """Tiny stand-in for the vendor skills tree: one clean skill, one nested,
     one with underscore name and boolean metadata."""
     clean = root / "skills" / "clean-skill"
     clean.mkdir(parents=True)
@@ -74,15 +74,15 @@ def build_fixture_muse(root: Path) -> None:
 class ReproduceAuditFixtureTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.muse = Path(self.tmp.name) / "muse"
-        self.muse.mkdir()
-        build_fixture_muse(self.muse)
+        self.tree = Path(self.tmp.name) / "corpus"
+        self.tree.mkdir()
+        build_fixture_tree(self.tree)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_discovery_finds_nested_entries(self):
-        found = reproduce_audit.discover_skill_files(self.muse)
+        found = reproduce_audit.discover_skill_files(self.tree)
         self.assertEqual(
             found,
             [
@@ -94,8 +94,8 @@ class ReproduceAuditFixtureTests(unittest.TestCase):
         )
 
     def test_flow_style_metadata_and_folded_description(self):
-        record = reproduce_audit.audit_one_skill(self.muse, "skills/flow-style/SKILL.md")
-        # real Muse corpus uses flow mappings: metadata: { "k": v, ... }
+        record = reproduce_audit.audit_one_skill(self.tree, "skills/flow-style/SKILL.md")
+        # the real corpus uses flow mappings: metadata: { "k": v, ... }
         self.assertEqual(
             record["non_string_metadata"],
             {"includeInPrompt": "bool", "devices": "list"},
@@ -106,23 +106,23 @@ class ReproduceAuditFixtureTests(unittest.TestCase):
         self.assertEqual(record["issues"], ["metadata_values_not_all_strings"])
 
     def test_record_flags_and_normalization(self):
-        record = reproduce_audit.audit_one_skill(self.muse, "skills/my-thing/SKILL.md")
+        record = reproduce_audit.audit_one_skill(self.tree, "skills/my-thing/SKILL.md")
         self.assertEqual(record["original_name"], "my_thing")
         self.assertEqual(record["canonical_name_proposed"], "my-thing")
         self.assertIn("invalid_name", record["issues"])
         self.assertIn("name_directory_mismatch", record["issues"])
         self.assertNotIn("metadata_values_not_all_strings", record["issues"])
 
-        nested = reproduce_audit.audit_one_skill(self.muse, "skills/artifacts/document/SKILL.md")
+        nested = reproduce_audit.audit_one_skill(self.tree, "skills/artifacts/document/SKILL.md")
         self.assertTrue(nested["nested"])
         self.assertIn("invalid_name", nested["issues"])
         self.assertIn("name_directory_mismatch", nested["issues"])
         self.assertIn("metadata_values_not_all_strings", nested["issues"])
         self.assertEqual(nested["non_string_metadata"], {"includeInPrompt": "bool"})
 
-        clean = reproduce_audit.audit_one_skill(self.muse, "skills/clean-skill/SKILL.md")
+        clean = reproduce_audit.audit_one_skill(self.tree, "skills/clean-skill/SKILL.md")
         # boolean includeInPrompt alone still triggers the metadata issue
-        # (all 88 recorded Muse skills carry it).
+        # (all 88 recorded corpus skills carry it).
         self.assertEqual(clean["issues"], ["metadata_values_not_all_strings"])
         self.assertEqual(clean["non_string_metadata"], {"includeInPrompt": "bool"})
         self.assertEqual(clean["canonical_name_proposed"], "clean-skill")
@@ -130,20 +130,20 @@ class ReproduceAuditFixtureTests(unittest.TestCase):
 
     def test_description_length_and_block_scalars(self):
         long_desc = "x" * 1100
-        root = self.muse / "skills" / "chatty"
+        root = self.tree / "skills" / "chatty"
         root.mkdir()
         (root / "SKILL.md").write_text(
             f"---\nname: chatty\ndescription: \"{long_desc}\"\n---\n",
             encoding="utf-8",
         )
-        record = reproduce_audit.audit_one_skill(self.muse, "skills/chatty/SKILL.md")
+        record = reproduce_audit.audit_one_skill(self.tree, "skills/chatty/SKILL.md")
         self.assertEqual(record["description_characters"], 1100)
         self.assertIn("invalid_description", record["issues"])
 
     def test_compare_ok_against_matching_audit(self):
         records = [
-            reproduce_audit.audit_one_skill(self.muse, path)
-            for path in reproduce_audit.discover_skill_files(self.muse)
+            reproduce_audit.audit_one_skill(self.tree, path)
+            for path in reproduce_audit.discover_skill_files(self.tree)
         ]
         issue_counts: dict[str, int] = {}
         for record in records:
@@ -164,28 +164,28 @@ class ReproduceAuditFixtureTests(unittest.TestCase):
                 for record in records
             ],
         }
-        report = reproduce_audit.compare_with_audit(self.muse, audit_doc)
+        report = reproduce_audit.compare_with_audit(self.tree, audit_doc)
         self.assertTrue(report["ok"], report["mismatches"])
 
     def test_compare_detects_tampering(self):
         records = [
-            reproduce_audit.audit_one_skill(self.muse, path)
-            for path in reproduce_audit.discover_skill_files(self.muse)
+            reproduce_audit.audit_one_skill(self.tree, path)
+            for path in reproduce_audit.discover_skill_files(self.tree)
         ]
         audit_doc = {"count": len(records), "issue_counts": {}, "skills": records}
         audit_doc["skills"][0]["sha256"] = "0" * 64  # tampered hash
         audit_doc["count"] = 99
-        report = reproduce_audit.compare_with_audit(self.muse, audit_doc)
+        report = reproduce_audit.compare_with_audit(self.tree, audit_doc)
         self.assertFalse(report["ok"])
         fields = {m["field"] for m in report["mismatches"]}
         self.assertIn("sha256", fields)
         self.assertIn("count", fields)
 
     def test_manifest_verification(self):
-        records = reproduce_audit.discover_skill_files(self.muse)
+        records = reproduce_audit.discover_skill_files(self.tree)
         sources = []
         for relpath in records[:1]:
-            data = (self.muse / relpath).read_bytes()
+            data = (self.tree / relpath).read_bytes()
             import hashlib
 
             sources.append(
@@ -196,10 +196,10 @@ class ReproduceAuditFixtureTests(unittest.TestCase):
                     "lines": len(data.decode().splitlines()),
                 }
             )
-        report = reproduce_audit.verify_source_manifest(self.muse, {"sources": sources})
+        report = reproduce_audit.verify_source_manifest(self.tree, {"sources": sources})
         self.assertTrue(report["ok"], report["mismatches"])
         bad = dict(sources[0], bytes=sources[0]["bytes"] + 1)
-        report = reproduce_audit.verify_source_manifest(self.muse, {"sources": [bad]})
+        report = reproduce_audit.verify_source_manifest(self.tree, {"sources": [bad]})
         self.assertFalse(report["ok"])
 
 
@@ -229,8 +229,8 @@ class LicenseGateUnitTests(unittest.TestCase):
     def test_hash_matching(self):
         tracked = {"a": "1" * 64, "b": "2" * 64}
         forbidden = {"2" * 64, license_gate.HELPER_SHA256}
-        self.assertEqual(license_gate.find_muse_hash_matches(tracked, forbidden), ["b"])
-        self.assertEqual(license_gate.find_muse_hash_matches(tracked, {"3" * 64}), [])
+        self.assertEqual(license_gate.find_forbidden_hash_matches(tracked, forbidden), ["b"])
+        self.assertEqual(license_gate.find_forbidden_hash_matches(tracked, {"3" * 64}), [])
 
     def test_gate_status_parsing(self):
         passing = "<!-- license-gate\nstatus: pass\n-->\n# doc"

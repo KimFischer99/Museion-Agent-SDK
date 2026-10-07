@@ -2,7 +2,7 @@
 #
 # Supply-chain rules this file deliberately follows:
 # - the image contains ONLY the public package and the deployment's own
-#   app module — no private-vendor/, no Muse originals, no user config,
+#   app module — no private-vendor/, no private originals, no user config,
 #   no tokens (license_gate / package_gate scan the build context);
 # - pinned base image + no cache mounts that could smuggle state;
 # - the state directory is a volume, so a container stays replaceable.

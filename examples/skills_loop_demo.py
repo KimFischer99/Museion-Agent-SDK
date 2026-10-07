@@ -3,7 +3,7 @@
 打通 §11.5 要求的四条真实链路——邮件读取、日历读取、公开资料跟踪、
 本人通知——全部落在 PAS 记账上：
 
-1. import     —— legacy importer 扫描 Muse 目录（private-vendor 存在时
+1. import     —— legacy importer 扫描 vendor 快照目录（private-vendor 存在时
                  用真实 88 入口语料并与 audit/skills.json 断言一致；缺席
                  时用内置 mini fixture，显式注明），写 skill_installs；
 2. mail       —— GmailMailSource（scripted GwsConnector，标注 fake）→
@@ -85,7 +85,7 @@ def scenario_import(store: Store) -> dict:
         skills = importer.scan()
         report = importer.report(skills)
         consistency = audit_consistency(report, json.loads((REPO / "audit" / "skills.json").read_text()))
-        source_label = "private-vendor/muse-sdk (real 88-entry corpus)"
+        source_label = "private-vendor snapshot (real 88-entry corpus)"
         assert consistency["match"], consistency
     else:
         importer = LegacySkillImporter(root=_mini_fixture())

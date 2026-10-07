@@ -993,7 +993,7 @@ _HELPER_BLOCKER = _helper_available()
 
 @unittest.skipIf(_HELPER_BLOCKER is not None, _HELPER_BLOCKER or "")
 class OriginalHelperCompatTests(BaseRunnerCase):
-    """Run the byte-identical original Muse helper through the full P2
+    """Run the byte-identical original helper through the full P2
     pipeline (staging + CAS + sandbox), proving wire-protocol
     compatibility without ever shipping the helper itself."""
 

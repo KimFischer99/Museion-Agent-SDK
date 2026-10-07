@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Reproduce the Muse skill audit (audit/skills.json) and the selected-source
+"""Reproduce the legacy skill audit (audit/skills.json) and the selected-source
 hash manifest (audit/selected-source-manifest.json) from a local copy of the
-Muse directory. Read-only: this tool never writes to the audit directory or
-the Muse directory.
+vendor snapshot directory. Read-only: this tool never writes to the audit
+directory or the source directory.
 
 Reproduced byte-exactly (compared against the recorded audit):
   - discovered SKILL.md path set (recursive, incl. nested artifacts entries)
@@ -22,7 +22,7 @@ note. Judgment constants are enforced: technical_status,
 distribution_status, full_prompt_included.
 
 Usage:
-  python tools/reproduce_audit.py --muse-dir private-vendor/muse-sdk --audit-dir audit
+  python tools/reproduce_audit.py --source-dir private-vendor/muse-sdk --audit-dir audit
 Exit code 0 = audit is reproducible from this directory; 1 = mismatches.
 """
 
@@ -233,10 +233,10 @@ def normalize_canonical_name(name: str) -> str:
     return cleaned
 
 
-def discover_skill_files(muse_dir: Path) -> list[str]:
-    root = muse_dir / "skills"
+def discover_skill_files(source_dir: Path) -> list[str]:
+    root = source_dir / "skills"
     found = [
-        p.relative_to(muse_dir).as_posix()
+        p.relative_to(source_dir).as_posix()
         for p in root.rglob("SKILL.md")
         if p.is_file()
     ]
@@ -247,8 +247,8 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def audit_one_skill(muse_dir: Path, relpath: str) -> dict[str, object]:
-    data = (muse_dir / relpath).read_bytes()
+def audit_one_skill(source_dir: Path, relpath: str) -> dict[str, object]:
+    data = (source_dir / relpath).read_bytes()
     text = data.decode("utf-8")
     meta = parse_frontmatter(text)
     name = meta.get("name")
@@ -324,14 +324,14 @@ CONSTANT_FIELDS = {
 }
 
 
-def compare_with_audit(muse_dir: Path, audit_doc: dict) -> dict[str, object]:
-    discovered = discover_skill_files(muse_dir)
+def compare_with_audit(source_dir: Path, audit_doc: dict) -> dict[str, object]:
+    discovered = discover_skill_files(source_dir)
     recorded = {entry["source_path"]: entry for entry in audit_doc["skills"]}
     mismatches: list[dict[str, object]] = []
     recomputed: dict[str, dict[str, object]] = {}
 
     for relpath in discovered:
-        record = audit_one_skill(muse_dir, relpath)
+        record = audit_one_skill(source_dir, relpath)
         recomputed[relpath] = record
         entry = recorded.get(relpath)
         if entry is None:
@@ -399,10 +399,10 @@ def compare_with_audit(muse_dir: Path, audit_doc: dict) -> dict[str, object]:
     }
 
 
-def verify_source_manifest(muse_dir: Path, manifest: dict) -> dict[str, object]:
+def verify_source_manifest(source_dir: Path, manifest: dict) -> dict[str, object]:
     mismatches: list[dict[str, object]] = []
     for source in manifest["sources"]:
-        path = muse_dir / source["path"]
+        path = source_dir / source["path"]
         if not path.is_file():
             mismatches.append({"path": source["path"], "field": "<presence>", "detail": "missing on disk"})
             continue
@@ -431,22 +431,22 @@ def verify_source_manifest(muse_dir: Path, manifest: dict) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--muse-dir", type=Path, default=Path("private-vendor/muse-sdk"))
+    parser.add_argument("--source-dir", type=Path, default=Path("private-vendor/muse-sdk"))
     parser.add_argument("--audit-dir", type=Path, default=Path("audit"))
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     args = parser.parse_args(argv)
 
     skills_path = args.audit_dir / "skills.json"
     manifest_path = args.audit_dir / "selected-source-manifest.json"
-    if not skills_path.is_file() or not args.muse_dir.is_dir():
-        print("reproduce_audit: muse-dir or audit files missing", file=sys.stderr)
+    if not skills_path.is_file() or not args.source_dir.is_dir():
+        print("reproduce_audit: source-dir or audit files missing", file=sys.stderr)
         return 2
 
     audit_doc = json.loads(skills_path.read_text(encoding="utf-8"))
-    report = {"skills_audit": compare_with_audit(args.muse_dir, audit_doc)}
+    report = {"skills_audit": compare_with_audit(args.source_dir, audit_doc)}
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        report["source_manifest"] = verify_source_manifest(args.muse_dir, manifest)
+        report["source_manifest"] = verify_source_manifest(args.source_dir, manifest)
 
     ok = report["skills_audit"]["ok"] and report.get("source_manifest", {}).get("ok", False)
     if args.json:

@@ -3,7 +3,7 @@
 
 The P0 license gate scans git-tracked files; this gate scans the actual
 artifacts a user would receive — wheel/sdist members plus their hashes —
-against the same forbidden sets (private-vendor paths, Muse audit
+against the same forbidden sets (private-vendor paths, recorded audit
 hashes, helper hash) plus generic secret-ish members (.pem/.key, token
 files, .DS_Store). A clean git tree does not excuse a dirty package.
 
@@ -73,7 +73,7 @@ def check_archive(archive: Path, forbidden_hashes: set[str]) -> list[str]:
             problems.append(f"{archive.name}: secret-named member {posix}")
         digest = hashlib.sha256(payload).hexdigest()
         if digest in forbidden_hashes:
-            problems.append(f"{archive.name}: member {posix} matches a forbidden Muse hash")
+            problems.append(f"{archive.name}: member {posix} matches a forbidden audit hash")
     return problems
 
 

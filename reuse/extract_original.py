@@ -1,5 +1,5 @@
 """Extract one known source helper for PRIVATE assessment, never for auto-publishing.
-Usage: python reuse/extract_original.py /path/muse-sdk.zip /private/new-directory
+Usage: python reuse/extract_original.py /path/vendor-archive.zip /private/new-directory
 """
 from __future__ import annotations
 import hashlib
