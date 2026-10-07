@@ -31,6 +31,15 @@ __all__ = [
     "validate_schedule",
     "validate_decision",
     "validate_context_pack",
+    "validate_reminder",
+    "REMINDER_KEYS",
+    "OBLIGATIONS",
+    "NOTIFY_SELF_CAPABILITY",
+    "TOOL_AUTHORITY_PAS_BROKER",
+    "TOOL_AUTHORITY_HOST",
+    "TOOL_AUTHORITY_UNKNOWN",
+    "TOOL_AUTHORITIES",
+    "default_obligation",
     "JobSpec",
     "ProfileConfig",
     "RuntimeConfig",
@@ -48,6 +57,7 @@ __all__ = [
     "RunRequest",
     "ContextPack",
     "ContextSource",
+    "RecentNotification",
     "SourceRequest",
     "SourceItem",
     "SourceBatch",
@@ -240,6 +250,182 @@ def validate_schedule(schedule: dict[str, Any]) -> list[str]:
 _NOTIFY_SELF_REQUIRED = ("evidence_refs", "expires_at")
 
 
+# --- direct reminders (SPEC §21.1 step 2) ---------------------------------- #
+#
+# A direct reminder is a *frozen user-authored message* plus a schedule.
+# Nothing in it is model-derived: the body, the timezone, the owner
+# channel and the notification obligation all come from the trusted
+# ``jobs_upsert`` entry point, and ``validate_reminder`` is the single
+# place that decides whether such a definition is well formed.
+
+# The capability a profile grants before owner-addressed notifications may
+# be produced without a per-message approval (§9.1). Shared vocabulary: the
+# store's deterministic reminder path and the policy engine must agree.
+NOTIFY_SELF_CAPABILITY = "notify.self"
+
+#: Which authority actually governed a run's side effects (SPEC §22.1 item 5).
+#: Shared vocabulary: the executor declares it, the store records it per run,
+#: and the CLI/RPC report it. AGENTS.md is explicit that raw shell, network
+#: and credentials can bypass the broker, so "we did not declare it" must be
+#: representable and must never read as "PAS covered it".
+TOOL_AUTHORITY_PAS_BROKER = "pas_broker"
+TOOL_AUTHORITY_HOST = "host"
+TOOL_AUTHORITY_UNKNOWN = "unknown"
+TOOL_AUTHORITIES = (
+    TOOL_AUTHORITY_PAS_BROKER,
+    TOOL_AUTHORITY_HOST,
+    TOOL_AUTHORITY_UNKNOWN,
+)
+
+OBLIGATIONS = frozenset({"due", "opportunistic"})
+OBLIGATION_DUE = "due"
+OBLIGATION_OPPORTUNISTIC = "opportunistic"
+
+REMINDER_KEYS = frozenset(
+    {
+        "title",
+        "body",
+        "timezone",
+        "destination",
+        "topic",
+        "refresh_sources",
+        "fact_refs",
+        "artifact_refs",
+    }
+)
+
+_REMINDER_BODY_MAX = 4000
+_REMINDER_TITLE_MAX = 200
+_REMINDER_REFRESH_MAX = 16
+_REMINDER_FACTS_MAX = 16
+_REMINDER_ARTIFACTS_MAX = 32
+_SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def default_obligation(mode: str) -> str:
+    """Notification obligation implied by the job's mode when the trusted
+    configuration does not state one.
+
+    A direct reminder owes its message at the scheduled instant; an
+    opportunistic heartbeat or an explicit task only reaches out when the
+    analysis says so (SPEC §21.1 step 3).
+    """
+    return OBLIGATION_DUE if mode == "reminder" else OBLIGATION_OPPORTUNISTIC
+
+
+def _check_iana_zone(value: Any, where: str, errors: list[str]) -> None:
+    if value is None:
+        errors.append(f"{where} is required")
+        return
+    if not isinstance(value, str) or not value:
+        errors.append(f"{where} must be a non-empty IANA zone name")
+        return
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(value)
+    except Exception:
+        errors.append(f"{where} {value!r} is not a valid IANA zone")
+
+
+def validate_reminder(reminder: Any, *, schedule: dict[str, Any] | None = None) -> list[str]:
+    """Structural rules for the frozen ``reminder`` block.
+
+    Unknown keys are rejected so a trusted configuration can never smuggle
+    later semantics (a receiver, a priority, an escalation) into the
+    reminder payload without a matching contract change.
+    """
+    errors: list[str] = []
+    if not isinstance(reminder, dict):
+        return ["reminder must be an object"]
+    unknown = sorted(set(reminder) - REMINDER_KEYS)
+    if unknown:
+        errors.append(f"reminder has unknown keys {unknown}")
+
+    body = reminder.get("body")
+    if not isinstance(body, str) or not 1 <= len(body) <= _REMINDER_BODY_MAX:
+        errors.append(f"reminder.body must be 1..{_REMINDER_BODY_MAX} chars")
+    elif not body.strip():
+        errors.append("reminder.body must not be blank")
+
+    title = reminder.get("title")
+    if title is not None and (
+        not isinstance(title, str) or not 1 <= len(title) <= _REMINDER_TITLE_MAX
+    ):
+        errors.append(f"reminder.title must be 1..{_REMINDER_TITLE_MAX} chars")
+
+    _check_iana_zone(reminder.get("timezone"), "reminder.timezone", errors)
+    if (
+        isinstance(schedule, dict)
+        and isinstance(schedule.get("timezone"), str)
+        and isinstance(reminder.get("timezone"), str)
+        and schedule["timezone"] != reminder["timezone"]
+    ):
+        errors.append(
+            "reminder.timezone must match schedule.timezone when the schedule declares one"
+        )
+
+    destination = reminder.get("destination")
+    if destination is not None and (
+        not isinstance(destination, str) or not 1 <= len(destination) <= 256
+    ):
+        errors.append("reminder.destination must be 1..256 chars")
+
+    topic = reminder.get("topic")
+    if topic is not None and (not isinstance(topic, str) or not 1 <= len(topic) <= 128):
+        errors.append("reminder.topic must be 1..128 chars")
+
+    refresh = reminder.get("refresh_sources")
+    if refresh is not None:
+        if not isinstance(refresh, (list, tuple)) or not 1 <= len(refresh) <= _REMINDER_REFRESH_MAX:
+            errors.append(f"reminder.refresh_sources must list 1..{_REMINDER_REFRESH_MAX} ids")
+        elif any(not isinstance(item, str) or not _SOURCE_ID_RE.fullmatch(item) for item in refresh):
+            errors.append("reminder.refresh_sources entries must be source ids")
+        elif len(set(refresh)) != len(refresh):
+            errors.append("reminder.refresh_sources must not repeat an id")
+
+    facts = reminder.get("fact_refs")
+    if facts is not None:
+        if (
+            not isinstance(facts, (list, tuple))
+            or not 1 <= len(facts) <= _REMINDER_FACTS_MAX
+        ):
+            errors.append(f"reminder.fact_refs must list 1..{_REMINDER_FACTS_MAX} ids")
+        elif any(not isinstance(item, str) or not 1 <= len(item) <= 256 for item in facts):
+            errors.append("reminder.fact_refs entries must be 1..256 char strings")
+        elif len(set(facts)) != len(facts):
+            errors.append("reminder.fact_refs must not repeat an id")
+
+    artifacts = reminder.get("artifact_refs")
+    if artifacts is not None:
+        if (
+            not isinstance(artifacts, (list, tuple))
+            or not 1 <= len(artifacts) <= _REMINDER_ARTIFACTS_MAX
+        ):
+            errors.append(
+                f"reminder.artifact_refs must list 1..{_REMINDER_ARTIFACTS_MAX} refs"
+            )
+        else:
+            from .artifacts import ArtifactRefError, missing_artifact_refs, normalize_artifact_ref
+
+            normalized: list[str] = []
+            for item in artifacts:
+                try:
+                    normalized.append(normalize_artifact_ref(item))
+                except ArtifactRefError as exc:
+                    errors.append(f"reminder.artifact_refs: {exc.safe_message}")
+            if not errors and isinstance(body, str):
+                # An artifact the owner cannot open from the body is not a
+                # reference; the frozen text must carry it (SPEC §21.1 step 8).
+                missing = missing_artifact_refs(body, normalized)
+                if missing:
+                    errors.append(
+                        "reminder.body must contain every artifact_refs entry;"
+                        f" missing {sorted(missing)}"
+                    )
+    return errors
+
+
 def validate_decision(decision: dict[str, Any]) -> list[str]:
     """Cross-field rules for Decision (SPEC §8.1)."""
     errors: list[str] = []
@@ -334,7 +520,7 @@ def assert_single_profile(profiles: list[ProfileConfig]) -> ProfileConfig:
 _JOB_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _MISFIRE_POLICIES = frozenset({"coalesce_latest", "grace_once", "expire"})
 _SCHEDULER_OWNERS = frozenset({"pas", "host"})
-_JOB_MODES = frozenset({"heartbeat", "task"})
+_JOB_MODES = frozenset({"heartbeat", "task", "reminder"})
 
 
 @dataclass(frozen=True)
@@ -354,12 +540,17 @@ class JobSpec:
     misfire_policy: str | None = None
     deadline: str | None = None
     enabled: bool = True
+    reminder: dict[str, Any] | None = None
+    obligation: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not _JOB_ID_RE.fullmatch(self.job_id):
             raise PASError(ErrorCode.INVALID_CONFIG, f"job_id {self.job_id!r} fails naming rule")
         if self.mode not in _JOB_MODES:
-            raise PASError(ErrorCode.INVALID_CONFIG, f"mode {self.mode!r} must be heartbeat|task")
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"mode {self.mode!r} must be heartbeat|task|reminder",
+            )
         if self.owner not in _SCHEDULER_OWNERS:
             raise PASError(ErrorCode.INVALID_CONFIG, f"owner {self.owner!r} must be pas|host")
         if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
@@ -372,8 +563,50 @@ class JobSpec:
         if not isinstance(self.task, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "task must be an object")
         instruction = self.task.get("instruction")
-        if not isinstance(instruction, str) or not 1 <= len(instruction) <= 10000:
-            raise PASError(ErrorCode.INVALID_CONFIG, "task.instruction must be 1..10000 chars")
+        if self.mode == "reminder":
+            # A reminder carries no agent instruction at all: it must not be
+            # able to reach the model even by accident (SPEC §21.1 step 2).
+            if instruction is not None:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "mode=reminder must not carry task.instruction",
+                )
+            if self.reminder is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, "mode=reminder requires reminder")
+            reminder_problems = validate_reminder(self.reminder, schedule=self.schedule)
+            if reminder_problems:
+                raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(reminder_problems))
+        else:
+            if not isinstance(instruction, str) or not 1 <= len(instruction) <= 10000:
+                raise PASError(ErrorCode.INVALID_CONFIG, "task.instruction must be 1..10000 chars")
+            if self.reminder is not None:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "reminder is only valid with mode=reminder",
+                )
+            refresh_ids = self.task.get("refresh_source_ids")
+            if refresh_ids is not None:
+                if (
+                    not isinstance(refresh_ids, (list, tuple))
+                    or not 1 <= len(refresh_ids) <= _REMINDER_REFRESH_MAX
+                ):
+                    raise PASError(
+                        ErrorCode.INVALID_CONFIG,
+                        f"task.refresh_source_ids must list 1..{_REMINDER_REFRESH_MAX} ids",
+                    )
+                if any(
+                    not isinstance(item, str) or not _SOURCE_ID_RE.fullmatch(item)
+                    for item in refresh_ids
+                ):
+                    raise PASError(
+                        ErrorCode.INVALID_CONFIG,
+                        "task.refresh_source_ids entries must be source ids",
+                    )
+        if self.obligation is not None and self.obligation not in OBLIGATIONS:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"obligation {self.obligation!r} must be one of {sorted(OBLIGATIONS)}",
+            )
         if self.misfire_policy is not None and self.misfire_policy not in _MISFIRE_POLICIES:
             raise PASError(
                 ErrorCode.INVALID_CONFIG,
@@ -391,9 +624,18 @@ class JobSpec:
         if not isinstance(self.delivery_policy, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "delivery_policy must be an object")
 
+    @property
+    def effective_obligation(self) -> str:
+        return self.obligation or default_obligation(self.mode)
+
     def to_dict(self) -> dict[str, Any]:
-        """Canonical dict shape; the idempotency hash input for job upserts."""
-        return {
+        """Canonical dict shape; the idempotency hash input for job upserts.
+
+        Fields that did not exist in v0.1.0 are emitted only when set, so a
+        replay of a pre-upgrade ``jobs_upsert`` still hashes identically
+        (SPEC §21.2: 旧 v0.1.0 数据可迁移).
+        """
+        out: dict[str, Any] = {
             "job_id": self.job_id,
             "revision": self.revision,
             "owner": self.owner,
@@ -406,6 +648,11 @@ class JobSpec:
             "deadline": self.deadline,
             "enabled": self.enabled,
         }
+        if self.reminder is not None:
+            out["reminder"] = self.reminder
+        if self.obligation is not None:
+            out["obligation"] = self.obligation
+        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -655,6 +902,80 @@ class ContextSource:
             )
 
 
+# How many already-sent notifications may travel into one ContextPack.
+# Bounded on purpose: the summary exists so the model can compare topics,
+# openings and fact deltas, not so an entire history can be replayed into
+# the prompt (SPEC §21.1 step 6).
+MAX_RECENT_NOTIFICATIONS = 20
+NOTIFICATION_WINDOW_MS = 24 * 3600 * 1000
+_RECENT_TITLE_MAX = 120
+
+
+@dataclass(frozen=True)
+class RecentNotification:
+    """One *already sent* notification, reduced to what is safe to show.
+
+    Redaction is structural, not best-effort: there is no body field at
+    all, the destination collapses to its channel kind, the title is
+    truncated, and ``fact_id`` travels only as a short digest so two
+    messages about the same fact can be compared without handing the model
+    a join key into the delivery ledger.
+    """
+
+    fact_digest: str
+    channel_kind: str
+    topic: str | None
+    title: str
+    sent_at_ms: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fact_digest, str) or not 1 <= len(self.fact_digest) <= 32:
+            raise PASError(ErrorCode.INVALID_CONFIG, "fact_digest must be 1..32 chars")
+        if self.channel_kind not in ("local_inbox", "webhook"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "channel_kind must be local_inbox|webhook")
+        if self.topic is not None and (
+            not isinstance(self.topic, str) or not 1 <= len(self.topic) <= 128
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "topic must be 1..128 chars or None")
+        if not isinstance(self.title, str) or not 1 <= len(self.title) <= _RECENT_TITLE_MAX:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, f"title must be 1..{_RECENT_TITLE_MAX} chars"
+            )
+        if not isinstance(self.sent_at_ms, int) or isinstance(self.sent_at_ms, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "sent_at_ms must be an integer")
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "fact_digest": self.fact_digest,
+            "channel_kind": self.channel_kind,
+            "title": self.title,
+            "sent_at_ms": self.sent_at_ms,
+        }
+        if self.topic is not None:
+            out["topic"] = self.topic
+        return out
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "RecentNotification":
+        """Build from a store summary row, applying the redaction rules."""
+        raw_fact = row.get("fact_id") or row.get("business_key") or ""
+        digest = content_hash(str(raw_fact))[:16] if raw_fact else "unknown"
+        title = (row.get("title") or "notification")[:_RECENT_TITLE_MAX]
+        topic = row.get("topic")
+        if isinstance(topic, str) and not 1 <= len(topic) <= 128:
+            topic = topic[:128]
+        kind = row.get("channel_kind") or "local_inbox"
+        if kind not in ("local_inbox", "webhook"):
+            kind = "local_inbox"
+        return cls(
+            fact_digest=digest,
+            channel_kind=kind,
+            topic=topic if isinstance(topic, str) and topic else None,
+            title=title or "notification",
+            sent_at_ms=int(row.get("sent_at_ms") or 0),
+        )
+
+
 @dataclass(frozen=True)
 class ContextPack:
     """Immutable per-run context snapshot (SPEC §7.1).
@@ -674,6 +995,7 @@ class ContextPack:
     sent_fact_refs: tuple[str, ...] = ()
     memory_refs: tuple[str, ...] = ()
     untrusted_content_policy: str = "data_only"
+    recent_notifications: tuple["RecentNotification", ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_goal_id, str) or not 1 <= len(self.task_goal_id) <= 128:
@@ -706,6 +1028,16 @@ class ContextPack:
             raise PASError(
                 ErrorCode.INVALID_CONFIG, "untrusted_content_policy must be 'data_only'"
             )
+        if len(self.recent_notifications) > MAX_RECENT_NOTIFICATIONS:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"recent_notifications allows at most {MAX_RECENT_NOTIFICATIONS} entries",
+            )
+        for entry in self.recent_notifications:
+            if not isinstance(entry, RecentNotification):
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, "recent_notifications entries must be typed"
+                )
 
     @property
     def evidence_refs(self) -> frozenset[str]:
@@ -736,6 +1068,7 @@ class ContextPack:
             "pending_refs": list(self.pending_refs),
             "sent_fact_refs": list(self.sent_fact_refs),
             "memory_refs": list(self.memory_refs),
+            "recent_notifications": [entry.to_dict() for entry in self.recent_notifications],
             "untrusted_content_policy": self.untrusted_content_policy,
         }
 
@@ -758,6 +1091,22 @@ def validate_context_pack(pack: dict[str, Any]) -> list[str]:
     for name in ("pending_refs", "sent_fact_refs", "memory_refs"):
         if len(pack.get(name, [])) > 256:
             errors.append(f"{name} exceeds 256 items")
+    recent = pack.get("recent_notifications", [])
+    if len(recent) > MAX_RECENT_NOTIFICATIONS:
+        errors.append(f"recent_notifications exceeds {MAX_RECENT_NOTIFICATIONS} items")
+    for idx, entry in enumerate(recent):
+        if not isinstance(entry, dict):
+            errors.append(f"recent_notifications[{idx}] must be an object")
+            continue
+        if set(entry) - {"fact_digest", "channel_kind", "topic", "title", "sent_at_ms"}:
+            errors.append(f"recent_notifications[{idx}] has unknown keys")
+        if "body" in entry:
+            errors.append(f"recent_notifications[{idx}] must never carry a body")
+        if entry.get("channel_kind") not in ("local_inbox", "webhook"):
+            errors.append(f"recent_notifications[{idx}].channel_kind invalid")
+        title = entry.get("title")
+        if not isinstance(title, str) or not 1 <= len(title) <= _RECENT_TITLE_MAX:
+            errors.append(f"recent_notifications[{idx}].title out of range")
     return errors
 
 

@@ -18,11 +18,17 @@ Time rules (SPEC §5.1/§5.2):
 - Monthly schedules skip months without the requested day; they never
   silently substitute the month's last day.
 - Misfire policies: ``coalesce_latest`` (heartbeat default) admits the
-  latest missed slot once; ``grace_once`` (task default) admits the
-  latest missed slot only within the grace window; ``expire`` admits only
-  slots reached within the healthy-tick tolerance and expires everything
-  else. A missed episode materializes at most one ledger row (the latest
-  slot) carrying the episode size as its reason.
+  latest missed slot once; ``grace_once`` (task/reminder default) admits
+  the latest missed slot only within the grace window; ``expire`` admits
+  only slots reached within the healthy-tick tolerance and expires
+  everything else. A missed episode materializes at most one ledger row
+  (the latest slot) carrying the episode size as its reason.
+- ``mode="reminder"`` jobs take a completely different admission path:
+  their occurrence is committed straight into the owner outbox with zero
+  model calls and no run row (SPEC §21.1 step 2). The same misfire
+  arithmetic decides *whether* the occurrence is still owed, but an
+  occurrence that can no longer be delivered is recorded as a queryable
+  miss instead of a silent expiry (SPEC §21.1 step 4).
 
 All computation is in UTC epoch milliseconds on integer arithmetic; wall
 and monotonic clocks are never mixed (see ``clock.py``).
@@ -244,7 +250,14 @@ def _fresh_cursor(sched: Schedule, created_at_ms: int) -> int:
         return interval_slot_ms(sched.anchor_ms, sched.every_seconds, created_at_ms)
     if sched.kind == "runonce":
         assert sched.at_ms is not None
-        return min(created_at_ms, sched.at_ms)
+        # A runonce created *after* its target instant is born as a missed
+        # occurrence and must still go through its misfire policy, so the
+        # cursor sits strictly before ``at``. (v0.1.1 fixes what was a
+        # silent park: the slot was invisible to ``latest_due_slot`` and
+        # the miss left no queryable reason — SPEC §21.1 step 4.)
+        if created_at_ms >= sched.at_ms:
+            return sched.at_ms - 1
+        return created_at_ms
     return created_at_ms
 
 
@@ -254,6 +267,9 @@ def _episode_size(sched: Schedule, cursor_ms: int, latest_ms: int, cap: int = _M
         assert sched.anchor_ms is not None and sched.every_seconds is not None
         every_ms = sched.every_seconds * 1000
         return min((latest_ms - cursor_ms) // every_ms, cap)
+    if sched.kind == "runonce":
+        assert sched.at_ms is not None
+        return 1 if cursor_ms < sched.at_ms <= latest_ms else 0
     zone = _calendar_zone(sched)
     day = datetime.fromtimestamp(cursor_ms / 1000, timezone.utc).astimezone(zone).date()
     end_day = datetime.fromtimestamp(latest_ms / 1000, timezone.utc).astimezone(zone).date()
@@ -305,14 +321,22 @@ class Scheduler:
         grace_seconds: int = 900,
         scan_tolerance_seconds: int = 60,
         occurrence_horizon_days: int = 400,
+        default_max_per_day: int | None = None,
     ) -> None:
         if grace_seconds < 0 or scan_tolerance_seconds < 0:
             raise ValueError("grace and tolerance must be non-negative")
+        if default_max_per_day is not None and (
+            not isinstance(default_max_per_day, int)
+            or isinstance(default_max_per_day, bool)
+            or default_max_per_day < 1
+        ):
+            raise ValueError("default_max_per_day must be a positive integer or None")
         self.store = store
         self.clock = clock
         self.grace_ms = grace_seconds * 1000
         self.tolerance_ms = scan_tolerance_seconds * 1000
         self.horizon_days = occurrence_horizon_days
+        self.default_max_per_day = default_max_per_day
 
     # ------------------------------------------------------------------ #
     # Registration
@@ -380,6 +404,9 @@ class Scheduler:
 
         decision = self._misfire_decision(job, sched, latest, now, cursor)
         next_due = next_occurrence_after(sched, latest, horizon_days=self.horizon_days)
+        if job.mode == "reminder":
+            self._admit_reminder(job, sched, latest, next_due, now, decision, report)
+            return
         if decision[0] == "admit":
             outcome = self.store.admit_job_occurrence(
                 job.job_id,
@@ -413,6 +440,68 @@ class Scheduler:
                 occurrence=self._occurrence_label(job, latest),
                 expired_reason=reason,
             )
+
+    def _admit_reminder(
+        self,
+        job: Any,
+        sched: Schedule,
+        latest: int,
+        next_due: int | None,
+        now: int,
+        decision: tuple[str, str | None],
+        report: AdmissionReport,
+    ) -> None:
+        """Deterministic reminder admission: no run, no model (SPEC §21.1).
+
+        The store owns the whole transaction (occurrence + gates + action +
+        outbox), so a restart, a replayed tick or a PAS/host race can only
+        ever produce one message for one occurrence.
+        """
+        occurrence = self._occurrence_label(job, latest)
+        if decision[0] != "admit":
+            _, reason = decision
+            self.store.record_missed_reminder(
+                job.job_id,
+                expected_revision=job.revision,
+                kind=sched.kind,
+                slot_ms=latest,
+                reason=reason,
+                next_due_ms=next_due,
+                now_ms=now,
+            )
+            report.expired.append((occurrence, reason))
+            return
+        late_reason = None
+        if now - latest > self.tolerance_ms:
+            # Only the observable fact is recorded: this occurrence was
+            # admitted after its planned instant as a graceful catch-up.
+            late_reason = "catch_up_within_grace"
+        result = self.store.admit_reminder_occurrence(
+            job.job_id,
+            expected_revision=job.revision,
+            kind=sched.kind,
+            slot_ms=latest,
+            next_due_ms=next_due,
+            now_ms=now,
+            default_max_per_day=self.default_max_per_day,
+            late_reason=late_reason,
+        )
+        if result.outcome in ("queued", "deferred"):
+            report.admitted.append(occurrence)
+        elif result.outcome == "already":
+            report.already_admitted.append(occurrence)
+        elif result.outcome == "skipped_stopped":
+            report.skipped.append((job.job_id, "skipped_stopped"))
+        elif result.outcome == "skipped_disabled":
+            report.skipped.append((job.job_id, "skipped_disabled"))
+        elif result.outcome == "skipped_revision":
+            report.skipped.append((job.job_id, "skipped_revision"))
+        elif result.outcome == "skipped_missing":
+            report.skipped.append((job.job_id, "skipped_missing"))
+        else:
+            # suppressed / missed: the occurrence is accounted for and the
+            # reason stays queryable on the job's activity projection.
+            report.expired.append((occurrence, result.reason or result.outcome))
 
     def _misfire_decision(
         self, job: Any, sched: Schedule, latest: int, now: int, cursor: int

@@ -16,7 +16,7 @@ threads, daemons or I/O.
 from __future__ import annotations
 
 PAS_PROTOCOL_VERSION = "1.0"
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 from .clock import Clock, FakeClock, SystemClock
 from .contracts import (
@@ -44,8 +44,15 @@ from .contracts import (
     content_hash,
     error_for_code,
     require_utc_timestamp,
+    OBLIGATION_DUE,
+    OBLIGATION_OPPORTUNISTIC,
+    OBLIGATIONS,
+    REMINDER_KEYS,
+    NOTIFY_SELF_CAPABILITY,
+    default_obligation,
     validate_context_pack,
     validate_decision,
+    validate_reminder,
     validate_schedule,
 )
 from .context import (
@@ -69,7 +76,40 @@ from .delivery import (
     SinkResult,
     WebhookNotificationSink,
 )
-from .executor import ExecutorConfig, ExecutorOutcome, RunCancelled, ToolLoopExecutor
+from .decision_contract import (
+    CONTRACT_RULES,
+    DECISION_CONTRACT_VERSION,
+    KIND_ENUM,
+    ContractRule,
+    agent_system_prompt,
+    decision_contract,
+)
+from .host_forms import CallableHostDriver, SubprocessHostDriver, extract_envelope
+from .host_drivers import HermesHostDriver, PiHostDriver
+from .host_bridge import (
+    CANCEL_CONFIRMED,
+    CANCEL_REQUESTED,
+    CANCEL_UNSUPPORTED,
+    HOST_CANCEL_LEVELS,
+    HostBridge,
+    HostDriver,
+    HostPrompt,
+    HostReply,
+)
+from .contracts import (
+    TOOL_AUTHORITIES,
+    TOOL_AUTHORITY_HOST,
+    TOOL_AUTHORITY_PAS_BROKER,
+    TOOL_AUTHORITY_UNKNOWN,
+)
+from .executor import (
+    ExecutorConfig,
+    ExecutorContext,
+    ExecutorOutcome,
+    RunCancelled,
+    RunExecutor,
+    ToolLoopExecutor,
+)
 from .hooks import (
     BubblewrapSandbox,
     HookProtocolError,
@@ -122,11 +162,13 @@ from .store import (
     HookRecord,
     JobRecord,
     OutboxLease,
+    ReminderAdmission,
     RunLease,
     SnapshotRecord,
     SourceStateRecord,
     Store,
 )
+from .windows import local_day_end_ms, local_day_start_ms, quiet_window
 from .tools import (
     AuthorizedToolCall,
     BrokerCallContext,
@@ -135,6 +177,12 @@ from .tools import (
     ToolResult,
     ToolSpec,
 )
+from .builtin_tools import (
+    CAPABILITY_MEMORY_READ,
+    CAPABILITY_STATE_READ,
+    builtin_tools,
+)
+from .toolkit import Tool, register_tools, schema_for_type, tool
 from .config import (
     CONFIG_VERSION,
     ControlPlaneSection,
@@ -242,6 +290,13 @@ __all__ = [
     "render_context_blocks",
     # P3 model / tools / executor / coordinator
     "OpenAICompatibleModel",
+    "Tool",
+    "tool",
+    "register_tools",
+    "schema_for_type",
+    "builtin_tools",
+    "CAPABILITY_MEMORY_READ",
+    "CAPABILITY_STATE_READ",
     "AuthorizedToolCall",
     "BrokerCallContext",
     "LocalToolBroker",
@@ -265,6 +320,40 @@ __all__ = [
     "OwnerChannelRegistry",
     "ApprovalManager",
     "quiet_end_ms",
+    "quiet_window",
+    "local_day_start_ms",
+    "local_day_end_ms",
+    "ReminderAdmission",
+    "ExecutorContext",
+    "RunExecutor",
+    "TOOL_AUTHORITIES",
+    "TOOL_AUTHORITY_HOST",
+    "TOOL_AUTHORITY_PAS_BROKER",
+    "TOOL_AUTHORITY_UNKNOWN",
+    "DECISION_CONTRACT_VERSION",
+    "HostBridge",
+    "HermesHostDriver",
+    "CallableHostDriver",
+    "SubprocessHostDriver",
+    "extract_envelope",
+    "PiHostDriver",
+    "HostDriver",
+    "HostPrompt",
+    "HostReply",
+    "CANCEL_CONFIRMED",
+    "CANCEL_REQUESTED",
+    "CANCEL_UNSUPPORTED",
+    "HOST_CANCEL_LEVELS",
+    "decision_contract",
+    "agent_system_prompt",
+    "CONTRACT_RULES",
+    "KIND_ENUM",
+    "validate_reminder",
+    "REMINDER_KEYS",
+    "OBLIGATIONS",
+    "OBLIGATION_DUE",
+    "OBLIGATION_OPPORTUNISTIC",
+    "default_obligation",
     "GrantRecord",
     "ApprovalRecord",
     "OutboxLease",

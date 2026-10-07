@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://proactive-agent-sdk.invalid/schemas/v1/job_spec.json",
   "title": "JobSpec",
-  "description": "SPEC §4.1 JobSpec. Per-kind required schedule fields (interval=>anchor+every_seconds; daily/monthly=>local_time+timezone; weekly=>weekdays+local_time+timezone; runonce=>at) are enforced in contracts.validate_schedule, not in this schema. DST/fold policy persists per job revision (SPEC §5.1).",
+  "description": "SPEC §4.1 JobSpec. Per-kind required schedule fields (interval=>anchor+every_seconds; daily/monthly=>local_time+timezone; weekly=>weekdays+local_time+timezone; runonce=>at) are enforced in contracts.validate_schedule, not in this schema. DST/fold policy persists per job revision (SPEC §5.1). mode=reminder is the deterministic direct reminder (SPEC §21.1 step 2): it carries a frozen reminder block instead of task.instruction, performs no model call, and is validated in contracts.validate_reminder.",
   "type": "object",
   "additionalProperties": false,
   "required": ["protocol_version", "job_id", "revision", "owner", "mode", "schedule", "task", "enabled"],
@@ -11,7 +11,10 @@
     "job_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
     "revision": { "type": "integer", "minimum": 1 },
     "owner": { "enum": ["pas", "host"] },
-    "mode": { "enum": ["heartbeat", "task"] },
+    "mode": {
+      "description": "heartbeat = opportunistic check; task = explicit agent task; reminder = deterministic direct reminder delivered at the scheduled instant with zero model calls (SPEC §21.1 step 2).",
+      "enum": ["heartbeat", "task", "reminder"]
+    },
     "schedule": { "$ref": "#/$defs/schedule" },
     "task": {
       "type": "object",
@@ -39,9 +42,75 @@
     },
     "misfire_policy": { "enum": ["coalesce_latest", "grace_once", "expire"] },
     "deadline": { "type": "string", "format": "date-time" },
-    "enabled": { "type": "boolean" }
+    "enabled": { "type": "boolean" },
+    "reminder": { "$ref": "#/$defs/reminder" },
+    "obligation": {
+      "description": "Notification obligation granted by trusted task configuration (SPEC §21.1 step 3). 'due' means the job owes a notification at its scheduled instant and any deferral must stay visible; 'opportunistic' means reach out only when analysis says so. Model output, Skill text and external sources can never raise this.",
+      "enum": ["due", "opportunistic"]
+    }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "reminder" } }, "required": ["mode"] },
+      "then": {
+        "required": ["reminder"],
+        "properties": {
+          "task": {
+            "description": "A reminder carries no agent instruction: task holds only the optional goal/skill metadata.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "goal_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "skill_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 128 }, "maxItems": 64 }
+            }
+          }
+        }
+      },
+      "else": { "properties": { "reminder": false } }
+    }
+  ],
   "$defs": {
+    "reminder": {
+      "description": "Frozen user-authored reminder text (SPEC §21.1 step 2). Nothing here comes from model output or source content; the body, instants, zone, owner channel and obligation are all frozen by the trusted jobs_upsert path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["body", "timezone"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "body": {
+          "description": "The exact text the owner will receive. Must contain every artifact_refs entry verbatim, so the owner can open what the message names (SPEC §21.1 step 8).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "timezone": {
+          "description": "IANA zone the user froze this reminder in; must equal schedule.timezone when the schedule declares one.",
+          "$ref": "#/$defs/timezone"
+        },
+        "destination": {
+          "description": "Owner channel ref. Omitted means the profile's bound owner destination. Any other value must be a registered owner channel: a reminder can never invent a receiver.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "topic": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "refresh_sources": {
+          "description": "Source ids re-read right before the message goes out (SPEC §21.1 step 5). A reminder that declares none is sent exactly as frozen.",
+          "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" }
+        },
+        "fact_refs": {
+          "description": "Facts this reminder is about; a tombstoned one cancels the message before it is sent (SPEC §21.1 step 5).",
+          "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "artifact_refs": {
+          "description": "Openable local artifact references (artifact:<relative path>, no absolute or machine-local paths). Each must appear verbatim in the body.",
+          "type": "array", "minItems": 1, "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      }
+    },
     "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
     "timezone": {
       "description": "IANA zone name; never a machine-local inference (SPEC §14.3).",

@@ -159,14 +159,25 @@ class LocalToolBroker:
     def __init__(
         self,
         *,
-        capabilities: frozenset[str] | set[str],
+        capabilities: frozenset[str] | set[str] | Callable[[], frozenset[str]],
         tools: dict[str, tuple[ToolSpec, ToolHandler]] | None = None,
     ) -> None:
-        if not isinstance(capabilities, (frozenset, set)) or any(
-            not isinstance(c, str) or not c for c in capabilities
+        """``capabilities`` may be a set, or a zero-argument callable.
+
+        The callable form exists because grants are live: an auto-assembled
+        agent reads the *current* active grants when a run starts, rather
+        than freezing the snapshot at construction time and quietly ignoring
+        a grant the user added afterwards (SPEC §22.1 item 9).
+        """
+        if not callable(capabilities) and (
+            not isinstance(capabilities, (frozenset, set))
+            or any(not isinstance(c, str) or not c for c in capabilities)
         ):
-            raise PASError(ErrorCode.INVALID_CONFIG, "capabilities must be a set of non-empty strings")
-        self.capabilities = frozenset(capabilities)
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "capabilities must be a set of non-empty strings or a callable returning one",
+            )
+        self.capabilities = capabilities
         self._tools: dict[str, tuple[ToolSpec, ToolHandler]] = {}
         for name, (spec, handler) in (tools or {}).items():
             self.register(spec, handler)
@@ -175,6 +186,19 @@ class LocalToolBroker:
         if spec.name in self._tools:
             raise PASError(ErrorCode.CONFLICT, f"tool {spec.name!r} already registered")
         self._tools[spec.name] = (spec, handler)
+
+    def capability_snapshot(self) -> frozenset[str]:
+        """Resolve the current capabilities, whether fixed or live."""
+        source = self.capabilities
+        resolved = source() if callable(source) else source
+        if not isinstance(resolved, (frozenset, set)) or any(
+            not isinstance(c, str) or not c for c in resolved
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "capability source must return a set of non-empty strings",
+            )
+        return frozenset(resolved)
 
     def tool_names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tools))

@@ -705,6 +705,28 @@ class StorePrimitiveTests(P4TestCase):
         self.assertEqual(store.notifications_today(day_start_ms=berlin_ms("2026-10-20", 0),
                                                    now_ms=clock.wall_now_ms()), 0)
 
+    def test_a_silent_decision_completes_instead_of_erroring(self):
+        """The most common proactive outcome must not look like a failure.
+
+        A run whose decision is `silent` has zero proposals. That is a valid
+        run, so it has to move proposed → policy_evaluated → completed. Until
+        v0.1.2 `record_policy_verdicts` rejected the empty verdict map, so
+        every silent decision wired to a PolicyEngine was reported as
+        `policy_error` and left retryable — but nothing tested that
+        combination, so it stayed invisible.
+        """
+        store, clock, registry, policy, job = make_stack(delivery_policy={"timezone": "UTC"})
+        run_id = make_proposed_run(store, clock, job, proposals=[], summary="无实质变化")
+        self.assertEqual(store.get_run(run_id)["state"], "proposed")
+
+        verdict = policy.apply_to_run(run_id, now_ms=clock.wall_now_ms())
+
+        self.assertEqual(verdict.outcome, "completed")
+        self.assertEqual(verdict.queued, 0)
+        self.assertEqual(verdict.approval_pending, 0)
+        self.assertEqual(store.get_run(run_id)["state"], "completed")
+        self.assertEqual(store.list_outbox(), [])
+
     def test_migrations_include_p5_tables(self):
         store, _, _, _, _ = make_stack()
         tables = {

@@ -27,9 +27,20 @@ Python / TypeScript 实现与 fixtures 从这里派生，schema 变更须同步�
 | `Schedule.fold_policy` 仅允许 `earliest`/`latest`（默认 `earliest`；DST 回拨重复时刻取哪一次，春令时跳空一律跳过。P1 起 schema 与实现同步支持） | `contracts.validate_schedule` |
 | `Decision.decision == "silent"` ⇒ `proposals` 为空；`"propose"` ⇒ 至少 1 条 | `contracts.validate_decision` |
 | `notify_self` 提案必须带 `evidence_refs` 与 `expires_at` | `contracts.validate_decision` |
+| `mode="reminder"` 必须有 `reminder` 且不得带 `task.instruction`；其他 mode 不得带 `reminder`；`reminder.timezone` 必须与 `schedule.timezone` 一致 | `contracts.validate_reminder`（JSON Schema 用 `allOf` 表达 mode/reminder 的联动） |
+| `reminder` 未知键拒绝；`artifact_refs` 的每一项必须可打开且逐字出现在 `body` | `proactive_sdk.artifacts` + `contracts.validate_reminder` |
+| `obligation` 仅 `due`/`opportunistic`，只能由可信任务配置给出 | `contracts.JobSpec` |
+| `ContextPack.recent_notifications` 有界、无 `body` 字段，`channel_kind` 仅两值 | `contracts.validate_context_pack` |
 
 若后续引入 `jsonschema` 库做 conformance（P7），这些规则应同步写成
 `if/then` 或保留为代码层检查，两种途径的测试结果必须一致。
+
+## 生成物同步
+
+`packages/client-ts/src/schema_types.ts` 由 `tools/gen_client_ts.py` 从本目录
+生成，`tests/test_client_ts_drift.py` 会在生成结果与提交内容不一致时失败；
+`packages/client-ts/src/rpc.ts` 的方法表与 `proactive_sdk.rpc.PROACTIVE_RPC_METHODS`
+逐项比对。公共对象变动必须同时落地 Python、本目录、生成类型与 fixtures。
 
 ## 文件
 

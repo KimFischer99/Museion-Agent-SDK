@@ -25,12 +25,21 @@ transaction and topic mutes right before the effect (§10.4 投递前复验).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from typing import Any
 
-from .contracts import ErrorCode, PASError, content_hash
+from .artifacts import ArtifactRefError, missing_artifact_refs, normalize_artifact_ref
+from .contracts import (
+    NOTIFY_SELF_CAPABILITY,
+    validate_schedule,
+    OBLIGATION_DUE,
+    ErrorCode,
+    PASError,
+    content_hash,
+)
 from .store import Store
+from .windows import local_day_end_ms, local_day_start_ms, quiet_end_ms
 
 __all__ = [
     "POLICY_VERSION",
@@ -45,13 +54,21 @@ __all__ = [
 
 POLICY_VERSION = "1.0"
 
-# The capability a profile must grant before notify_self proposals go out
-# automatically (§9.1: 给已绑定本人通道发通知 — 可在用户授予长期通知权限后自动).
-NOTIFY_SELF_CAPABILITY = "notify.self"
-
 # Proposal kinds that only produce local artifacts (no delivery, no
 # approval) — §9.1 "创建本地草稿、记录证据" tier.
-_LOCAL_KINDS = frozenset({"draft", "internal_record", "suggest_watch"})
+#
+# `suggest_watch` used to sit here, which meant policy filed it as a
+# `run_events` note and stopped: the user never saw it and it never became
+# a task (SPEC §22.1 item 7). It now has its own path that freezes a
+# pending suggestion the user can accept or decline.
+_LOCAL_KINDS = frozenset({"draft", "internal_record"})
+
+_WATCH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+
+#: Host-declared proactive pacing. Only ever a *soft* pacing preference:
+#: it can never raise a job's obligation, bypass a quiet window, a mute, a
+#: grant check or the business-key dedup.
+_CADENCES = frozenset({"warm", "balanced", "gentle"})
 
 
 @dataclass(frozen=True)
@@ -64,6 +81,13 @@ class PolicyConfig:
     default_message_ttl_ms: int = 7 * 24 * 3600 * 1000
     approval_ttl_ms: int = 3 * 24 * 3600 * 1000
     max_per_day: int | None = None
+    # SPEC §21.1 step 8: a host-declared proactive cadence. The *name*
+    # routes product behaviour; the numbers are the host's, never an SDK
+    # default — with no numbers configured the cadence adds no gate
+    # (不把参考产品的小时数写成 SDK 默认值).
+    cadence: str = "balanced"
+    cadence_min_gap_seconds: int | None = None
+    cadence_max_per_day: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.notification_profile, str) or not self.notification_profile:
@@ -77,6 +101,18 @@ class PolicyConfig:
             not isinstance(self.max_per_day, int) or isinstance(self.max_per_day, bool) or self.max_per_day < 1
         ):
             raise PASError(ErrorCode.INVALID_CONFIG, "max_per_day must be a positive integer or None")
+        if self.cadence not in _CADENCES:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, f"cadence must be one of {sorted(_CADENCES)}"
+            )
+        for name in ("cadence_min_gap_seconds", "cadence_max_per_day"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"{name} must be a positive integer or None"
+                )
 
 
 @dataclass(frozen=True)
@@ -91,84 +127,9 @@ class PolicyRunReport:
     local_records: int = 0
     suppressed: int = 0
     duplicates: int = 0
+    #: Pending watch suggestions frozen during this run (SPEC §22.1 item 7).
+    watch_suggestions: int = 0
     reasons: tuple[str, ...] = ()
-
-
-def _quiet_window(policy: dict[str, Any]) -> tuple[tuple[int, int], Any] | None:
-    """Parse a delivery_policy quiet_hours block:
-    ``{"start": "HH:MM", "end": "HH:MM", "timezone": IANA}``.
-    Returns ((start_min, end_min), tzinfo) or None."""
-    start = policy.get("quiet_hours_start")
-    end = policy.get("quiet_hours_end")
-    tzname = policy.get("timezone")
-    block = policy.get("quiet_hours")
-    if isinstance(block, dict):
-        start = block.get("start")
-        end = block.get("end")
-        tzname = block.get("timezone")
-    if not (isinstance(start, str) and isinstance(end, str) and isinstance(tzname, str)):
-        return None
-
-    def _minutes(value: str) -> int:
-        parts = value.split(":")
-        if len(parts) != 2 or not all(p.isdigit() and len(p) == 2 for p in parts):
-            raise PASError(ErrorCode.INVALID_CONFIG, f"quiet-hours time {value!r} must be HH:MM")
-        hour, minute = int(parts[0]), int(parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise PASError(ErrorCode.INVALID_CONFIG, f"quiet-hours time {value!r} out of range")
-        return hour * 60 + minute
-
-    try:
-        from zoneinfo import ZoneInfo
-
-        tz = ZoneInfo(tzname)
-    except Exception:
-        raise PASError(ErrorCode.INVALID_CONFIG, f"quiet-hours timezone {tzname!r} invalid") from None
-    return (_minutes(start), _minutes(end)), tz
-
-
-def quiet_end_ms(policy: dict[str, Any], now_ms: int) -> int | None:
-    """Epoch ms of the end of the quiet window covering ``now_ms``, or
-    None when ``now_ms`` is outside quiet hours. Overnight windows
-    (start > end) are handled on wall-clock local time; DST shifts move
-    the boundary with the wall clock, which is the semantics users expect
-    from a quiet-hours setting."""
-    parsed = _quiet_window(policy)
-    if parsed is None:
-        return None
-    (start_min, end_min), tz = parsed
-    local_now = datetime.fromtimestamp(now_ms / 1000, tz=tz)
-    minute_of_day = local_now.hour * 60 + local_now.minute
-    if start_min == end_min:
-        return None  # a full-day window is a configuration error; treat as no window
-    if start_min < end_min:
-        if not (start_min <= minute_of_day < end_min):
-            return None
-        end_dt = local_now.replace(hour=end_min // 60, minute=end_min % 60, second=0, microsecond=0)
-    else:
-        in_evening = minute_of_day >= start_min
-        in_morning = minute_of_day < end_min
-        if not (in_evening or in_morning):
-            return None
-        day = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_dt = day + timedelta(days=1 if in_evening else 0)
-        end_dt = end_dt.replace(hour=end_min // 60, minute=end_min % 60)
-    return int(end_dt.timestamp() * 1000)
-
-
-def local_day_start_ms(tzname: str | None, now_ms: int) -> int:
-    """Epoch ms of the local day start used for the daily quota."""
-    if not tzname:
-        return now_ms - (now_ms % 86_400_000)
-    try:
-        from zoneinfo import ZoneInfo
-
-        tz = ZoneInfo(tzname)
-    except Exception:
-        raise PASError(ErrorCode.INVALID_CONFIG, f"quota timezone {tzname!r} invalid") from None
-    local_now = datetime.fromtimestamp(now_ms / 1000, tz=tz)
-    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return int(day_start.timestamp() * 1000)
 
 
 class GrantManager:
@@ -324,15 +285,37 @@ class PolicyEngine:
             raise PASError(ErrorCode.INTERNAL_ERROR, "run references a missing event", scope="policy")
         job = self.store.get_job(event.job_id) if event.job_id else None
         goal_id = job.job_id if job is not None else f"event:{event.event_id[:16]}"
-        delivery_policy = dict(job.delivery_policy) if job is not None else {}
-        grant_refs = tuple(job.grant_refs) if job is not None else ()
+        if job is not None:
+            delivery_policy = dict(job.delivery_policy)
+            grant_refs = tuple(job.grant_refs)
+            # Trusted task configuration only: a proposal can never claim
+            # that it owes the user a notification (SPEC §21.1 step 3).
+            obligation = job.obligation
+        else:
+            # A wake with no job has no standing scope. It only gets one when
+            # a trusted entry bound an authorization context to *this*
+            # event — the generic manual/hook path never can, so being able
+            # to raise a wake is not the same as being able to authorize
+            # what it produces (SPEC §22.1 item 6). Anything absent stays
+            # absent: no silent fallback to a default profile or channel.
+            authorization = event.authorization or {}
+            delivery_policy = dict(authorization.get("delivery_policy") or {})
+            grant_refs = tuple(authorization.get("grant_refs") or ())
+            obligation = "opportunistic"
 
         proposals = self.store.run_proposals(run_id)
         verdicts: dict[str, dict[str, Any]] = {}
         entries: list[dict[str, Any]] = []
         reasons: list[str] = []
         local_notes: list[str] = []
-        counters = {"queued": 0, "deferred": 0, "approval_pending": 0, "local_records": 0, "suppressed": 0}
+        counters = {
+            "queued": 0,
+            "deferred": 0,
+            "approval_pending": 0,
+            "local_records": 0,
+            "suppressed": 0,
+            "watch_suggestions": 0,
+        }
         queued_in_batch = 0
         for proposal in proposals:
             verdict, entry = self.evaluate_proposal(
@@ -343,6 +326,7 @@ class PolicyEngine:
                 run_id=run_id,
                 now_ms=now,
                 queued_in_batch=queued_in_batch,
+                obligation=obligation,
             )
             verdicts[proposal["proposal_id"]] = verdict
             if entry is not None:
@@ -356,6 +340,11 @@ class PolicyEngine:
             elif outcome == "local_record":
                 counters["local_records"] += 1
                 local_notes.append(f"{verdict.get('reason', 'local')}:{proposal.get('fact_id')}"[:200])
+            elif outcome == "watch_suggested":
+                counters["watch_suggestions"] += 1
+                local_notes.append(
+                    f"watch_suggested:{verdict.get('job_name')}->{verdict.get('suggestion_id')}"[:200]
+                )
             elif outcome == "suppressed":
                 counters["suppressed"] += 1
                 reasons.append(f"{proposal['proposal_id']}:{verdict.get('reason', 'policy')}")
@@ -375,6 +364,7 @@ class PolicyEngine:
             approval_pending=counts["approval_pending"],
             local_records=counters["local_records"],
             suppressed=counters["suppressed"],
+            watch_suggestions=counters["watch_suggestions"],
             duplicates=counts["duplicates"],
             reasons=tuple(reasons),
         )
@@ -405,6 +395,7 @@ class PolicyEngine:
         run_id: str,
         now_ms: int,
         queued_in_batch: int = 0,
+        obligation: str = "opportunistic",
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Return (verdict dict, queueing entry or None). The verdict is
         persisted on the proposal row; the entry is what phase B queues."""
@@ -417,6 +408,16 @@ class PolicyEngine:
         if "destination" in arguments or "receiver" in arguments or "to" in arguments:
             return self._suppressed("receiver_forbidden")
 
+        # -- artifact references (§21.1 step 8) --------------------------
+        artifacts, reason = self._artifact_refs(proposal, arguments)
+        if reason:
+            return self._suppressed(reason)
+
+        if kind == "suggest_watch":
+            return self._evaluate_suggest_watch(
+                proposal, arguments, goal_id, grant_refs, run_id, now_ms
+            )
+
         if kind in _LOCAL_KINDS:
             # §9.1 "创建本地草稿、记录证据": these never leave the machine
             # and carry no external effect — the run_events ledger IS the
@@ -427,12 +428,12 @@ class PolicyEngine:
         if kind == "notify_self":
             return self._evaluate_notify_self(
                 proposal, arguments, goal_id, delivery_policy, grant_refs, run_id, now_ms,
-                queued_in_batch=queued_in_batch,
+                queued_in_batch=queued_in_batch, obligation=obligation, artifacts=artifacts,
             )
         if kind == "request_external_action":
             return self._evaluate_external_action(
                 proposal, arguments, goal_id, delivery_policy, grant_refs, run_id, now_ms,
-                queued_in_batch=queued_in_batch,
+                queued_in_batch=queued_in_batch, obligation=obligation, artifacts=artifacts,
             )
         return self._suppressed("kind_not_policy_managed")
 
@@ -446,6 +447,8 @@ class PolicyEngine:
         run_id: str,
         now_ms: int,
         queued_in_batch: int = 0,
+        obligation: str = "opportunistic",
+        artifacts: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         # Grant: an active long-lived owner-notification permission.
         grant = self._active_grant_for(grant_refs, NOTIFY_SELF_CAPABILITY)
@@ -475,12 +478,14 @@ class PolicyEngine:
 
         not_before, defer_reason = self._timing(
             delivery_policy, proposal.get("expires_at_ms"), now_ms,
-            queued_in_batch=queued_in_batch,
+            queued_in_batch=queued_in_batch, obligation=obligation,
         )
         if not_before is None:
             return self._suppressed(defer_reason)
 
         payload = self._notification_payload(proposal, run_id, channel, "notify_self")
+        if artifacts:
+            payload["artifact_refs"] = list(artifacts)
         request = self._frozen_request(
             kind="notify_self",
             account_ref=grant.account_ref,
@@ -519,6 +524,8 @@ class PolicyEngine:
         run_id: str,
         now_ms: int,
         queued_in_batch: int = 0,
+        obligation: str = "opportunistic",
+        artifacts: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """§9.1: 向他人发送、改日历、发布内容 → 单次人工审批 with a frozen
         canonical request; the destination comes from trusted job policy,
@@ -567,12 +574,14 @@ class PolicyEngine:
 
         not_before, defer_reason = self._timing(
             delivery_policy, proposal.get("expires_at_ms"), now_ms,
-            queued_in_batch=queued_in_batch,
+            queued_in_batch=queued_in_batch, obligation=obligation,
         )
         if not_before is None:
             return self._suppressed(defer_reason)
 
         payload = self._notification_payload(proposal, run_id, channel, "external_action")
+        if artifacts:
+            payload["artifact_refs"] = list(artifacts)
         request = self._frozen_request(
             kind="request_external_action",
             account_ref=grant.account_ref,
@@ -598,9 +607,104 @@ class PolicyEngine:
         )
         return {"outcome": "approval_required", "request_hash": request_hash}, entry
 
+    def _evaluate_suggest_watch(
+        self,
+        proposal: dict[str, Any],
+        arguments: dict[str, Any],
+        goal_id: str,
+        grant_refs: tuple[str, ...],
+        run_id: str,
+        now_ms: int,
+    ) -> tuple[dict[str, Any], None]:
+        """Freeze a "you might want to watch this" suggestion.
+
+        The model proposes *once*; everything the user later confirms is read
+        back from the frozen row, so a confirmation can never create
+        something different from what was shown. Confirmation itself is a
+        trusted-UI action and does not happen here — a suggestion never
+        becomes a task on its own.
+
+        Authority is inherited, not granted: the suggestion carries the
+        grants the originating run already held, and the resulting job is
+        subject to exactly the same policy as any other job.
+        """
+        schedule = arguments.get("schedule")
+        instruction = arguments.get("instruction")
+        reason = arguments.get("reason")
+        if not isinstance(schedule, dict):
+            return self._suppressed("watch_schedule_missing")
+        problems = validate_schedule(schedule)
+        if problems:
+            return self._suppressed(f"watch_schedule_invalid:{problems[0][:120]}")
+        if not isinstance(instruction, str) or not 1 <= len(instruction) <= 10000:
+            return self._suppressed("watch_instruction_invalid")
+        if not isinstance(reason, str) or not 1 <= len(reason) <= 500:
+            return self._suppressed("watch_reason_missing")
+
+        digest = content_hash({"r": run_id, "p": proposal["proposal_id"]})[:28]
+        name_hint = arguments.get("name")
+        job_name = (
+            name_hint
+            if isinstance(name_hint, str) and _WATCH_NAME_RE.fullmatch(name_hint)
+            else f"watch-{digest[:12]}"
+        )
+        # The name the user sees is the name that will exist; a collision is
+        # resolved here, under the model's eyes, not silently at confirm time.
+        if self.store.get_job(job_name) is not None:
+            job_name = f"{job_name}-{digest[12:16]}"
+
+        try:
+            record = self.store.create_watch_suggestion(
+                run_id=run_id,
+                proposal_id=proposal["proposal_id"],
+                job_id=None,
+                job_name=job_name,
+                schedule=schedule,
+                instruction=instruction,
+                grant_refs=tuple(grant_refs),
+                delivery_policy={"notification_profile": self.config.notification_profile},
+                misfire_policy=None,
+                reason=reason,
+                now_ms=now_ms,
+            )
+        except PASError as exc:
+            return self._suppressed(f"watch_rejected:{exc.code.value}")
+        return {
+            "outcome": "watch_suggested",
+            "reason": "pending_confirmation",
+            "suggestion_id": record["suggestion_id"],
+            "job_name": record["job_name"],
+        }, None
+
     # ------------------------------------------------------------------ #
     # Shared helpers
     # ------------------------------------------------------------------ #
+
+    def _artifact_refs(
+        self, proposal: dict[str, Any], arguments: dict[str, Any]
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Validate the artifact references a proposal declares.
+
+        Two failures are explicit rejections, never warnings: a reference
+        that is not provably openable (absolute path, traversal, foreign
+        scheme) and a reference that never reaches the message body — the
+        owner would be told to open something they cannot open.
+        """
+        raw = arguments.get("artifact_refs")
+        if raw is None:
+            return (), None
+        if not isinstance(raw, (list, tuple)) or not 1 <= len(raw) <= 32:
+            return (), "artifact_refs_malformed"
+        normalized: list[str] = []
+        for item in raw:
+            try:
+                normalized.append(normalize_artifact_ref(item))
+            except ArtifactRefError:
+                return (), "artifact_ref_unsafe"
+        body = proposal.get("body")
+        if not isinstance(body, str) or missing_artifact_refs(body, normalized):
+            return (), "artifact_ref_not_in_body"
+        return tuple(normalized), None
 
     def _suppression_checks(
         self,
@@ -630,6 +734,7 @@ class PolicyEngine:
         now_ms: int,
         *,
         queued_in_batch: int = 0,
+        obligation: str = "opportunistic",
     ) -> tuple[int, str | None]:
         """Compute not_before: quiet hours defer, quota defers to tomorrow.
         Returns (not_before_ms, defer_reason) or (None, suppression_reason)
@@ -655,11 +760,42 @@ class PolicyEngine:
             # so entries already accepted in this batch count too.
             sent_today += queued_in_batch
             if sent_today >= max_per_day:
-                tomorrow = day_start + 86_400_000
+                tomorrow = local_day_end_ms(tzname, now_ms)
                 not_before = max(not_before, tomorrow)
                 reason = "daily_quota"
                 if expires_at_ms is not None and expires_at_ms <= not_before:
                     return None, "expired_in_quota_defer"
+
+        # -- host cadence preference (§21.1 step 8) ----------------------
+        # Pacing is a *soft* preference that only ever applies to
+        # opportunistic reach-out. A job that carries the ``due``
+        # obligation fires: the user asked for it, so a noise-reduction
+        # preference must not be what loses it.
+        if obligation != OBLIGATION_DUE:
+            gap = delivery_policy.get("cadence_min_gap_seconds", self.config.cadence_min_gap_seconds)
+            if isinstance(gap, int) and not isinstance(gap, bool) and gap > 0:
+                last = self.store.last_sent_notification_ms(now_ms=now_ms)
+                if last is not None and now_ms - last < gap * 1000:
+                    not_before = max(not_before, last + gap * 1000)
+                    reason = "cadence_gap" if reason is None else reason + "+cadence_gap"
+                    if expires_at_ms is not None and expires_at_ms <= not_before:
+                        return None, "expired_in_cadence_defer"
+            cap = delivery_policy.get("cadence_max_per_day", self.config.cadence_max_per_day)
+            if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+                tzname = delivery_policy.get("timezone")
+                block = delivery_policy.get("quiet_hours")
+                if isinstance(block, dict):
+                    tzname = block.get("timezone")
+                day_start = local_day_start_ms(tzname, now_ms)
+                sent_today = (
+                    self.store.notifications_today(day_start_ms=day_start, now_ms=now_ms)
+                    + queued_in_batch
+                )
+                if sent_today >= cap:
+                    not_before = max(not_before, local_day_end_ms(tzname, now_ms))
+                    reason = "cadence_daily" if reason is None else reason + "+cadence_daily"
+                    if expires_at_ms is not None and expires_at_ms <= not_before:
+                        return None, "expired_in_cadence_defer"
         return not_before, reason
 
     def _active_grant_for(self, grant_refs: tuple[str, ...], capability: str):

@@ -40,7 +40,9 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .contracts import ErrorCode, PASError, canonical_json
+from datetime import datetime, timezone
+
+from .contracts import ErrorCode, PASError, SourceRequest, canonical_json
 from .policy import PolicyEngine
 from .store import OutboxLease, Store
 
@@ -58,6 +60,21 @@ __all__ = [
 
 # HTTP status → §10.2 outcome mapping for the webhook sink.
 _RETRYABLE_STATUS = frozenset({408, 429})
+
+
+def _rfc3339_to_ms(value: str) -> int:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise PASError(ErrorCode.INVALID_CONFIG, f"timestamp needs an offset: {value!r}")
+    return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def _ms_to_rfc3339(ms: int) -> str:
+    return (
+        datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 @dataclass(frozen=True)
@@ -247,18 +264,52 @@ class OutboxDispatcher:
         sinks: dict[str, Any] | None = None,
         policy: PolicyEngine | None = None,
         config: DispatchConfig | None = None,
+        sources: Any | None = None,
+        source_deadline_s: int = 10,
     ) -> None:
         self.store = store
         self.config = config if config is not None else DispatchConfig()
         self.policy = policy
+        # Optional: when wired, a message whose action declares
+        # time-sensitive sources is re-read right before the effect
+        # (SPEC §21.1 step 5). Without it, only the frozen message is sent.
+        self.sources = sources
+        self.source_deadline_s = int(source_deadline_s)
         self._sinks: dict[str, Any] = dict(sinks or {})
+        # Which registered sinks are merely the library's convenience
+        # default. A caller-supplied transport may replace those, but two
+        # caller-supplied transports for one kind remain a conflict.
+        self._default_sinks: set[str] = set()
+        for kind, sink in self._sinks.items():
+            if isinstance(sink, WebhookNotificationSink):
+                self._default_sinks.add(kind)
         if "webhook" not in self._sinks:
             self._sinks["webhook"] = WebhookNotificationSink()
+            self._default_sinks.add("webhook")
 
     def register_sink(self, channel_kind: str, sink: Any) -> None:
-        if channel_kind in self._sinks:
-            raise PASError(ErrorCode.CONFLICT, f"sink for {channel_kind!r} already registered", scope="delivery")
+        """Attach the transport for one channel kind.
+
+        A caller may replace the pre-registered default (that is what the
+        ``sinks`` argument is for — before v0.1.2 the default was
+        pre-registered *and* un-replaceable, so supplying your own webhook
+        transport always raised a conflict). Two caller-supplied transports
+        for the same kind are still refused: silently keeping one of them
+        would send through a transport the caller did not choose.
+        """
+        if self._sinks.get(channel_kind) is sink:
+            # Registering the same transport again is idempotent: two
+            # channels of one kind may legitimately share it, and their
+            # difference lives in the per-channel endpoint.
+            return
+        if channel_kind in self._sinks and channel_kind not in self._default_sinks:
+            raise PASError(
+                ErrorCode.CONFLICT,
+                f"sink for {channel_kind!r} already registered",
+                scope="delivery",
+            )
         self._sinks[channel_kind] = sink
+        self._default_sinks.discard(channel_kind)
 
     # ------------------------------------------------------------------ #
     # Dispatch loop
@@ -279,6 +330,81 @@ class OutboxDispatcher:
             reports.append(await self._dispatch_one(lease, now_ms=now))
         return reports
 
+    #: Outbox state → (activity state, retryable) for the user-visible
+    #: delivery phase of the job activity projection (SPEC §21.1 step 7).
+    _ACTIVITY_STATES: dict[str, tuple[str, bool]] = {
+        "provider_accepted": ("accepted", False),
+        "reconciled_delivered": ("delivered", False),
+        "stored_in_inbox": ("delivered", False),
+        "delivery_unknown": ("unknown", True),
+        "failed_retryable": ("queued", True),
+        # ``finish_outbox_attempt`` reports a not-yet-exhausted retry as
+        # 'pending' (the message stays claimable), which is exactly what the
+        # user-visible projection calls 'queued'.
+        "pending": ("queued", True),
+        "aborted": ("skipped", False),
+        "failed_terminal": ("failed", False),
+        "suppressed": ("suppressed", False),
+        "deferred": ("deferred", True),
+        "expired": ("missed", False),
+    }
+
+    def _project_delivery(
+        self, message_id: str, *, state: str, now_ms: int
+    ) -> None:
+        """Mirror one delivery outcome onto the job activity projection.
+
+        Best-effort by design: the projection is derived, the outbox and
+        the attempt ledger stay authoritative, and a projection failure
+        must never turn a successful delivery into a failed one. Both a
+        deterministic reminder and an analysis run project here, so
+        ``activity_list`` shows execution and notification outcome as
+        separate rows for every job that produced a message.
+        """
+        try:
+            message = self.store.get_outbox_message(message_id)
+            if message is None:
+                return
+            action = self.store.action_delivery_context(message["action_id"])
+            if action is None:
+                return
+            request = action.get("request") or {}
+            if action.get("source") == "reminder":
+                job_id = request.get("job_id")
+            else:
+                # Analysis-sourced action: the owning job comes from the
+                # run → event chain, not from payload text.
+                job_id = self.store.job_id_for_action(message["action_id"])
+            if not isinstance(job_id, str) or not job_id:
+                return
+            job = self.store.get_job(job_id)
+            if job is None:
+                return
+            mapped, retryable = self._ACTIVITY_STATES.get(state, (state, False))
+            self.store.record_job_activity(
+                job_id=job_id,
+                job_revision=job.revision,
+                phase="delivery",
+                state=mapped,
+                obligation=action.get("obligation") or job.obligation,
+                occurrence_id=action.get("occurrence_id"),
+                slot_ms=request.get("planned_at_ms"),
+                reason=(message.get("reason") or None),
+                planned_at_ms=request.get("planned_at_ms"),
+                actual_at_ms=now_ms,
+                destination_ref=message["destination_ref"],
+                message_id=message_id,
+                run_id=action.get("run_id"),
+                retryable=retryable,
+                # Keyed by message as well as state: a job that produced two
+                # messages must show two rows, while a replayed attempt for
+                # the *same* message and outcome stays one row.
+                dedupe_suffix=f"delivery:{mapped}:{message_id}",
+                now_ms=now_ms,
+            )
+        except Exception:  # noqa: BLE001 - the projection never breaks delivery
+            return
+
     async def _dispatch_one(self, lease: OutboxLease, *, now_ms: int) -> DispatchReport:
         started_at = self.store.clock.wall_now_ms()
         # §10.3: the lease proves DB ownership, not that reality stood
@@ -297,7 +423,36 @@ class OutboxDispatcher:
                     now_ms=now_ms,
                     error_class=reason,
                 )
+                self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
                 return DispatchReport(lease.message_id, final, reason)
+        # §10.4 投递前复验, second half (SPEC §21.1 step 5): a message whose
+        # action declares time-sensitive sources is re-read right before the
+        # effect, on every channel — "the fact was cancelled" is not a
+        # channel-specific fact, and a stale snapshot is never sent as if it
+        # were current.
+        refresh_action, refresh_reason = await self._pre_delivery_refresh(lease, now_ms=now_ms)
+        if refresh_action == "retry":
+            final = self.store.finish_outbox_attempt(
+                lease,
+                outcome="failed_retryable",
+                started_at_ms=started_at,
+                now_ms=now_ms,
+                error_class=refresh_reason,
+                retry_not_before_ms=self._backoff_not_before(lease.message_id, now_ms),
+                max_attempts=self.config.max_attempts,
+            )
+            self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
+            return DispatchReport(lease.message_id, final, refresh_reason)
+        if refresh_action == "suppress":
+            final = self.store.finish_outbox_attempt(
+                lease,
+                outcome="suppressed",
+                started_at_ms=started_at,
+                now_ms=now_ms,
+                error_class=refresh_reason,
+            )
+            self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
+            return DispatchReport(lease.message_id, final, refresh_reason)
         if lease.channel_kind == "local_inbox":
             final = self.store.finish_outbox_attempt(
                 lease,
@@ -309,6 +464,7 @@ class OutboxDispatcher:
                     "body": lease.payload.get("body"),
                 },
             )
+            self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
             return DispatchReport(lease.message_id, final)
         sink = self._sinks.get(lease.channel_kind)
         if sink is None:
@@ -319,6 +475,7 @@ class OutboxDispatcher:
                 now_ms=now_ms,
                 error_class="no_sink_for_channel",
             )
+            self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
             return DispatchReport(lease.message_id, final, "no_sink_for_channel")
         result = await sink.send(
             DeliveryRequest(
@@ -366,7 +523,67 @@ class OutboxDispatcher:
                 receipt=result.receipt,
                 error_class=result.error_class,
             )
+        self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
         return DispatchReport(lease.message_id, final, result.error_class, result.http_status)
+
+    async def _pre_delivery_refresh(
+        self, lease: OutboxLease, *, now_ms: int
+    ) -> tuple[str, str | None]:
+        """Re-read the sources a message declares as time-sensitive.
+
+        Returns ``("send", None)`` when nothing has to be re-verified or
+        everything checks out, ``("retry", reason)`` for a recoverable
+        failure (the message keeps its identity, backoff and provider key)
+        and ``("suppress", reason)`` when the fact is gone for good.
+
+        The rule that matters: a stale snapshot is never sent "as if" it
+        were current. A source that cannot answer defers the message
+        instead of letting old facts through (SPEC §21.1 step 5).
+        """
+        if self.sources is None:
+            return ("send", None)
+        action = self.store.action_delivery_context(lease.action_id)
+        if action is None:
+            return ("send", None)
+        plan = (action.get("request") or {}).get("refresh")
+        if not isinstance(plan, dict):
+            return ("send", None)
+        source_ids = plan.get("sources") or []
+        account_ref = plan.get("account_ref")
+        if not source_ids or not isinstance(account_ref, str):
+            return ("send", None)
+        wanted_facts = set(plan.get("facts") or [])
+        deadline = _ms_to_rfc3339(now_ms + self.source_deadline_s * 1000)
+        for source_id in source_ids:
+            previous = plan.get("watermarks", {}).get(source_id)
+            try:
+                batch = await self.sources.fetch_delta(
+                    SourceRequest(
+                        source_id=source_id,
+                        account_ref=account_ref,
+                        deadline=deadline,
+                        cursor_ref=previous,
+                    )
+                )
+            except PASError as exc:
+                if exc.code in (ErrorCode.PERMISSION_DENIED, ErrorCode.AUTH_REQUIRED):
+                    # 授权撤销: never send what the user may no longer see.
+                    return ("suppress", f"source_unauthorized:{source_id}")
+                return (
+                    "retry",
+                    f"source_unavailable:{source_id}:{exc.code.value}",
+                )
+            fresh_until = batch.fresh_until
+            if fresh_until is not None and _rfc3339_to_ms(fresh_until) < now_ms:
+                return ("retry", f"source_stale:{source_id}")
+            cancelled = [
+                item.fact_id
+                for item in batch.items
+                if item.tombstone and (not wanted_facts or item.fact_id in wanted_facts)
+            ]
+            if cancelled:
+                return ("suppress", f"source_fact_cancelled:{source_id}")
+        return ("send", None)
 
     def _endpoint_for(self, destination_ref: str) -> dict[str, Any]:
         channel = self.store.get_owner_channel(destination_ref)
@@ -412,6 +629,7 @@ class OutboxDispatcher:
                 receipt=answer.receipt,
                 now_ms=now,
             )
+            self._project_delivery(message["message_id"], state=state, now_ms=now)
             reports.append(DispatchReport(message["message_id"], state))
         return reports
 

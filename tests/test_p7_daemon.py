@@ -407,7 +407,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("doctor", out.getvalue())
         self.assertIn("backup", out.getvalue())
         version = self._pas("version")
-        self.assertIn("Museion Agent SDK v0.1.0", version)
+        self.assertIn("Museion Agent SDK v0.1.2", version)
 
     def test_doctor_missing_state_dir_reports_the_finding(self):
         out = self._pas("--state-dir", str(Path(self.tmp) / "missing"), "doctor", "--json",

@@ -1,6 +1,5 @@
 # 本地私有素材（vendor 附件解包、提取的 helper）——自用，不进 git
 private-vendor/
-OPTIMIZATION_PLAN.md
 muse-refer/
 
 # 运行时产物

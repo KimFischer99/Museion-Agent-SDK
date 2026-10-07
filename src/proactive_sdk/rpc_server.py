@@ -253,13 +253,17 @@ class ControlPlaneServer:
                     id=str(require(job, "id")),
                     mode=str(require(job, "mode")),
                     schedule=dict(job.get("schedule") or {}),
-                    instruction=str(require(job, "instruction")),
+                    instruction=str(job.get("instruction") or ""),
                     grant_refs=tuple(job.get("grant_refs") or ()),
                     notification_profile=str(job.get("notification_profile") or "owner-default"),
                     misfire_policy=job.get("misfire_policy"),
                     deadline=job.get("deadline"),
                     enabled=bool(job.get("enabled", True)),
                     delivery_policy=dict(job.get("delivery_policy") or {}),
+                    reminder=(
+                        dict(job["reminder"]) if isinstance(job.get("reminder"), dict) else None
+                    ),
+                    obligation=job.get("obligation"),
                 ),
                 idempotency_key=str(require(p, "idempotency_key")),
             )
@@ -325,9 +329,30 @@ class ControlPlaneServer:
             record = agent.jobs_resume(str(require(await params_of(params), "job_id")))
             return {"job_id": record.job_id, "enabled": True, "revision": record.revision}
 
+        async def jobs_stop(params, session):
+            p = await params_of(params)
+            return agent.jobs_stop(
+                str(require(p, "job_id")), reason=p.get("reason")
+            )
+
         async def jobs_delete(params, session):
-            agent.jobs_delete(str(require(await params_of(params), "job_id")))
-            return {"deleted": True}
+            p = await params_of(params)
+            # A job with audit history is *stopped*, never erased; the
+            # response says which of the two happened so the client never
+            # has to guess (SPEC §21.1 step 7).
+            return agent.jobs_delete(
+                str(require(p, "job_id")), reason=p.get("reason")
+            )
+
+        async def jobs_activity(params, session):
+            p = await params_of(params)
+            limit = p.get("limit", 50)
+            rows = agent.activity_list(
+                p.get("job_id"),
+                phase=p.get("phase"),
+                limit=int(limit) if isinstance(limit, int) else 50,
+            )
+            return {"activity": rows, "count": len(rows)}
 
         async def runs_get(params, session):
             run = agent.runs_get(str(require(await params_of(params), "run_id")))
@@ -408,7 +433,61 @@ class ControlPlaneServer:
         d.register("jobs.list", jobs_list)
         d.register("jobs.pause", jobs_pause)
         d.register("jobs.resume", jobs_resume)
+        async def input_note(params, session):
+            p = await params_of(params)
+            grant_refs = p.get("grant_refs") or []
+            if not isinstance(grant_refs, list) or not grant_refs:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "input.note must bind at least one active grant_ref",
+                    scope="rpc",
+                )
+            event_id = agent.note_user_input(
+                str(require(p, "text")),
+                grant_refs=tuple(str(ref) for ref in grant_refs),
+                destination=p.get("destination"),
+                idempotency_key=p.get("idempotency_key"),
+            )
+            return {"event_id": event_id}
+
+        async def suggestions_list(params, session):
+            p = await params_of(params)
+            limit = p.get("limit", 50)
+            rows = agent.suggestions_list(
+                state=p.get("state"),
+                limit=int(limit) if isinstance(limit, int) else 50,
+            )
+            return {"suggestions": rows, "count": len(rows)}
+
+        async def suggestions_resolve(params, session):
+            p = await params_of(params)
+            actor = session.principal
+            if actor in ("unauthenticated", "anonymous"):
+                raise PASError(
+                    ErrorCode.AUTH_REQUIRED, "no authenticated principal", scope="suggestions"
+                )
+            accept = p.get("accept")
+            if not isinstance(accept, bool):
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, "suggestions.resolve needs accept=true|false",
+                    scope="rpc",
+                )
+            record = agent.suggestions_resolve(
+                str(require(p, "suggestion_id")), accept=accept, actor=actor
+            )
+            return {
+                "suggestion_id": record["suggestion_id"],
+                "state": record["state"],
+                "job_name": record["job_name"],
+                "created_job_id": record["created_job_id"],
+            }
+
+        d.register("suggestions.list", suggestions_list)
+        d.register("suggestions.resolve", suggestions_resolve)
+        d.register("input.note", input_note)
+        d.register("jobs.stop", jobs_stop)
         d.register("jobs.delete", jobs_delete)
+        d.register("jobs.activity", jobs_activity)
         d.register("runs.get", runs_get)
         d.register("runs.list", runs_list)
         d.register("runs.cancel", runs_cancel)

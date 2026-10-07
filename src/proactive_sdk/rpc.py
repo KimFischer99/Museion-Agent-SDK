@@ -67,7 +67,12 @@ PROACTIVE_RPC_METHODS = (
     "jobs.list",
     "jobs.pause",
     "jobs.resume",
+    "jobs.stop",
     "jobs.delete",
+    "jobs.activity",
+    "input.note",
+    "suggestions.list",
+    "suggestions.resolve",
     "runs.get",
     "runs.list",
     "runs.cancel",
@@ -290,7 +295,15 @@ class RpcDispatcher:
         }
 
     async def _system_capabilities(self, params: dict[str, Any], session: RpcSession) -> dict[str, Any]:
-        return {"protocol_version": self.protocol_version, "methods": self.methods}
+        from .decision_contract import DECISION_CONTRACT_VERSION
+
+        return {
+            "protocol_version": self.protocol_version,
+            "methods": self.methods,
+            # SPEC §22.1 item 2: the prompt contract is versioned separately
+            # from the wire protocol, so a host can detect drift.
+            "decision_contract_version": DECISION_CONTRACT_VERSION,
+        }
 
     async def _system_health(self, params: dict[str, Any], session: RpcSession) -> dict[str, Any]:
         return {"ok": True, "server": self.server_name}

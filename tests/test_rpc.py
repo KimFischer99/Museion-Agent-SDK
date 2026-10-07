@@ -135,9 +135,12 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     def test_frozen_method_set_matches_spec(self):
         # SPEC §14.2 method list — the generated TS client is checked
         # against the same tuple in test_client_ts.py.
-        self.assertEqual(
-            len(PROACTIVE_RPC_METHODS), 20
-        )
+        # v0.1.1 adds jobs.stop and jobs.activity (SPEC §21.1 step 7);
+        # v0.1.2 adds input.note (step 6) and the suggestions pair (step 7).
+        self.assertEqual(len(PROACTIVE_RPC_METHODS), 25)
+        for extra in ("jobs.stop", "jobs.activity", "input.note",
+                      "suggestions.list", "suggestions.resolve"):
+            self.assertIn(extra, PROACTIVE_RPC_METHODS)
 
 
 if __name__ == "__main__":

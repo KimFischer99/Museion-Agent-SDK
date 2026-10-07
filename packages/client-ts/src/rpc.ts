@@ -39,7 +39,12 @@ export const PROACTIVE_RPC_METHODS = [
   "jobs.list",
   "jobs.pause",
   "jobs.resume",
+  "jobs.stop",
   "jobs.delete",
+  "jobs.activity",
+  "input.note",
+  "suggestions.list",
+  "suggestions.resolve",
   "runs.get",
   "runs.list",
   "runs.cancel",
@@ -112,10 +117,15 @@ export class PasRpcClient {
     return this.negotiatedMethods;
   }
 
-  async capabilities(): Promise<{ protocol_version: string; methods: string[] }> {
+  async capabilities(): Promise<{
+    protocol_version: string;
+    methods: string[];
+    decision_contract_version: string;
+  }> {
     return (await this.call("system.capabilities", {})) as {
       protocol_version: string;
       methods: string[];
+      decision_contract_version: string;
     };
   }
 
@@ -173,6 +183,56 @@ export class PasRpcClient {
   }
   resumeJob(jobId: string): Promise<unknown> {
     return this.call("jobs.resume", { job_id: jobId });
+  }
+  /**
+   * Stop tracking a job without erasing its audit trail (SPEC §21.1 step 7).
+   */
+  stopJob(jobId: string, reason?: string): Promise<unknown> {
+    return this.call("jobs.stop", { job_id: jobId, reason });
+  }
+  /** Delete when there is no history; otherwise the server stops it. */
+  deleteJob(jobId: string, reason?: string): Promise<unknown> {
+    return this.call("jobs.delete", { job_id: jobId, reason });
+  }
+  /** Pending "you might want to watch this" suggestions. */
+  listSuggestions(options: { state?: string; limit?: number } = {}): Promise<unknown> {
+    return this.call("suggestions.list", { state: options.state, limit: options.limit });
+  }
+  /**
+   * Accept or decline a frozen suggestion. Trusted-UI action: the server
+   * takes the actor from the authenticated session, not from the request.
+   */
+  resolveSuggestion(suggestionId: string, accept: boolean): Promise<unknown> {
+    return this.call("suggestions.resolve", { suggestion_id: suggestionId, accept });
+  }
+
+  /**
+   * Tell the agent something. Trusted entry: it binds *existing* grants to
+   * this one wake and cannot create authority (SPEC §22.1 item 6).
+   */
+  noteUserInput(
+    text: string,
+    grantRefs: readonly string[],
+    options: { destination?: string; idempotencyKey?: string } = {},
+  ): Promise<unknown> {
+    return this.call("input.note", {
+      text,
+      grant_refs: [...grantRefs],
+      destination: options.destination,
+      idempotency_key: options.idempotencyKey,
+    });
+  }
+
+  /**
+   * The user-visible activity projection: what a job did, and why it stayed
+   * quiet. `job_id` omitted means every job.
+   */
+  jobActivity(options: { jobId?: string; phase?: string; limit?: number } = {}): Promise<unknown> {
+    return this.call("jobs.activity", {
+      job_id: options.jobId,
+      phase: options.phase,
+      limit: options.limit,
+    });
   }
   getRun(runId: string): Promise<unknown> {
     return this.call("runs.get", { run_id: runId });

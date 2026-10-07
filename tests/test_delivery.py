@@ -479,3 +479,50 @@ class DispatcherGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SinkRegistrationTests(unittest.TestCase):
+    """The `sinks=` argument must actually be usable for webhook channels."""
+
+    def _store(self):
+        from proactive_sdk import FakeClock, Store
+
+        return Store(
+            ":memory:", profile="sink", owner_destination="local-inbox:sink",
+            clock=FakeClock(wall_ms=1_760_000_000_000),
+        )
+
+    def test_a_caller_supplied_webhook_transport_replaces_the_default(self):
+        from proactive_sdk import OutboxDispatcher, WebhookNotificationSink
+
+        store = self._store()
+        mine = WebhookNotificationSink()
+        dispatcher = OutboxDispatcher(store, sinks={"webhook": mine})
+        self.assertIs(dispatcher._sinks["webhook"], mine)
+
+    def test_registering_a_second_caller_transport_for_one_kind_conflicts(self):
+        from proactive_sdk import ErrorCode, OutboxDispatcher, PASError, WebhookNotificationSink
+
+        dispatcher = OutboxDispatcher(self._store())
+        dispatcher.register_sink("custom", WebhookNotificationSink())
+        with self.assertRaises(PASError) as ctx:
+            dispatcher.register_sink("custom", WebhookNotificationSink())
+        self.assertEqual(ctx.exception.code, ErrorCode.CONFLICT)
+
+    def test_the_default_can_be_replaced_once_through_register_sink(self):
+        from proactive_sdk import OutboxDispatcher, WebhookNotificationSink
+
+        dispatcher = OutboxDispatcher(self._store())
+        mine = WebhookNotificationSink()
+        dispatcher.register_sink("webhook", mine)
+        self.assertIs(dispatcher._sinks["webhook"], mine)
+
+    def test_registering_the_same_transport_twice_is_idempotent(self):
+        """Two channels of one kind may share a transport legitimately."""
+        from proactive_sdk import OutboxDispatcher, WebhookNotificationSink
+
+        dispatcher = OutboxDispatcher(self._store())
+        mine = WebhookNotificationSink()
+        dispatcher.register_sink("webhook", mine)
+        dispatcher.register_sink("webhook", mine)  # must not raise
+        self.assertIs(dispatcher._sinks["webhook"], mine)

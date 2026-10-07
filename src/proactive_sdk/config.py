@@ -44,6 +44,7 @@ __all__ = [
 CONFIG_VERSION = "1"
 
 _MISFIRE_POLICIES = frozenset({"coalesce_latest", "grace_once", "expire"})
+_CADENCES = frozenset({"warm", "balanced", "gentle"})
 
 _TOP_KEYS = ("config_version", "profile", "state_dir", "timezone", "locale",
              "runtime", "heartbeat", "policy", "skills", "control_plane")
@@ -52,7 +53,8 @@ _RUNTIME_KEYS = ("max_concurrent_agent_runs", "shutdown_grace_seconds",
                  "disk_free_warn_mb", "disk_free_stop_mb")
 _HEARTBEAT_KEYS = ("enabled", "every_seconds", "misfire", "checklist")
 _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
-                "external_writes", "lockscreen_content", "allow_untrusted_shell_skills")
+                "external_writes", "lockscreen_content", "allow_untrusted_shell_skills",
+                "cadence", "cadence_min_gap_seconds", "cadence_max_per_day")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -236,6 +238,21 @@ class PolicySection:
     external_writes: str = "approval_required"
     lockscreen_content: str = "minimal"
     allow_untrusted_shell_skills: bool = False
+    # SPEC §21.1 step 8. ``cadence`` is the host's proactive pacing
+    # preference; the two numbers are required for it to have any effect.
+    # The SDK ships no hour counts of its own: without explicit numbers the
+    # preference is recorded and nothing is gated.
+    cadence: str = "balanced"
+    cadence_min_gap_seconds: int | None = None
+    cadence_max_per_day: int | None = None
+
+    @property
+    def cadence_configured(self) -> bool:
+        """True when the host actually declared pacing numbers."""
+        return (
+            self.cadence_min_gap_seconds is not None
+            or self.cadence_max_per_day is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -437,7 +454,21 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
     lockscreen = policy_raw.get("lockscreen_content", "minimal")
     if lockscreen not in ("minimal", "full"):
         raise ConfigError("policy.lockscreen_content must be minimal|full")
+    cadence = policy_raw.get("cadence", "balanced")
+    if cadence not in _CADENCES:
+        raise ConfigError(f"policy.cadence must be one of {sorted(_CADENCES)}")
     policy = PolicySection(
+        cadence=cadence,
+        cadence_min_gap_seconds=(
+            _positive_int("policy", policy_raw["cadence_min_gap_seconds"], "cadence_min_gap_seconds")
+            if policy_raw.get("cadence_min_gap_seconds") is not None
+            else None
+        ),
+        cadence_max_per_day=(
+            _positive_int("policy", policy_raw["cadence_max_per_day"], "cadence_max_per_day")
+            if policy_raw.get("cadence_max_per_day") is not None
+            else None
+        ),
         notification_window=window_tuple,
         max_unsolicited_notifications_per_day=(
             _positive_int(

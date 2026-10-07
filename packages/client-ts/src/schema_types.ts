@@ -21,7 +21,7 @@ export interface ActionRecord {
 // protocol_version
 export type Protocolversion = string;
 
-// context_pack.json: SPEC §4.1 / §7.1 ContextPack. Immutable snapshot for one run. All ids and timestamps in documents using this schema are fake examples unless issued by a live system.
+// context_pack.json: SPEC §4.1 / §7.1 ContextPack. Immutable snapshot for one run. All ids and timestamps in documents using this schema are fake examples unless issued by a live system. recent_notifications is the bounded, redacted summary of notifications already sent in the last 24 h (SPEC §21.1 step 6); it exists so a model can compare topics, openings and fact deltas, and it never carries a message body.
 // Closed object: additionalProperties is false on the wire.
 export interface ContextPack {
   "schema_version": "1.0";
@@ -37,7 +37,19 @@ export interface ContextPack {
   "sent_fact_refs": ReadonlyArray<string>;
   "memory_refs": ReadonlyArray<string>;
   "untrusted_content_policy": "data_only";
+  /** Already-sent notifications from the last 24 h, reduced to non-sensitive fields. Hard-dedup stays with the business key; this summary only lets a model compare t */
+  "recent_notifications"?: ReadonlyArray<Recentnotification>;
 }
+
+// recent_notification: One already-sent notification reduced to non-sensitive fields. There is deliberately no body field: redaction is structural, not best-effort.
+export type Recentnotification = {
+        /** Short digest of the fact id: comparable across messages, but not a ledger key. */
+"fact_digest": string;
+    "channel_kind": "local_inbox" | "webhook";
+    "topic"?: string;
+    "title": string;
+    "sent_at_ms": number;
+  };
 
 // source_snapshot
 export type Sourcesnapshot = {
@@ -98,14 +110,15 @@ export interface PasError {
   "correlation_id": string;
 }
 
-// job_spec.json: SPEC §4.1 JobSpec. Per-kind required schedule fields (interval=>anchor+every_seconds; daily/monthly=>local_time+timezone; weekly=>weekdays+local_time+timezone; runonce=>at) are enforced in contracts.validate_schedule, not in this schema. DST/fold policy persists per job revision (SPEC §5.1).
+// job_spec.json: SPEC §4.1 JobSpec. Per-kind required schedule fields (interval=>anchor+every_seconds; daily/monthly=>local_time+timezone; weekly=>weekdays+local_time+timezone; runonce=>at) are enforced in contracts.validate_schedule, not in this schema. DST/fold policy persists per job revision (SPEC §5.1). mode=reminder is the deterministic direct reminder (SPEC §21.1 step 2): it carries a frozen reminder block instead of task.instruction, performs no model call, and is validated in contracts.validate_reminder.
 // Closed object: additionalProperties is false on the wire.
 export interface JobSpec {
   "protocol_version": Protocolversion;
   "job_id": string;
   "revision": number;
   "owner": "pas" | "host";
-  "mode": "heartbeat" | "task";
+  /** heartbeat = opportunistic check; task = explicit agent task; reminder = deterministic direct reminder delivered at the scheduled instant with zero model calls ( */
+  "mode": "heartbeat" | "task" | "reminder";
   "schedule": Schedule;
   "task": {
     "instruction": string;
@@ -121,7 +134,28 @@ export interface JobSpec {
   "misfire_policy"?: "coalesce_latest" | "grace_once" | "expire";
   "deadline"?: string;
   "enabled": boolean;
+  "reminder"?: Reminder;
+  /** Notification obligation granted by trusted task configuration (SPEC §21.1 step 3). 'due' means the job owes a notification at its scheduled instant and any defe */
+  "obligation"?: "due" | "opportunistic";
 }
+
+// reminder: Frozen user-authored reminder text (SPEC §21.1 step 2). Nothing here comes from model output or source content; the body, instants, zone, owner channel and obligation are all frozen by the trusted jobs_upsert path.
+export type Reminder = {
+    "title"?: string;
+        /** The exact text the owner will receive. Must contain every artifact_refs entry verbatim, so the owner can open what the message names (SPEC §21.1 step 8). */
+"body": string;
+        /** IANA zone the user froze this reminder in; must equal schedule.timezone when the schedule declares one. */
+"timezone": Timezone;
+        /** Owner channel ref. Omitted means the profile's bound owner destination. Any other value must be a registered owner channel: a reminder can never invent a receiv */
+"destination"?: string;
+    "topic"?: string;
+        /** Source ids re-read right before the message goes out (SPEC §21.1 step 5). A reminder that declares none is sent exactly as frozen. */
+"refresh_sources"?: ReadonlyArray<string>;
+        /** Facts this reminder is about; a tombstoned one cancels the message before it is sent (SPEC §21.1 step 5). */
+"fact_refs"?: ReadonlyArray<string>;
+        /** Openable local artifact references (artifact:<relative path>, no absolute or machine-local paths). Each must appear verbatim in the body. */
+"artifact_refs"?: ReadonlyArray<string>;
+  };
 
 // timezone: IANA zone name; never a machine-local inference (SPEC §14.3).
 export type Timezone = string;

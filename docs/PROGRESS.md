@@ -11,8 +11,10 @@
 | P3 独立 Agent 闭环 | **done** | 2026-10-06 | Source/Memory ports、ContextPack、ToolLoopExecutor、OpenAI 兼容 ModelPort、L0/L1 coordinator；验收测试见下 |
 | P4 策略与投递 | **done** | 2026-10-06 | grants、冻结参数审批、owner channels、outbox 派发（attempt journal/幂等 key/unknown 对账）、本人 inbox、真实 webhook 通知 sink、feedback；验收测试见下 |
 | P5 宿主适配 | **done** | 2026-10-07 | Hermes Runs executor、Pi worker 桥、JSON-RPC 2.0 控制面协议 + client-ts 生成、Hermes proactive 插件；锁定版本真实服务验证 8/8 PASS；验收测试见下 |
+| v0.1.2 | **done** | 2026-10-07 | 十步全部完成：执行器 seam、决策契约一等化、通用宿主桥（真实 8/8）、宿主形态补齐、工具主权入账、非 job 唤醒授权（真实 4/4）、建议确认回路、真实推送接收端（真实 5/5）、开箱即用装配、整体验收；793 测试通过，版本统一 0.1.2；详见 `VALIDATION.md` §7.4–§7.6 |
 | P6 Skills 能力 | **done** | 2026-10-07 | legacy importer（88/88 审计一致）、canonical id/aliases、依赖闭包、sidecar、GWS 受限 grammar + 邮件/日历连接器、出站 broker、公开资料跟踪、四链路闭环 demo、Pi extension；验收测试见下 |
 | P7 产品化与发布 | **done** | 2026-10-07 | 公共 facade（ProactiveAgent）、常驻 daemon（单实例锁/恢复/drain 停机/磁盘满报警/health.json）、Unix socket 控制面 + 认证、CLI（pas serve/doctor/jobs/…）、备份恢复/导出/删除、结构化日志与指标、systemd/container/launchd 示例、wheel 构建产物门禁 + SBOM、兼容矩阵；安装 smoke PASS；验收测试见下 |
+| v0.1.1 优化（SPEC §21） | **done** | 2026-10-07 | 确定时间直接提醒（`mode=reminder`，零模型调用）、通知义务 vs 机会型分流、迟到/错过诚实语义、投递前时效来源复读、近 24h 语义查重摘要、可见活动投影与停止追踪、cadence 偏好与产物引用校验；迁移 007（重建 `jobs`/`actions`）原地升级 v0.1.0 库；608 测试全过；验收记录见 VALIDATION §6 |
 
 ## P0 记录（2026-10-06）
 
@@ -547,6 +549,77 @@ pi-coding-agent 1.0.4、node v22.19.0、tokenrhythm/glm-5.3-flash）真实
 - 全量 conformance 命令照旧：参考 demo 输出不变；审计复现 OK；
   license gate PASS；`tsc -p packages/client-ts` 通过；package_gate
   PASS；SBOM 生成；install smoke PASS。
+
+
+## v0.1.1 记录（2026-10-07）
+
+按 `SPEC.md` §21.1 的九步推进，顺序与依赖关系未改变既有安装、CLI 与测试。
+
+实现：
+
+- **语义矩阵（第 1 步）**：`docs/SEMANTIC_MATRIX.md` 冻结五类语义、七条
+  不变量与 v0.1.0 行为清单；`tests/test_semantics_matrix.py` 把这些行为
+  固化成断言（零模型调用、host owner 隔离、pause 跳过、业务键去重等）。
+- **直接提醒（第 2 步）**：`JobSpec.mode` 增加 `reminder` 与 `validate_reminder`；
+  迁移 `m007_p011_reminders.sql` 重建 `jobs`（放宽 `mode` CHECK、加
+  `reminder_json`/`obligation`/`stopped_at_ms`）与 `actions`（`run_id` 可空、
+  加 `source`/`occurrence_id`/`obligation`），新增 `job_activity` 投影表；
+  `store.admit_reminder_occurrence` 在单事务内复核 job/grant/channel/mute/
+  静默/配额并写入 occurrence + action + outbox；`Scheduler` 按 mode 分流。
+  迁移期间 `PRAGMA foreign_keys=OFF` + `PRAGMA foreign_key_check` 校验，
+  保持单事务原子性。
+- **义务分流（第 3 步）**：`obligation`（`due`/`opportunistic`）只由可信
+  配置赋予；`store._reminder_gate_tx` 把静默时段与日配额变成**可见延后**；
+  新增 `src/proactive_sdk/windows.py`（`quiet_end_ms` / `local_day_start_ms`
+  / `local_day_end_ms`，日历重解，DST 日不按 86 400 000 ms 计算），
+  policy 改为复用同一实现。
+- **迟到与错过（第 4 步）**：记录 planned/actual/lateness 与仅已知原因；
+  超窗记 `missed_beyond_grace` 且保留可查询 reason；修正 runonce 在其目标
+  时刻之后创建时被静默停放的问题。
+- **时效来源（第 5 步）**：`task.refresh_source_ids` 定向读取；
+  `OutboxDispatcher._pre_delivery_refresh` 对声明了 `refresh_sources` 的
+  动作在效果前定向复读（来源不可用→可恢复延后，授权撤销/tombstone→
+  抑制，freshness 已过→延后），纯冻结提醒不发起来源请求。
+- **近 24h 语义查重（第 6 步）**：`RecentNotification` + `ContextPack.recent_notifications`
+  有界脱敏摘要；`store.recent_sent_notifications` 只统计真正投递成功的
+  消息（半开窗口）；`ContextPackBuilder` 与 executor 上下文渲染接入。
+- **任务管理与活动（第 7 步）**：`store.stop_job` / `facade.jobs_stop` /
+  `jobs_delete` 返 `deleted|stopped`；`job_activity` 投影按 phase 分离执行
+  与投递结果（`analysis` 阶段对 heartbeat/task 也投影，静默时给出
+  `l0_*` 原因，因此"为何保持安静"在所有 job 类型上都可见）；
+  CLI `pas jobs stop|delete|activity`、`pas activity`、RPC
+  `jobs.stop` / `jobs.activity` 与 client-ts 同步。
+- **宿主体验与产物（第 8 步）**：`PolicyConfig.cadence` + 宿主提供的
+  `cadence_min_gap_seconds` / `cadence_max_per_day`（无数字即无门禁，SDK
+  不提供默认小时数）；新增 `src/proactive_sdk/artifacts.py`，
+  proposal 与 reminder 的 `artifact_refs` 必须可打开且出现在正文。
+- **数据生命周期修正**：`wipe_profile_data` 原先按错误的父子顺序删除并
+  吞掉 `sqlite3.Error`，导致有 occurrence 的 profile 在 `delete-data`
+  之后 `events`/`jobs` 仍残留；改为按 FK 图严格先子后父 + 提交前
+  `foreign_key_check` 校验，并把新增账本纳入 export/wipe。
+- **窗口解析修正**：`quiet_window` 现在识别 `quiet_hours_timezone`（facade
+  写入的 profile 级默认值），此前该默认值被接受后被静默忽略。
+- **公共契约同步**：`schemas/v1/job_spec.json`、`schemas/v1/context_pack.json`
+  更新；`tools/gen_client_ts.py` 重新生成；新增
+  `tests/test_client_ts_drift.py` 防止生成类型与 Python/TS 方法表漂移；
+  版本统一为 v0.1.1（`pyproject.toml` / `__init__.__version__` /
+  `packages/client-ts/package.json`）。
+
+验收（命令与结果见 `VALIDATION.md` §6）：
+
+- `python3 -m unittest discover -s tests` → **608 项全部通过**。
+- 迁移升级：真实 v0.1.0 库（schema 6 + 代表性行）原地升级，行数不丢、
+  `foreign_key_check` 为空、外键恢复启用、重开不再重复迁移。
+- 全量门禁照旧：示例脚本输出不变、审计复现 OK、license gate PASS、
+  Pi TypeScript 契约检查 4 + 6 通过、client-ts strict 编译通过、
+  package_gate PASS、SBOM 生成、install smoke PASS（`pas version` 报
+  v0.1.1）。
+
+v0.1.1 未做/边界（不计为完成）：真实日历/通知渠道授权联调未做（第 5 步
+用脚本来源驱动真实代码路径）；真实用户流程人工回归未做；性能与模型调用
+数未标环境（只断言"零模型调用"这一离散事实）；cadence 数值由宿主提供，
+未做产线调参；本轮未重跑 P5 锁定版本真实服务探针；client-ts 仍未发布到
+npm。
 
 P7 未做/边界（如实记录，不作为已完成能力）：
 

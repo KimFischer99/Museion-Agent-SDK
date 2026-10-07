@@ -88,16 +88,75 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("status", help_text="print a status summary (jobs/runs/outbox/health)")
 
-    jobs = add("jobs", help_text="job operations: list|show|create|pause|resume|delete|trigger")
-    jobs.add_argument("action", choices=["list", "show", "create", "pause", "resume", "delete", "trigger"])
-    jobs.add_argument("job_id", nargs="?", help="job id (for show/pause/resume/delete/trigger)")
-    jobs.add_argument("--mode", choices=["heartbeat", "task"], default="heartbeat")
+    jobs = add(
+        "jobs",
+        help_text="job operations: list|show|create|pause|resume|stop|delete|trigger|activity",
+    )
+    jobs.add_argument(
+        "action",
+        choices=["list", "show", "create", "pause", "resume", "stop", "delete", "trigger", "activity"],
+    )
+    jobs.add_argument("job_id", nargs="?", help="job id (for show/pause/resume/stop/delete/trigger/activity)")
+    jobs.add_argument("--mode", choices=["heartbeat", "task", "reminder"], default="heartbeat")
     jobs.add_argument("--schedule-json", help="schedule object as JSON, e.g. {\"kind\":\"interval\",...}")
     jobs.add_argument("--instruction", help="task instruction (1..10000 chars)")
+    jobs.add_argument(
+        "--reminder-json",
+        help=(
+            "frozen reminder object as JSON for --mode reminder, e.g. "
+            '{"body":"...","timezone":"Europe/Berlin"}'
+        ),
+    )
+    jobs.add_argument(
+        "--obligation",
+        choices=["due", "opportunistic"],
+        default=None,
+        help="trusted notification obligation (default: mode-derived)",
+    )
     jobs.add_argument("--grant-ref", action="append", default=[], help="grant ref (repeatable)")
     jobs.add_argument("--idempotency-key", help="idempotency key for create")
+    jobs.add_argument("--reason", help="reason recorded for stop/delete")
     jobs.add_argument("--enabled", dest="enabled", action="store_true", default=argparse.SUPPRESS)
     jobs.add_argument("--disabled", dest="enabled", action="store_false", default=argparse.SUPPRESS)
+    jobs.add_argument(
+        "--all",
+        dest="all_jobs",
+        action="store_true",
+        help="activity across every job (jobs activity --all)",
+    )
+    jobs.add_argument("--limit", type=int, default=50, help="activity row limit")
+
+    input_cmd = add(
+        "input",
+        help_text="tell the agent something (trusted entry; binds existing grants to this wake)",
+    )
+    input_cmd.add_argument("text", help="what the user said")
+    input_cmd.add_argument(
+        "--grant-ref", action="append", default=[], help="active grant ref (repeatable, required)"
+    )
+    input_cmd.add_argument("--destination", help="owner channel ref (default: the bound destination)")
+    input_cmd.add_argument("--idempotency-key", help="replay-safe key for this note")
+
+    suggestions = add(
+        "suggestions",
+        help_text="pending watch suggestions: list|accept|decline (a trusted-UI action)",
+    )
+    suggestions.add_argument("action", choices=["list", "accept", "decline"])
+    suggestions.add_argument("suggestion_id", nargs="?")
+    suggestions.add_argument("--state", choices=["pending", "accepted", "declined"], help="filter (list)")
+    suggestions.add_argument("--limit", type=int, default=50)
+    suggestions.add_argument(
+        "--actor", default="cli", help="authenticated principal recorded with the decision"
+    )
+
+    activity = add("activity", help_text="user-visible job activity: what ran and why it stayed quiet")
+    activity.add_argument("job_id", nargs="?", help="restrict to one job")
+    activity.add_argument(
+        "--phase",
+        choices=["wake", "analysis", "action", "delivery", "missed"],
+        help="restrict to one phase",
+    )
+    activity.add_argument("--limit", type=int, default=50)
 
     runs = add("runs", help_text="run operations: list|show|cancel|events")
     runs.add_argument("action", choices=["list", "show", "cancel", "events"])
@@ -197,18 +256,15 @@ def _open_agent(args: argparse.Namespace, config: PasConfig | None) -> Proactive
 
 
 class _ControlOnlyGuard:
-    """Executor placeholder for operational CLI commands. Existence of a
-    run claim through a CLI-only instance is a bug — fail loudly."""
+    """Executor placeholder for operational CLI commands.
 
-    broker = type("B", (), {"capabilities": frozenset(), "tool_names": staticmethod(lambda: ())})()
+    It satisfies ``executor.RunExecutor`` in the only way that is honest for
+    a CLI that never runs the model loop: both members fail loudly. A run
+    claim reaching this object is a bug, not a degraded mode.
+    """
 
-    @property
-    def config(self):  # pragma: no cover - shape only
+    async def context(self) -> Any:  # pragma: no cover - never called by ops
         raise PASError(ErrorCode.INVALID_CONFIG, "CLI instance cannot execute runs", scope="cli")
-
-    @property
-    def capabilities(self):
-        return frozenset()
 
     async def execute(self, *a: Any, **k: Any) -> Any:  # pragma: no cover - never called by ops
         raise PASError(ErrorCode.INVALID_CONFIG, "CLI instance cannot execute runs", scope="cli")
@@ -290,10 +346,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     py_ok = sys.version_info >= (3, 11)
     check("python", py_ok, f"{platform.python_version()} (need >= 3.11)")
     check("sqlite_runtime", True, f"linked SQLite {sqlite3.sqlite_version}")
-    conn = sqlite3.connect(":memory:")
-    fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
-    conn.close()
-    check("sqlite_foreign_keys", fk in (0, 1), f"PRAGMA foreign_keys={fk}")
+    # `PRAGMA foreign_keys` is per-connection and off by default, so asking a
+    # throwaway `:memory:` connection told us nothing about PAS — it always
+    # reported 0 and the assertion `fk in (0, 1)` accepted anything. The
+    # question worth answering is whether the *store's* connection has it on,
+    # because that is what makes the ledger's referential guarantees real.
+    # Answered below, once the database path is known.
 
     try:
         import zoneinfo
@@ -320,17 +378,22 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         db_path = state_dir / DB_FILENAME
         if not db_path.is_file():
             check("database", True, "no database yet (first run creates it)")
+            check("sqlite_foreign_keys", True, "no database yet (first run enables it)")
         else:
             try:
                 conn = sqlite3.connect(str(db_path))
                 row = conn.execute("PRAGMA integrity_check").fetchone()
                 version_row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+                # The real check: does the connection PAS uses enforce FKs?
+                conn.execute("PRAGMA foreign_keys=ON")
+                fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
                 conn.close()
                 check(
                     "database",
                     row is not None and row[0] == "ok",
                     f"integrity={row[0] if row else 'unknown'} schema_version={version_row[0] if version_row else '?'}",
                 )
+                check("sqlite_foreign_keys", fk == 1, f"PRAGMA foreign_keys={fk}")
             except sqlite3.Error as exc:
                 check("database", False, f"cannot open: {exc}")
         lock = state_dir / LOCK_FILENAME
@@ -428,29 +491,48 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     "grant_refs": record.grant_refs,
                     "delivery_policy": record.delivery_policy,
                     "next_due_ms": record.next_due_ms,
+                    "reminder": record.reminder,
+                    "obligation": record.obligation,
+                    "stopped_at_ms": record.stopped_at_ms,
                 },
                 args.json,
             )
         elif args.action == "create":
-            if not args.job_id or not args.schedule_json or not args.instruction:
+            is_reminder = args.mode == "reminder"
+            if not args.job_id or not args.schedule_json:
                 raise PASError(
                     ErrorCode.INVALID_CONFIG,
-                    "jobs create needs job_id, --schedule-json and --instruction",
+                    "jobs create needs job_id and --schedule-json",
+                    scope="cli",
+                )
+            if is_reminder and not args.reminder_json:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "jobs create --mode reminder needs --reminder-json",
+                    scope="cli",
+                )
+            if not is_reminder and not args.instruction:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "jobs create needs --instruction unless --mode reminder",
                     scope="cli",
                 )
             try:
                 schedule = json.loads(args.schedule_json)
+                reminder = json.loads(args.reminder_json) if is_reminder else None
             except ValueError as exc:
                 raise PASError(
-                    ErrorCode.INVALID_CONFIG, f"--schedule-json is not valid JSON: {exc}", scope="cli"
+                    ErrorCode.INVALID_CONFIG, f"job JSON argument is not valid JSON: {exc}", scope="cli"
                 ) from None
             record = agent.jobs_upsert(
                 Job(
                     id=args.job_id,
                     mode=args.mode,
                     schedule=schedule,
-                    instruction=args.instruction,
+                    instruction=args.instruction or "",
                     grant_refs=tuple(args.grant_ref),
+                    reminder=reminder,
+                    obligation=args.obligation,
                 ),
                 idempotency_key=args.idempotency_key or f"cli-{args.job_id}",
             )
@@ -461,16 +543,93 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
         elif args.action == "resume":
             record = agent.jobs_resume(args.job_id)  # type: ignore[arg-type]
             _print({"job_id": record.job_id, "enabled": True, "revision": record.revision}, _json_flag(args))
+        elif args.action == "stop":
+            if not args.job_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "jobs stop needs a job_id", scope="cli")
+            outcome = agent.jobs_stop(args.job_id, reason=args.reason)
+            _print(outcome, _json_flag(args))
         elif args.action == "delete":
             if not args.job_id:
                 raise PASError(ErrorCode.INVALID_CONFIG, "jobs delete needs a job_id", scope="cli")
-            agent.jobs_delete(args.job_id)
-            _print({"deleted": args.job_id}, _json_flag(args))
+            outcome = agent.jobs_delete(args.job_id, reason=args.reason)
+            _print(outcome, _json_flag(args))
+        elif args.action == "activity":
+            rows = agent.activity_list(args.job_id, limit=args.limit)
+            _print({"activity": rows, "count": len(rows)}, _json_flag(args))
         elif args.action == "trigger":
             if not args.job_id:
                 raise PASError(ErrorCode.INVALID_CONFIG, "jobs trigger needs a job_id", scope="cli")
             event_id = agent.trigger_job(args.job_id)
             _print({"event_id": event_id, "note": "the daemon picks it up on its next pass"}, _json_flag(args))
+    finally:
+        agent.store.close()
+    return 0
+
+
+def _cmd_input(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    agent = _open_agent(args, config)
+    try:
+        if not args.grant_ref:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "a note must bind at least one active grant (--grant-ref);"
+                " standing authority is never implied",
+                scope="cli",
+            )
+        event_id = agent.note_user_input(
+            args.text,
+            grant_refs=tuple(args.grant_ref),
+            destination=args.destination,
+            idempotency_key=args.idempotency_key,
+        )
+        _print(
+            {"event_id": event_id, "note": "the daemon picks it up on its next pass"},
+            _json_flag(args),
+        )
+    finally:
+        agent.store.close()
+    return 0
+
+
+def _cmd_suggestions(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    agent = _open_agent(args, config)
+    try:
+        if args.action == "list":
+            rows = agent.suggestions_list(state=args.state, limit=args.limit)
+            _print({"suggestions": rows, "count": len(rows)}, _json_flag(args))
+        else:
+            if not args.suggestion_id:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    f"suggestions {args.action} needs a suggestion_id",
+                    scope="cli",
+                )
+            record = agent.suggestions_resolve(
+                args.suggestion_id, accept=args.action == "accept", actor=args.actor
+            )
+            _print(
+                {
+                    "suggestion_id": record["suggestion_id"],
+                    "state": record["state"],
+                    "job_name": record["job_name"],
+                    "created_job_id": record["created_job_id"],
+                    "resolved_by": record["resolved_by"],
+                },
+                _json_flag(args),
+            )
+    finally:
+        agent.store.close()
+    return 0
+
+
+def _cmd_activity(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    agent = _open_agent(args, config)
+    try:
+        rows = agent.activity_list(args.job_id, phase=args.phase, limit=args.limit)
+        _print({"activity": rows, "count": len(rows)}, _json_flag(args))
     finally:
         agent.store.close()
     return 0
@@ -667,9 +826,15 @@ def _cmd_delete_data(args: argparse.Namespace) -> int:
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
-    if not args.config:
+    # `_common_options` uses `default=argparse.SUPPRESS` so that a value given
+    # before the subcommand is not clobbered by the subparser's default. The
+    # cost is that the attribute simply does not exist when the option was
+    # never given — `args.config` raised AttributeError instead of the
+    # actionable "config commands need --config FILE" (SPEC §22.1 item 10).
+    config_path = getattr(args, "config", None)
+    if not config_path:
         raise PASError(ErrorCode.INVALID_CONFIG, "config commands need --config FILE", scope="cli")
-    config = load_config(args.config)
+    config = load_config(config_path)
     if args.action == "check":
         _print({"ok": True, "profile": config.profile, "source": config.source_path}, _json_flag(args))
     else:
@@ -694,7 +859,30 @@ def _cmd_rpc(args: argparse.Namespace) -> int:
     sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     try:
         sock.settimeout(10.0)
-        sock.connect(socket_path)
+        try:
+            sock.connect(socket_path)
+        except FileNotFoundError:
+            # The ordinary case when no daemon is up. A traceback here would
+            # be the first thing a user sees from the control plane.
+            raise PASError(
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                f"no control plane socket at {socket_path}"
+                " (is the daemon running? `pas serve --app module:factory`)",
+                scope="cli",
+            ) from None
+        except ConnectionRefusedError:
+            raise PASError(
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                f"control plane socket at {socket_path} refused the connection"
+                " (stale socket left by a stopped daemon?)",
+                scope="cli",
+            ) from None
+        except OSError as exc:
+            raise PASError(
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                f"cannot reach the control plane socket: {type(exc).__name__}",
+                scope="cli",
+            ) from None
 
         def send_and_recv(frame: dict[str, Any]) -> dict[str, Any]:
             sock.sendall(json.dumps(frame).encode() + b"\n")
@@ -730,8 +918,12 @@ def _cmd_rpc(args: argparse.Namespace) -> int:
 
 def _cmd_version(_args: argparse.Namespace) -> int:
     from . import PAS_PROTOCOL_VERSION
+    from .decision_contract import DECISION_CONTRACT_VERSION
 
-    print(f"Museion Agent SDK v{__version__} (protocol {PAS_PROTOCOL_VERSION}; CLI: pas)")
+    print(
+        f"Museion Agent SDK v{__version__} (protocol {PAS_PROTOCOL_VERSION};"
+        f" decision contract {DECISION_CONTRACT_VERSION}; CLI: pas)"
+    )
     return 0
 
 
@@ -741,6 +933,9 @@ _COMMANDS = {
     "doctor": _cmd_doctor,
     "status": _cmd_status,
     "jobs": _cmd_jobs,
+    "input": _cmd_input,
+    "suggestions": _cmd_suggestions,
+    "activity": _cmd_activity,
     "runs": _cmd_runs,
     "approvals": _cmd_approvals,
     "notifications": _cmd_notifications,

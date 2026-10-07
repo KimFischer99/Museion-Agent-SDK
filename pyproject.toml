@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proactive-sdk"
-version = "0.1.0"
+version = "0.1.2"
 description = "Museion Agent SDK: single-profile proactive agent runtime with scheduler, hooks, bounded agent loop, policy, delivery and daemon CLI."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -329,6 +329,12 @@ class PiWorkerExecutor:
         self._guard = threading.Lock()
 
     @property
+    def is_started(self) -> bool:
+        """True once the worker process is running (SPEC §22.1 item 3: a
+        host driver may start the session lazily on first use)."""
+        return self._proc is not None
+
+    @property
     def worker_info(self) -> dict[str, Any] | None:
         return dict(self._info) if self._info else None
 

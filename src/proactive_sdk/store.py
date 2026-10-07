@@ -32,6 +32,10 @@ from typing import Any, Iterator
 
 from .clock import Clock, SystemClock
 from .contracts import (
+    NOTIFY_SELF_CAPABILITY,
+    TOOL_AUTHORITIES,
+    validate_schedule,
+    OBLIGATION_DUE,
     ErrorCode,
     JobSpec,
     PASError,
@@ -39,6 +43,7 @@ from .contracts import (
     content_hash,
     validate_context_pack,
 )
+from .windows import local_day_end_ms, local_day_start_ms, quiet_end_ms
 
 __all__ = [
     "Store",
@@ -53,13 +58,33 @@ __all__ = [
     "GrantRecord",
     "ApprovalRecord",
     "OutboxLease",
+    "ReminderAdmission",
     "MIGRATION_COUNT",
 ]
 
 _EVENT_PAYLOAD_MAX_BYTES = 65536
+_MAX_INSTRUCTION_TEXT = 10000
+_JOB_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _EVENT_TTL_MS = 7 * 24 * 3600 * 1000
 _RUN_DEFAULT_DEADLINE_MS = 5 * 60 * 1000
+# A direct reminder carries user-frozen text that stays meaningful for a
+# while: the default window is a week from the *planned* instant, so a
+# quiet-hours deferral is never silently turned into a loss. A job that
+# configures ``delivery_policy.expire_after_s`` narrows it deliberately.
+_REMINDER_DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000
 _POLICY_VERSION = 1
+
+
+def _policy_timezone(delivery_policy: dict[str, Any]) -> str | None:
+    """The IANA zone the delivery policy reasons in (quota + quiet hours)."""
+    block = delivery_policy.get("quiet_hours")
+    if isinstance(block, dict) and isinstance(block.get("timezone"), str):
+        return block["timezone"]
+    if isinstance(delivery_policy.get("quiet_hours_timezone"), str):
+        return delivery_policy["quiet_hours_timezone"]
+    if isinstance(delivery_policy.get("timezone"), str):
+        return delivery_policy["timezone"]
+    return None
 
 _MIGRATION_NAME_RE = re.compile(r"m(\d+)_[a-z0-9_]+\.sql")
 
@@ -132,6 +157,10 @@ class JobRecord:
     next_due_ms: int | None
     created_at_ms: int
     updated_at_ms: int
+    reminder: dict[str, Any] | None = None
+    obligation: str = "opportunistic"
+    stopped_at_ms: int | None = None
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +188,9 @@ class EventRecord:
     payload: dict[str, Any]
     observed_at_ms: int
     expires_at_ms: int
+    #: Trusted authorization context for a user-originated wake, or None.
+    #: Only ``admit_user_wake`` can write it (SPEC §22.1 item 6).
+    authorization: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -303,6 +335,36 @@ class OutboxLease:
     provider_key: str
 
 
+@dataclass(frozen=True)
+class ReminderAdmission:
+    """What one deterministic reminder admission actually did.
+
+    ``outcome`` is one of ``queued`` / ``deferred`` / ``missed`` /
+    ``suppressed`` / ``already`` / ``skipped_*``. ``queued`` and
+    ``deferred`` mean an owner-addressed message exists in the outbox;
+    nothing in this record claims the message was delivered.
+    """
+
+    outcome: str
+    occurrence_id: str | None = None
+    reason: str | None = None
+    message_id: str | None = None
+    destination_ref: str | None = None
+    not_before_ms: int | None = None
+    lateness_ms: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "occurrence_id": self.occurrence_id,
+            "reason": self.reason,
+            "message_id": self.message_id,
+            "destination_ref": self.destination_ref,
+            "not_before_ms": self.not_before_ms,
+            "lateness_ms": self.lateness_ms,
+        }
+
+
 class Store:
     """Persistence for one profile. See module docstring for the rules.
 
@@ -363,25 +425,47 @@ class Store:
             self.db.commit()
 
     def _migrate(self) -> None:
-        with self.transaction():
-            has_table = self.db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
-            ).fetchone()
-            current = 0
-            if has_table:
-                row = self.db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-                current = row[0] or 0
-            if current > MIGRATION_COUNT:
-                raise PASError(
-                    ErrorCode.CONFLICT,
-                    f"database schema v{current} is newer than this binary (v{MIGRATION_COUNT})"
-                    "; refusing to open with an old binary",
-                    scope="store",
-                )
-            for version, sql in MIGRATIONS:
-                if version <= current:
-                    continue
-                self._apply_migration(version, sql)
+        """Apply every pending migration in ONE transaction.
+
+        Foreign keys are disabled for the whole migration pass and the
+        result is validated with ``PRAGMA foreign_key_check`` before the
+        transaction commits. That is the documented SQLite procedure for
+        schema changes that must rebuild a table (v0.1.1 relaxes
+        ``jobs.mode`` and ``actions.run_id``), and it keeps the pass
+        atomic: a failing check rolls everything back. Enforcement is
+        restored unconditionally before this method returns.
+        """
+        self.db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self.transaction():
+                has_table = self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+                ).fetchone()
+                current = 0
+                if has_table:
+                    row = self.db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+                    current = row[0] or 0
+                if current > MIGRATION_COUNT:
+                    raise PASError(
+                        ErrorCode.CONFLICT,
+                        f"database schema v{current} is newer than this binary (v{MIGRATION_COUNT})"
+                        "; refusing to open with an old binary",
+                        scope="store",
+                    )
+                for version, sql in MIGRATIONS:
+                    if version <= current:
+                        continue
+                    self._apply_migration(version, sql)
+                violations = self.db.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise PASError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "migrations left foreign key violations:"
+                        f" {[tuple(row) for row in violations][:4]}",
+                        scope="store",
+                    )
+        finally:
+            self.db.execute("PRAGMA foreign_keys=ON")
 
     def _apply_migration(self, version: int, sql: str) -> None:
         """Apply one migration inside the caller's transaction.
@@ -439,6 +523,8 @@ class Store:
         resolved_misfire = spec.misfire_policy or (
             "coalesce_latest" if spec.mode == "heartbeat" else "grace_once"
         )
+        reminder_json = canonical_json(spec.reminder) if spec.reminder is not None else None
+        obligation = spec.effective_obligation
         with self.transaction():
             prior = self.db.execute(
                 "SELECT request_hash, job_id FROM jobs_idempotency WHERE idempotency_key=?",
@@ -467,8 +553,9 @@ class Store:
                            job_id, revision, enabled, mode, scheduler_owner,
                            schedule_json, task_json, next_due_ms, updated_at_ms,
                            created_at_ms, misfire_policy, deadline_ms,
-                           grant_refs_json, delivery_policy_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           grant_refs_json, delivery_policy_json,
+                           reminder_json, obligation)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         spec.job_id,
                         spec.revision,
@@ -484,6 +571,8 @@ class Store:
                         self._deadline_to_ms(spec.deadline),
                         canonical_json(list(spec.grant_refs)),
                         canonical_json(spec.delivery_policy),
+                        reminder_json,
+                        obligation,
                     ),
                 )
             else:
@@ -498,7 +587,8 @@ class Store:
                     """UPDATE jobs SET revision=?, enabled=?, mode=?, scheduler_owner=?,
                            schedule_json=?, task_json=?, next_due_ms=?, updated_at_ms=?,
                            misfire_policy=?, deadline_ms=?, grant_refs_json=?,
-                           delivery_policy_json=?
+                           delivery_policy_json=?, reminder_json=?, obligation=?,
+                           stopped_at_ms=NULL, stop_reason=NULL
                        WHERE job_id=? AND revision=?""",
                     (
                         spec.revision,
@@ -513,6 +603,8 @@ class Store:
                         self._deadline_to_ms(spec.deadline),
                         canonical_json(list(spec.grant_refs)),
                         canonical_json(spec.delivery_policy),
+                        reminder_json,
+                        obligation,
                         spec.job_id,
                         row["revision"],
                     ),
@@ -552,7 +644,7 @@ class Store:
         now = self.clock.wall_now_ms() if now_ms is None else now_ms
         with self.transaction():
             cursor = self.db.execute(
-                "SELECT revision FROM jobs WHERE job_id=?", (job_id,)
+                "SELECT revision, stopped_at_ms FROM jobs WHERE job_id=?", (job_id,)
             ).fetchone()
             if cursor is None:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"unknown job {job_id!r}", scope="jobs")
@@ -561,6 +653,14 @@ class Store:
                     ErrorCode.CONFLICT,
                     f"job revision moved: expected {expected_revision},"
                     f" stored {cursor['revision']}",
+                    scope="jobs",
+                )
+            if cursor["stopped_at_ms"] is not None:
+                # Stopping is a product-level decision with an audit trail;
+                # resuming means upserting a new revision, not toggling a flag.
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"job {job_id!r} is stopped; upsert a new revision to track it again",
                     scope="jobs",
                 )
             if enabled:
@@ -587,13 +687,19 @@ class Store:
         Pause those instead.
         """
         with self.transaction():
-            referenced = self.db.execute(
-                "SELECT 1 FROM events WHERE job_id=? LIMIT 1", (job_id,)
-            ).fetchone()
+            referenced = None
+            for sql in (
+                "SELECT 1 FROM events WHERE job_id=? LIMIT 1",
+                "SELECT 1 FROM job_occurrences WHERE job_id=? LIMIT 1",
+                "SELECT 1 FROM job_activity WHERE job_id=? LIMIT 1",
+            ):
+                referenced = self.db.execute(sql, (job_id,)).fetchone()
+                if referenced is not None:
+                    break
             if referenced is not None:
                 raise PASError(
                     ErrorCode.CONFLICT,
-                    "job has admitted occurrences; pause it instead of deleting",
+                    "job has audit history; stop tracking it instead of deleting",
                     scope="jobs",
                 )
             cursor = self.db.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
@@ -612,7 +718,7 @@ class Store:
         """
         rows = self.db.execute(
             """SELECT job_id FROM jobs
-               WHERE enabled=1 AND scheduler_owner='pas'
+               WHERE enabled=1 AND scheduler_owner='pas' AND stopped_at_ms IS NULL
                  AND next_due_ms IS NOT NULL AND next_due_ms<=?
                ORDER BY next_due_ms, job_id""",
             (now_ms,),
@@ -790,13 +896,37 @@ class Store:
             if not job["enabled"]:
                 return "skipped_disabled"
             occurrence_id = self._occurrence_id(job_id, expected_revision, slot_ms)
-            self.db.execute(
+            cursor = self.db.execute(
                 """INSERT OR IGNORE INTO job_occurrences(
                        occurrence_id, job_id, job_revision, kind, slot_ms,
                        state, reason, event_id, recorded_at_ms)
                    VALUES (?,?,?,?,?,'expired',?,NULL,?)""",
                 (occurrence_id, job_id, expected_revision, kind, slot_ms, reason, now_ms),
             )
+            newly_expired = cursor.rowcount == 1
+            if newly_expired:
+                # The user-visible projection has to answer one question
+                # across every job mode: "did anything get missed while I
+                # was away?". Reminders already wrote a `missed` row here;
+                # task and heartbeat jobs only wrote `job_occurrences`, so
+                # the most common case — a heartbeat missing slots during an
+                # outage — was recorded but invisible through `pas activity`
+                # and the `jobs.activity` RPC. Same fact, one place.
+                self._record_activity_tx(
+                    job_id=job_id,
+                    job_revision=expected_revision,
+                    occurrence_id=occurrence_id,
+                    slot_ms=slot_ms,
+                    phase="missed",
+                    state="missed",
+                    obligation="opportunistic",
+                    reason=reason,
+                    planned_at_ms=slot_ms,
+                    actual_at_ms=now_ms,
+                    lateness_ms=max(0, now_ms - slot_ms),
+                    dedupe_suffix="missed",
+                    now_ms=now_ms,
+                )
             self.db.execute(
                 "UPDATE jobs SET next_due_ms=?, updated_at_ms=? WHERE job_id=? AND revision=?",
                 (next_due_ms, now_ms, job_id, expected_revision),
@@ -810,6 +940,837 @@ class Store:
             (job_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # Direct reminders (SPEC §21.1 steps 2–4)
+    # ------------------------------------------------------------------ #
+
+    def admit_reminder_occurrence(
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        kind: str,
+        slot_ms: int,
+        next_due_ms: int | None,
+        now_ms: int,
+        capability: str = NOTIFY_SELF_CAPABILITY,
+        default_max_per_day: int | None = None,
+        late_reason: str | None = None,
+    ) -> "ReminderAdmission":
+        """Atomically admit one due occurrence of a direct-reminder job.
+
+        Everything happens inside ONE transaction: the occurrence is
+        inserted (UNIQUE per job/revision/slot, so a restart, a replayed
+        tick or a PAS/host race can never produce a second delivery), the
+        mutable gates — job state, grant, owner channel binding, topic
+        mute, quiet hours, daily quota — are re-evaluated here rather than
+        trusted from the caller, and only then are the action + outbox
+        rows written (``actions.business_key`` and
+        ``outbox.delivery_key`` are the second and third dedup layers).
+
+        No ``runs`` row is created: a reminder performs no analysis, calls
+        no model, and must not fabricate an entry in the run ledger
+        (AGENTS.md: 唤醒、分析完成、动作执行、通知投递分别记账).
+        """
+        with self.transaction():
+            job = self.db.execute(
+                """SELECT revision, enabled, mode, reminder_json, grant_refs_json,
+                          delivery_policy_json, obligation, stopped_at_ms
+                   FROM jobs WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+            if job is None:
+                return ReminderAdmission("skipped_missing", None, "job_missing")
+            if job["revision"] != expected_revision:
+                return ReminderAdmission("skipped_revision", None, "revision_moved")
+            if job["stopped_at_ms"] is not None:
+                return ReminderAdmission("skipped_stopped", None, "job_stopped")
+            if not job["enabled"]:
+                return ReminderAdmission("skipped_disabled", None, "job_paused")
+            if job["mode"] != "reminder":
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    f"job {job_id!r} is not a direct reminder",
+                    scope="reminders",
+                )
+
+            occurrence_id = self._occurrence_id(job_id, expected_revision, slot_ms)
+            prior = self.db.execute(
+                "SELECT state, reason FROM job_occurrences WHERE occurrence_id=?",
+                (occurrence_id,),
+            ).fetchone()
+            if prior is not None:
+                # Same occurrence, already accounted for: never a second send.
+                return ReminderAdmission(
+                    "already", occurrence_id, prior["reason"] or prior["state"]
+                )
+
+            reminder = canonical_loads(job["reminder_json"] or "{}")
+            delivery_policy = canonical_loads(job["delivery_policy_json"] or "{}")
+            grant_refs = tuple(canonical_loads(job["grant_refs_json"] or "[]"))
+            obligation = job["obligation"]
+
+            outcome, reason = self._reminder_gate_tx(
+                job_id,
+                reminder=reminder,
+                delivery_policy=delivery_policy,
+                grant_refs=grant_refs,
+                capability=capability,
+                default_max_per_day=default_max_per_day,
+                slot_ms=slot_ms,
+                now_ms=now_ms,
+            )
+            if outcome == "suppress":
+                self._record_occurrence_tx(
+                    occurrence_id, job_id, expected_revision, kind, slot_ms,
+                    state="expired", reason=reason, event_id=None, now_ms=now_ms,
+                )
+                self._record_activity_tx(
+                    job_id=job_id,
+                    job_revision=expected_revision,
+                    occurrence_id=occurrence_id,
+                    slot_ms=slot_ms,
+                    phase="missed" if obligation == OBLIGATION_DUE else "action",
+                    state="missed" if obligation == OBLIGATION_DUE else "suppressed",
+                    obligation=obligation,
+                    reason=reason,
+                    planned_at_ms=slot_ms,
+                    actual_at_ms=now_ms,
+                    lateness_ms=max(0, now_ms - slot_ms),
+                    dedupe_suffix="action",
+                    now_ms=now_ms,
+                )
+                self._set_next_due_tx(job_id, expected_revision, next_due_ms, now_ms)
+                return ReminderAdmission(
+                    "missed" if obligation == OBLIGATION_DUE else "suppressed",
+                    occurrence_id,
+                    reason,
+                )
+
+            channel_ref, channel_kind, push_summary_only = self._resolve_channel_tx(reminder)
+            # The gate may stack reasons ("quiet_hours+daily_quota"), so this
+            # matches on the components rather than on the exact string —
+            # getting it wrong silently drops the deferral and sends a
+            # reminder at the wrong instant.
+            deferred_gate = bool(reason) and (
+                "quiet_hours" in reason or "daily_quota" in reason
+            )
+            not_before_ms = (
+                self._defer_until(delivery_policy, reason, now_ms)
+                if deferred_gate
+                else now_ms
+            )
+            ttl_s = delivery_policy.get("expire_after_s")
+            expires_at_ms = (
+                slot_ms + int(ttl_s) * 1000
+                if isinstance(ttl_s, int) and not isinstance(ttl_s, bool) and ttl_s > 0
+                else slot_ms + _REMINDER_DEFAULT_TTL_MS
+            )
+            if not_before_ms >= expires_at_ms:
+                # Deferral would land after the message stopped being useful:
+                # an owed reminder is reported as missed, never silently dropped.
+                miss_reason = f"expired_before_window_open:{reason}"
+                self._record_occurrence_tx(
+                    occurrence_id, job_id, expected_revision, kind, slot_ms,
+                    state="expired", reason=miss_reason, event_id=None, now_ms=now_ms,
+                )
+                self._record_activity_tx(
+                    job_id=job_id, job_revision=expected_revision,
+                    occurrence_id=occurrence_id, slot_ms=slot_ms, phase="missed",
+                    state="missed", obligation=obligation, reason=miss_reason,
+                    planned_at_ms=slot_ms, actual_at_ms=now_ms,
+                    lateness_ms=max(0, now_ms - slot_ms),
+                    destination_ref=channel_ref, dedupe_suffix="action", now_ms=now_ms,
+                )
+                self._set_next_due_tx(job_id, expected_revision, next_due_ms, now_ms)
+                return ReminderAdmission("missed", occurrence_id, miss_reason)
+
+            grant = self._active_grant_tx(grant_refs, capability, now_ms)
+            assert grant is not None  # _reminder_gate_tx proved it exists
+
+            title = reminder.get("title") or "reminder"
+            payload: dict[str, Any] = {
+                "semantic": "direct_reminder",
+                "kind": "direct_reminder",
+                "job_id": job_id,
+                "occurrence_id": occurrence_id,
+                "obligation": obligation,
+                "title": str(title)[:200],
+                "planned_at_ms": slot_ms,
+                "topic": reminder.get("topic"),
+                "artifact_refs": list(reminder.get("artifact_refs") or []),
+            }
+            if channel_kind == "local_inbox" or not push_summary_only:
+                # §10.4 锁屏去敏: push-style channels keep summary-only unless
+                # the owner explicitly configured otherwise.
+                payload["body"] = reminder.get("body")
+            if late_reason:
+                payload["late_reason"] = late_reason
+            request: dict[str, Any] = {
+                "kind": "direct_reminder",
+                "job_id": job_id,
+                "occurrence_id": occurrence_id,
+                "account_ref": grant["account_ref"],
+                "destination_ref": channel_ref,
+                "obligation": obligation,
+                "planned_at_ms": slot_ms,
+                "reminder": reminder,
+                "payload": payload,
+            }
+            refresh = self._refresh_plan_tx(reminder, grant["account_ref"], now_ms)
+            if refresh is not None:
+                # Only a reminder that declares time-sensitive sources gets a
+                # pre-delivery re-read; a purely frozen one never does
+                # (SPEC §21.1 step 5).
+                request["refresh"] = refresh
+            business_key = f"biz{content_hash({'p': self.profile, 'g': job_id, 'f': occurrence_id, 'r': expected_revision, 'd': channel_ref, 'k': 'direct_reminder'})[:32]}"
+            action_id = f"act{content_hash({'b': business_key, 'k': 'direct_reminder'})[:28]}"
+            self.db.execute(
+                """INSERT INTO actions(action_id, run_id, business_key, kind, request_json,
+                                       request_hash, grant_id, grant_version, approval_id,
+                                       policy_version, state, expires_at_ms, source,
+                                       occurrence_id, obligation, created_at_ms)
+                   VALUES (?,NULL,?,?,?,?,?,?,NULL,?, 'queued',?, 'reminder',?,?,?)
+                   ON CONFLICT(business_key) DO NOTHING""",
+                (
+                    action_id,
+                    business_key,
+                    "direct_reminder",
+                    canonical_json(request),
+                    _sha256_text(canonical_json(request)),
+                    grant["grant_id"],
+                    grant["version"],
+                    _POLICY_VERSION,
+                    expires_at_ms,
+                    occurrence_id,
+                    obligation,
+                    now_ms,
+                ),
+            )
+            message_id = self._insert_outbox_tx(
+                action_id=action_id,
+                business_key=business_key,
+                destination_ref=channel_ref,
+                payload=payload,
+                not_before_ms=not_before_ms,
+                expires_at_ms=expires_at_ms,
+                now_ms=now_ms,
+                reason=reason,
+            )
+            self._record_occurrence_tx(
+                occurrence_id, job_id, expected_revision, kind, slot_ms,
+                state="admitted", reason=None, event_id=None, now_ms=now_ms,
+            )
+            deferred = not_before_ms > now_ms
+            self._record_activity_tx(
+                job_id=job_id, job_revision=expected_revision,
+                occurrence_id=occurrence_id, slot_ms=slot_ms, phase="action",
+                state="deferred" if deferred else "queued",
+                obligation=obligation,
+                reason=reason,
+                planned_at_ms=slot_ms, actual_at_ms=now_ms,
+                lateness_ms=max(0, now_ms - slot_ms),
+                destination_ref=channel_ref, message_id=message_id,
+                dedupe_suffix="action", now_ms=now_ms,
+            )
+            self._set_next_due_tx(job_id, expected_revision, next_due_ms, now_ms)
+            return ReminderAdmission(
+                "deferred" if deferred else "queued",
+                occurrence_id,
+                reason,
+                message_id=message_id,
+                destination_ref=channel_ref,
+                not_before_ms=not_before_ms,
+                lateness_ms=max(0, now_ms - slot_ms),
+            )
+
+    def record_missed_reminder(
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        kind: str,
+        slot_ms: int,
+        next_due_ms: int | None,
+        now_ms: int,
+        reason: str,
+    ) -> "ReminderAdmission":
+        """Record a reminder occurrence that will not be delivered, with a
+        queryable reason (SPEC §21.1 step 4: 不可补发时保留可查询原因).
+
+        Used when the schedule itself moved past the point where the
+        occurrence is still owed (misfire policy, pause/stop, deadline).
+        """
+        if not reason or len(reason) > 500:
+            raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="reminders")
+        with self.transaction():
+            job = self.db.execute(
+                "SELECT revision, enabled, stopped_at_ms, obligation, delivery_policy_json"
+                " FROM jobs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            if job is None:
+                return ReminderAdmission("skipped_missing", None, "job_missing")
+            if job["revision"] != expected_revision:
+                return ReminderAdmission("skipped_revision", None, "revision_moved")
+            if job["stopped_at_ms"] is not None:
+                return ReminderAdmission("skipped_stopped", None, "job_stopped")
+            if not job["enabled"]:
+                return ReminderAdmission("skipped_disabled", None, "job_paused")
+            occurrence_id = self._occurrence_id(job_id, expected_revision, slot_ms)
+            prior = self.db.execute(
+                "SELECT state FROM job_occurrences WHERE occurrence_id=?", (occurrence_id,)
+            ).fetchone()
+            if prior is not None:
+                return ReminderAdmission("already", occurrence_id, prior["state"])
+            self._record_occurrence_tx(
+                occurrence_id, job_id, expected_revision, kind, slot_ms,
+                state="expired", reason=reason, event_id=None, now_ms=now_ms,
+            )
+            self._record_activity_tx(
+                job_id=job_id, job_revision=expected_revision,
+                occurrence_id=occurrence_id, slot_ms=slot_ms, phase="missed",
+                state="missed", obligation=job["obligation"], reason=reason,
+                planned_at_ms=slot_ms, actual_at_ms=now_ms,
+                lateness_ms=max(0, now_ms - slot_ms),
+                dedupe_suffix="action", now_ms=now_ms,
+            )
+            self._set_next_due_tx(job_id, expected_revision, next_due_ms, now_ms)
+            return ReminderAdmission("missed", occurrence_id, reason)
+
+    def _reminder_gate_tx(
+        self,
+        job_id: str,
+        *,
+        reminder: dict[str, Any],
+        delivery_policy: dict[str, Any],
+        grant_refs: tuple[str, ...],
+        capability: str,
+        default_max_per_day: int | None,
+        slot_ms: int,
+        now_ms: int,
+    ) -> tuple[str, str | None]:
+        """Re-verify every mutable precondition inside the transaction.
+
+        Returns ``("deliver", defer_reason_or_None)`` or
+        ``("suppress", reason)``. Nothing here reads model output: a
+        reminder's authorization comes from the trusted job configuration
+        and the current store state alone.
+        """
+        grant = self._active_grant_tx(grant_refs, capability, now_ms)
+        if grant is None:
+            return "suppress", "grant_missing"
+        channel = self._owner_channel_tx(reminder.get("destination"))
+        if channel is None:
+            return "suppress", "channel_unavailable"
+        topic = reminder.get("topic")
+        if isinstance(topic, str) and topic:
+            if self.topic_is_muted(topic, now_ms=now_ms):
+                return "suppress", "topic_muted"
+            muted = delivery_policy.get("muted_topics")
+            if isinstance(muted, list) and topic in muted:
+                return "suppress", "topic_muted"
+        reason: str | None = None
+        if quiet_end_ms(delivery_policy, now_ms) is not None:
+            reason = "quiet_hours"
+        max_per_day = delivery_policy.get("max_per_day", default_max_per_day)
+        if isinstance(max_per_day, int) and not isinstance(max_per_day, bool) and max_per_day > 0:
+            day_start = local_day_start_ms(_policy_timezone(delivery_policy), now_ms)
+            if self.notifications_today(day_start_ms=day_start, now_ms=now_ms) >= max_per_day:
+                reason = "quiet_hours+daily_quota" if reason else "daily_quota"
+        return "deliver", reason
+
+    def _defer_until(self, delivery_policy: dict[str, Any], reason: str, now_ms: int) -> int:
+        """Earliest instant the deferred message may be sent: the end of the
+        quiet window and/or the next local day start, whichever applies."""
+        candidates: list[int] = []
+        if "quiet_hours" in reason:
+            end = quiet_end_ms(delivery_policy, now_ms)
+            candidates.append(end if end is not None else now_ms)
+        if "daily_quota" in reason:
+            tzname = _policy_timezone(delivery_policy)
+            candidates.append(local_day_end_ms(tzname, now_ms))
+        return max(candidates) if candidates else now_ms
+
+    def _active_grant_tx(
+        self, grant_refs: tuple[str, ...], capability: str, now_ms: int
+    ) -> sqlite3.Row | None:
+        for grant_id in grant_refs:
+            row = self.db.execute(
+                """SELECT grant_id, account_ref, capability, scope_json, version,
+                          expires_at_ms, revoked_at_ms
+                   FROM grants WHERE grant_id=?""",
+                (grant_id,),
+            ).fetchone()
+            if row is None or row["capability"] != capability:
+                continue
+            if row["revoked_at_ms"] is not None:
+                continue
+            if row["expires_at_ms"] is not None and row["expires_at_ms"] <= now_ms:
+                continue
+            return row
+        return None
+
+    def _owner_channel_tx(self, destination: Any) -> tuple[str, str, bool] | None:
+        """Resolve the destination to (channel_ref, kind, push_summary_only).
+
+        The bound owner destination is always available; any other
+        destination must be a registered, enabled owner channel — a
+        reminder can never invent a receiver (本人目标不可替换)."""
+        if destination is None:
+            return (self.owner_destination, "local_inbox", False)
+        if not isinstance(destination, str) or not destination:
+            return None
+        if destination == self.owner_destination:
+            return (destination, "local_inbox", False)
+        row = self.db.execute(
+            "SELECT channel_ref, kind, push_summary_only, enabled FROM owner_channels"
+            " WHERE channel_ref=?",
+            (destination,),
+        ).fetchone()
+        if row is None or not row["enabled"]:
+            return None
+        return (row["channel_ref"], row["kind"], bool(row["push_summary_only"]))
+
+    def _refresh_plan_tx(
+        self, reminder: dict[str, Any], account_ref: str, now_ms: int
+    ) -> dict[str, Any] | None:
+        """Snapshot what a pre-delivery re-read must verify (step 5)."""
+        sources = reminder.get("refresh_sources")
+        if not sources:
+            return None
+        watermarks: dict[str, str | None] = {}
+        for source_id in sources:
+            state = self.get_source_state(source_id, account_ref)
+            watermarks[source_id] = state.detected_watermark if state is not None else None
+        return {
+            "sources": list(sources),
+            "account_ref": account_ref,
+            "facts": list(reminder.get("fact_refs") or []),
+            "watermarks": watermarks,
+            "planned_at_ms": now_ms,
+        }
+
+    def _resolve_channel_tx(self, reminder: dict[str, Any]) -> tuple[str, str, bool]:
+        channel = self._owner_channel_tx(reminder.get("destination"))
+        if channel is None:  # pragma: no cover - gate already proved it exists
+            raise PASError(
+                ErrorCode.INTERNAL_ERROR, "owner channel vanished mid-transaction", scope="reminders"
+            )
+        return channel
+
+    def _record_occurrence_tx(
+        self,
+        occurrence_id: str,
+        job_id: str,
+        revision: int,
+        kind: str,
+        slot_ms: int,
+        *,
+        state: str,
+        reason: str | None,
+        event_id: str | None,
+        now_ms: int,
+    ) -> None:
+        self.db.execute(
+            """INSERT OR IGNORE INTO job_occurrences(
+                   occurrence_id, job_id, job_revision, kind, slot_ms,
+                   state, reason, event_id, recorded_at_ms)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (occurrence_id, job_id, revision, kind, slot_ms, state, reason, event_id, now_ms),
+        )
+
+    def _set_next_due_tx(
+        self, job_id: str, revision: int, next_due_ms: int | None, now_ms: int
+    ) -> None:
+        self.db.execute(
+            "UPDATE jobs SET next_due_ms=?, updated_at_ms=? WHERE job_id=? AND revision=?",
+            (next_due_ms, now_ms, job_id, revision),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Job activity projection (SPEC §21.1 step 7)
+    # ------------------------------------------------------------------ #
+
+    def _record_activity_tx(
+        self,
+        *,
+        job_id: str,
+        job_revision: int,
+        occurrence_id: str | None,
+        slot_ms: int | None,
+        phase: str,
+        state: str,
+        obligation: str,
+        reason: str | None = None,
+        planned_at_ms: int | None = None,
+        actual_at_ms: int | None = None,
+        lateness_ms: int | None = None,
+        destination_ref: str | None = None,
+        message_id: str | None = None,
+        run_id: str | None = None,
+        retryable: bool = False,
+        dedupe_suffix: str = "0",
+        now_ms: int,
+    ) -> str:
+        """Write one user-visible activity row inside the caller's
+        transaction. Idempotent per (occurrence, phase, suffix): replaying
+        an admission never duplicates what the user sees."""
+        dedupe_key = f"{occurrence_id or job_id}:{phase}:{dedupe_suffix}"
+        activity_id = f"act{content_hash({'a': job_id, 'k': dedupe_key})[:28]}"
+        self.db.execute(
+            """INSERT INTO job_activity(
+                   activity_id, job_id, job_revision, occurrence_id, slot_ms, phase, state,
+                   obligation, reason, planned_at_ms, actual_at_ms, lateness_ms,
+                   destination_ref, message_id, run_id, retryable, dedupe_key, created_at_ms)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(dedupe_key) DO NOTHING""",
+            (
+                activity_id, job_id, job_revision, occurrence_id, slot_ms, phase, state,
+                obligation, reason, planned_at_ms, actual_at_ms, lateness_ms,
+                destination_ref, message_id, run_id, int(retryable), dedupe_key, now_ms,
+            ),
+        )
+        return activity_id
+
+    def record_job_activity(
+        self,
+        *,
+        job_id: str,
+        job_revision: int,
+        phase: str,
+        state: str,
+        obligation: str = "none",
+        occurrence_id: str | None = None,
+        slot_ms: int | None = None,
+        reason: str | None = None,
+        planned_at_ms: int | None = None,
+        actual_at_ms: int | None = None,
+        lateness_ms: int | None = None,
+        destination_ref: str | None = None,
+        message_id: str | None = None,
+        run_id: str | None = None,
+        retryable: bool = False,
+        dedupe_suffix: str = "0",
+        now_ms: int | None = None,
+    ) -> str:
+        """Public wrapper: one activity row in its own transaction."""
+        now = self.clock.wall_now_ms() if now_ms is None else now_ms
+        with self.transaction():
+            return self._record_activity_tx(
+                job_id=job_id, job_revision=job_revision, occurrence_id=occurrence_id,
+                slot_ms=slot_ms, phase=phase, state=state, obligation=obligation,
+                reason=reason, planned_at_ms=planned_at_ms, actual_at_ms=actual_at_ms,
+                lateness_ms=lateness_ms, destination_ref=destination_ref,
+                message_id=message_id, run_id=run_id, retryable=retryable,
+                dedupe_suffix=dedupe_suffix, now_ms=now,
+            )
+
+    def job_activity(
+        self, job_id: str | None = None, *, limit: int = 100, phase: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The user-visible activity projection, newest first.
+
+        Execution outcome (``analysis``) and notification outcome
+        (``action`` / ``delivery`` / ``missed``) are separate rows and are
+        never folded together.
+        """
+        sql = """SELECT activity_id, job_id, job_revision, occurrence_id, slot_ms, phase,
+                        state, obligation, reason, planned_at_ms, actual_at_ms,
+                        lateness_ms, destination_ref, message_id, run_id, retryable,
+                        created_at_ms FROM job_activity"""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if job_id is not None:
+            conditions.append("job_id=?")
+            params.append(job_id)
+        if phase is not None:
+            conditions.append("phase=?")
+            params.append(phase)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        rows = self.db.execute(
+            sql + " ORDER BY created_at_ms DESC, rowid DESC LIMIT ?", (*params, int(limit))
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # Watch suggestions (SPEC §22.1 item 7)
+    # ------------------------------------------------------------------ #
+
+    _SUGGESTION_STATES = ("pending", "accepted", "declined")
+
+    def create_watch_suggestion(
+        self,
+        *,
+        run_id: str,
+        proposal_id: str,
+        job_id: str | None,
+        job_name: str,
+        schedule: dict[str, Any],
+        instruction: str,
+        grant_refs: tuple[str, ...],
+        delivery_policy: dict[str, Any],
+        misfire_policy: str | None,
+        reason: str,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """Record a frozen "you might want to watch this" suggestion.
+
+        Idempotent on ``(run_id, proposal_id)``: phase A of policy
+        evaluation can be retried without producing two suggestions for one
+        proposal. The row is the *only* thing a confirmation later reads —
+        nothing re-consults model output — so what the user confirms is
+        exactly what they were shown.
+        """
+        if not isinstance(job_name, str) or not _JOB_ID_RE.fullmatch(job_name):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, f"job_name {job_name!r} fails naming rule", scope="watches"
+            )
+        if not isinstance(instruction, str) or not 1 <= len(instruction) <= 10000:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "instruction must be 1..10000 chars", scope="watches"
+            )
+        if not isinstance(reason, str) or not 1 <= len(reason) <= 500:
+            raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="watches")
+        problems = validate_schedule(schedule)
+        if problems:
+            raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems), scope="watches")
+        suggestion_id = f"ws{content_hash({'r': run_id, 'p': proposal_id})[:28]}"
+        with self.transaction():
+            prior = self.db.execute(
+                "SELECT suggestion_id FROM watch_suggestions WHERE suggestion_id=?",
+                (suggestion_id,),
+            ).fetchone()
+            if prior is not None:
+                record = self.get_watch_suggestion(suggestion_id)
+                assert record is not None
+                return record
+            self.db.execute(
+                """INSERT INTO watch_suggestions(
+                       suggestion_id, run_id, proposal_id, job_id, state, job_name,
+                       schedule_json, instruction, grant_refs_json, delivery_policy_json,
+                       misfire_policy, reason, created_at_ms)
+                   VALUES (?,?,?,?,'pending',?,?,?,?,?,?,?,?)""",
+                (
+                    suggestion_id,
+                    run_id,
+                    proposal_id,
+                    job_id,
+                    job_name,
+                    canonical_json(schedule),
+                    instruction,
+                    canonical_json(list(grant_refs)),
+                    canonical_json(delivery_policy),
+                    misfire_policy,
+                    reason,
+                    now_ms,
+                ),
+            )
+            record = self.get_watch_suggestion(suggestion_id)
+            assert record is not None
+            return record
+
+    def get_watch_suggestion(self, suggestion_id: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            """SELECT suggestion_id, run_id, proposal_id, job_id, state, job_name,
+                      schedule_json, instruction, grant_refs_json, delivery_policy_json,
+                      misfire_policy, reason, created_at_ms, resolved_at_ms, resolved_by,
+                      created_job_id
+               FROM watch_suggestions WHERE suggestion_id=?""",
+            (suggestion_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["schedule"] = canonical_loads(row["schedule_json"])
+        record["grant_refs"] = list(canonical_loads(row["grant_refs_json"]))
+        record["delivery_policy"] = canonical_loads(row["delivery_policy_json"])
+        for key in ("schedule_json", "grant_refs_json", "delivery_policy_json"):
+            record.pop(key)
+        return record
+
+    def list_watch_suggestions(
+        self, *, state: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if state is not None:
+            if state not in self._SUGGESTION_STATES:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    f"state {state!r} not in {list(self._SUGGESTION_STATES)}",
+                    scope="watches",
+                )
+            rows = self.db.execute(
+                "SELECT suggestion_id FROM watch_suggestions WHERE state=?"
+                " ORDER BY created_at_ms, suggestion_id LIMIT ?",
+                (state, int(limit)),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT suggestion_id FROM watch_suggestions"
+                " ORDER BY created_at_ms, suggestion_id LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = self.get_watch_suggestion(row["suggestion_id"])
+            if record is not None:
+                out.append(record)
+        return out
+
+    def claim_watch_suggestion(
+        self, suggestion_id: str, *, actor: str, now_ms: int
+    ) -> dict[str, Any]:
+        """Atomically answer "yes" to a suggestion, before any job exists.
+
+        Ordering is a safety property, not a detail. The facade claims the
+        suggestion first and creates the job second, so a suggestion the
+        user already *declined* can never produce a job — the conflict is
+        raised before anything is created. (The reverse order looked fine
+        and was wrong: the job appeared, and only then the conflict.)
+
+        Resuming is allowed: an already-accepted suggestion with no job
+        attached is retried rather than rejected, so a failure between the
+        claim and the job creation is recoverable.
+        """
+        if not isinstance(actor, str) or not 1 <= len(actor) <= 200:
+            raise PASError(ErrorCode.INVALID_CONFIG, "actor must be 1..200 chars", scope="watches")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT state, created_job_id, resolved_by FROM watch_suggestions"
+                " WHERE suggestion_id=?",
+                (suggestion_id,),
+            ).fetchone()
+            if row is None:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"unknown suggestion {suggestion_id!r}", scope="watches"
+                )
+            if row["state"] == "declined":
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"suggestion {suggestion_id!r} was declined by {row['resolved_by']!r}",
+                    scope="watches",
+                )
+            if row["state"] == "accepted" and row["created_job_id"] is not None:
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"suggestion {suggestion_id!r} is already accepted and has a job",
+                    scope="watches",
+                )
+            if row["state"] == "pending":
+                self.db.execute(
+                    """UPDATE watch_suggestions
+                          SET state='accepted', resolved_at_ms=?, resolved_by=?
+                        WHERE suggestion_id=? AND state='pending'""",
+                    (now_ms, actor, suggestion_id),
+                )
+            record = self.get_watch_suggestion(suggestion_id)
+            assert record is not None
+            return record
+
+    def attach_watch_job(
+        self, suggestion_id: str, *, created_job_id: str, now_ms: int
+    ) -> dict[str, Any]:
+        """Record which job a claimed suggestion produced."""
+        if not isinstance(created_job_id, str) or not created_job_id:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "created_job_id must be a non-empty string",
+                scope="watches",
+            )
+        with self.transaction():
+            cursor = self.db.execute(
+                """UPDATE watch_suggestions SET created_job_id=?
+                    WHERE suggestion_id=? AND state='accepted' AND created_job_id IS NULL""",
+                (created_job_id, suggestion_id),
+            )
+            if cursor.rowcount != 1:
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"suggestion {suggestion_id!r} is not awaiting a job",
+                    scope="watches",
+                )
+            record = self.get_watch_suggestion(suggestion_id)
+            assert record is not None
+            return record
+
+    def decline_watch_suggestion(
+        self, suggestion_id: str, *, actor: str, now_ms: int
+    ) -> dict[str, Any]:
+        """Record the user's refusal. Declining is a fact about the ledger
+        too, so it carries the same actor and timestamp as an acceptance."""
+        if not isinstance(actor, str) or not 1 <= len(actor) <= 200:
+            raise PASError(ErrorCode.INVALID_CONFIG, "actor must be 1..200 chars", scope="watches")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT state FROM watch_suggestions WHERE suggestion_id=?", (suggestion_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"unknown suggestion {suggestion_id!r}", scope="watches"
+                )
+            if row["state"] != "pending":
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    f"suggestion {suggestion_id!r} is already {row['state']!r}",
+                    scope="watches",
+                )
+            self.db.execute(
+                """UPDATE watch_suggestions SET state='declined', resolved_at_ms=?,
+                      resolved_by=? WHERE suggestion_id=? AND state='pending'""",
+                (now_ms, actor, suggestion_id),
+            )
+            record = self.get_watch_suggestion(suggestion_id)
+            assert record is not None
+            return record
+
+    # ------------------------------------------------------------------ #
+    # Stop tracking (SPEC §21.1 step 7)
+    # ------------------------------------------------------------------ #
+
+    def stop_job(self, job_id: str, *, reason: str | None = None, now_ms: int | None = None) -> JobRecord:
+        """Stop tracking a job while keeping every audit row.
+
+        This is the product-level "delete" for a job that has history: the
+        job is marked stopped (never scheduled again) and stays queryable
+        with its occurrences, runs, actions, outbox messages and activity.
+        Nothing cascades; the ledger is not rewritten. A later
+        ``upsert_job`` at a new revision clears the stop and resumes
+        tracking.
+        """
+        now = self.clock.wall_now_ms() if now_ms is None else now_ms
+        if reason is not None and (not isinstance(reason, str) or not 1 <= len(reason) <= 500):
+            raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="jobs")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT stopped_at_ms FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, f"unknown job {job_id!r}", scope="jobs")
+            if row["stopped_at_ms"] is None:
+                self.db.execute(
+                    """UPDATE jobs SET stopped_at_ms=?, stop_reason=?, enabled=0,
+                           next_due_ms=NULL, updated_at_ms=? WHERE job_id=?""",
+                    (now, reason, now, job_id),
+                )
+                self._record_activity_tx(
+                    job_id=job_id,
+                    job_revision=self.db.execute(
+                        "SELECT revision FROM jobs WHERE job_id=?", (job_id,)
+                    ).fetchone()["revision"],
+                    occurrence_id=None,
+                    slot_ms=None,
+                    phase="wake",
+                    state="skipped",
+                    obligation="none",
+                    reason=reason or "stopped",
+                    actual_at_ms=now,
+                    dedupe_suffix=f"stop:{now}",
+                    now_ms=now,
+                )
+            record = self._read_job(job_id)
+            assert record is not None
+            return record
 
     def admit_event(
         self,
@@ -848,6 +1809,86 @@ class Store:
                 create_run=create_run,
             )
 
+    def admit_user_wake(
+        self,
+        dedupe_key: str,
+        *,
+        text: str,
+        grant_refs: tuple[str, ...],
+        destination_ref: str,
+        delivery_policy: dict[str, Any] | None = None,
+        observed_at_ms: int,
+        expires_at_ms: int,
+    ) -> str:
+        """Admit a user-originated wake that carries its own authorization.
+
+        This is the *only* way an event gets an authorization context. The
+        generic :meth:`admit_event` cannot set it, which is the point: being
+        able to write a manual event must not be the same thing as being
+        able to authorize what that event produces. Callers reach this
+        through ``ProactiveAgent.note_user_input`` (a trusted entry), never
+        from model output, Skill text or source content.
+
+        The envelope binds grants that already exist and were created
+        through the consent path; it cannot widen one, and the policy layer
+        still applies scope, mute, quiet hours, quota and dedup on top.
+        """
+        if not isinstance(text, str) or not 1 <= len(text) <= _MAX_INSTRUCTION_TEXT:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"text must be 1..{_MAX_INSTRUCTION_TEXT} chars",
+                scope="events",
+            )
+        refs = tuple(grant_refs or ())
+        if not refs or any(not isinstance(ref, str) or not ref for ref in refs):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "a user wake needs at least one grant_ref; standing authority is"
+                " never implied",
+                scope="events",
+            )
+        if not isinstance(destination_ref, str) or not destination_ref:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "destination_ref must be a non-empty string",
+                scope="events",
+            )
+        if delivery_policy is not None and not isinstance(delivery_policy, dict):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "delivery_policy must be an object",
+                scope="events",
+            )
+        policy = dict(delivery_policy or {})
+        # The destination reaches policy through the notification profile,
+        # which the channel registry resolves to a registered, enabled
+        # owner channel — an unknown ref fails there rather than here, but
+        # binding it now keeps the frozen envelope self-describing.
+        policy.setdefault("notification_profile", destination_ref)
+        authorization = {
+            "grant_refs": list(refs),
+            "destination_ref": destination_ref,
+            "delivery_policy": policy,
+        }
+        with self.transaction():
+            for grant_id in refs:
+                row = self.db.execute(
+                    "SELECT 1 FROM grants WHERE grant_id=?", (grant_id,)
+                ).fetchone()
+                if row is None:
+                    raise PASError(
+                        ErrorCode.INVALID_CONFIG,
+                        f"grant {grant_id!r} does not exist; a user wake cannot create"
+                        " authority, only bind existing consent",
+                        scope="events",
+                    )
+            return self._insert_event_tx(
+                dedupe_key,
+                origin="manual",
+                payload={"reason": text},
+                observed_at_ms=observed_at_ms,
+                expires_at_ms=expires_at_ms,
+                authorization=authorization,
+            )
+
     def _insert_event_tx(
         self,
         dedupe_key: str,
@@ -860,6 +1901,7 @@ class Store:
         job_id: str | None = None,
         job_revision: int | None = None,
         create_run: bool = True,
+        authorization: dict[str, Any] | None = None,
     ) -> str:
         """Insert one event + optional queued run inside the caller's
         transaction (shared by :meth:`admit_event` and the hook commit
@@ -886,8 +1928,8 @@ class Store:
             """INSERT INTO events(
                    event_id, idempotency_key, origin, job_id, job_revision,
                    occurrence_id, payload_hash, payload_ref, payload_json,
-                   observed_at_ms, expires_at_ms)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   observed_at_ms, expires_at_ms, authz_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 event_id,
                 dedupe_key,
@@ -900,6 +1942,7 @@ class Store:
                 payload_json,
                 observed_at_ms,
                 expires_at_ms,
+                canonical_json(authorization) if authorization is not None else None,
             ),
         )
         if create_run:
@@ -1383,7 +2426,8 @@ class Store:
     def get_event(self, event_id: str) -> EventRecord | None:
         row = self.db.execute(
             """SELECT event_id, idempotency_key, origin, job_id, job_revision,
-                      occurrence_id, payload_json, observed_at_ms, expires_at_ms
+                      occurrence_id, payload_json, observed_at_ms, expires_at_ms,
+                      authz_json
                FROM events WHERE event_id=?""",
             (event_id,),
         ).fetchone()
@@ -1399,6 +2443,9 @@ class Store:
             payload=canonical_loads(row["payload_json"]) if row["payload_json"] else {},
             observed_at_ms=row["observed_at_ms"],
             expires_at_ms=row["expires_at_ms"],
+            authorization=(
+                canonical_loads(row["authz_json"]) if row["authz_json"] else None
+            ),
         )
 
     def get_source_state(self, source_id: str, account_ref: str) -> SourceStateRecord | None:
@@ -1614,6 +2661,45 @@ class Store:
                 "run fence expired or superseded; write rejected",
                 scope="runs",
             )
+
+    def record_run_tool_authority(
+        self,
+        lease: RunLease,
+        *,
+        authority: str,
+        reason: str | None = None,
+        now_ms: int,
+    ) -> None:
+        """Record which authority governed this run's side effects.
+
+        Written under the run's lease fence, once, right after the executor
+        declares itself. This is the fact that makes claims about a run
+        checkable: ``host`` means PAS did not constrain what the host did,
+        and the ledger says so instead of implying coverage it cannot
+        provide (SPEC §22.1 item 5). Defaults for rows written before
+        v0.1.2 stay ``unknown`` — never retroactively promoted.
+        """
+        if authority not in TOOL_AUTHORITIES:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"tool authority {authority!r} not in {list(TOOL_AUTHORITIES)}",
+                scope="runs",
+            )
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 500):
+            raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="runs")
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            cursor = self.db.execute(
+                """UPDATE runs SET tool_authority=?, tool_authority_reason=?, updated_at_ms=?
+                   WHERE run_id=? AND state='running' AND fence=?""",
+                (authority, reason, now_ms, lease.run_id, lease.fence),
+            )
+            if cursor.rowcount != 1:
+                raise PASError(
+                    ErrorCode.CONFLICT,
+                    "run fence expired or superseded; write rejected",
+                    scope="runs",
+                )
 
     def append_run_event(
         self,
@@ -1831,14 +2917,16 @@ class Store:
         if state is not None:
             rows = self.db.execute(
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
-                          decision_summary, proposal_count, context_ref, deadline_ms
+                          decision_summary, proposal_count, context_ref, deadline_ms,
+                          tool_authority, tool_authority_reason
                    FROM runs WHERE state=? ORDER BY rowid LIMIT ?""",
                 (state, int(limit)),
             ).fetchall()
         else:
             rows = self.db.execute(
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
-                          decision_summary, proposal_count, context_ref, deadline_ms
+                          decision_summary, proposal_count, context_ref, deadline_ms,
+                          tool_authority, tool_authority_reason
                    FROM runs ORDER BY rowid LIMIT ?""",
                 (int(limit),),
             ).fetchall()
@@ -1847,7 +2935,8 @@ class Store:
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         row = self.db.execute(
             """SELECT run_id, event_id, state, attempt, fence, lease_until_ms, deadline_ms,
-                      error_class, decision_summary, proposal_count, usage_json, context_ref
+                      error_class, decision_summary, proposal_count, usage_json, context_ref,
+                      tool_authority, tool_authority_reason
                FROM runs WHERE run_id=?""",
             (run_id,),
         ).fetchone()
@@ -2166,8 +3255,13 @@ class Store:
         proposal_id → policy verdict JSON. One transaction guarded on the
         run state; concurrent evaluators serialize on the write lock and
         the loser is rejected by the state guard."""
-        if not verdicts:
-            raise PASError(ErrorCode.INVALID_CONFIG, "verdicts must not be empty", scope="policy")
+        # An empty map is legitimate and common: a run whose decision was
+        # `silent` has no proposals to evaluate, and the state transition
+        # proposed → policy_evaluated still has to happen. Rejecting it here
+        # turned every silent decision wired to a PolicyEngine into
+        # `policy_error` — i.e. the most frequent proactive outcome
+        # (heartbeat decides there is nothing to say) was reported as a
+        # policy failure instead of a clean completion.
         with self.transaction():
             row = self.db.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if row is None:
@@ -2479,6 +3573,35 @@ class Store:
             return None
         record = dict(row)
         record["request"] = canonical_loads(row["request_json"])
+        return record
+
+    def job_id_for_action(self, action_id: str) -> str | None:
+        """The job an action ultimately belongs to, or None for a wake that
+        had no job (hook / manual). Resolved through the run → event chain,
+        never guessed from payload text."""
+        row = self.db.execute(
+            """SELECT e.job_id
+               FROM actions ac
+               JOIN runs r ON r.run_id = ac.run_id
+               JOIN events e ON e.event_id = r.event_id
+               WHERE ac.action_id=?""",
+            (action_id,),
+        ).fetchone()
+        return row["job_id"] if row is not None else None
+
+    def action_delivery_context(self, action_id: str) -> dict[str, Any] | None:
+        """What the activity projection needs about one action: whether it
+        came from a deterministic reminder, and which occurrence it serves."""
+        row = self.db.execute(
+            """SELECT action_id, run_id, source, occurrence_id, obligation, request_json
+               FROM actions WHERE action_id=?""",
+            (action_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["request"] = canonical_loads(row["request_json"]) if row["request_json"] else {}
+        record.pop("request_json")
         return record
 
     def list_actions(
@@ -3041,6 +4164,64 @@ class Store:
             )
         return cursor.rowcount > 0
 
+    def recent_sent_notifications(
+        self,
+        *,
+        now_ms: int,
+        window_ms: int = 24 * 3600 * 1000,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Bounded, already-redacted summary of notifications actually sent
+        in the recent window (SPEC §21.1 step 6).
+
+        Only messages in a delivered state count — a queued, deferred,
+        suppressed or unknown message is *not* something the user saw.
+        The window is half-open on the past side (``created_at_ms >
+        now_ms - window_ms``) so a message exactly 24 h old is outside it.
+        """
+        if window_ms <= 0:
+            raise PASError(ErrorCode.INVALID_CONFIG, "window_ms must be positive", scope="outbox")
+        rows = self.db.execute(
+            """SELECT m.message_id, m.payload_json, m.destination_ref, m.created_at_ms,
+                      c.kind AS channel_kind
+               FROM outbox m
+               LEFT JOIN owner_channels c ON c.channel_ref=m.destination_ref
+               WHERE m.state IN ('provider_accepted','stored_in_inbox','reconciled_delivered')
+                 AND m.created_at_ms > ? AND m.created_at_ms <= ?
+               ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT ?""",
+            (now_ms - window_ms, now_ms, int(limit)),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload = canonical_loads(row["payload_json"]) if row["payload_json"] else {}
+            out.append(
+                {
+                    "message_id": row["message_id"],
+                    "fact_id": payload.get("fact_id"),
+                    "topic": payload.get("topic"),
+                    "title": payload.get("title"),
+                    "channel_kind": row["channel_kind"]
+                    or ("local_inbox" if row["destination_ref"] == self.owner_destination else "webhook"),
+                    "sent_at_ms": row["created_at_ms"],
+                }
+            )
+        return out
+
+    def last_sent_notification_ms(self, *, now_ms: int) -> int | None:
+        """When the most recent notification actually went out.
+
+        Used only by the host cadence preference (§21.1 step 8): pacing is
+        derived from what the owner really received, never from what was
+        merely queued.
+        """
+        row = self.db.execute(
+            """SELECT MAX(m.created_at_ms) FROM outbox m
+               WHERE m.state IN ('provider_accepted','stored_in_inbox','reconciled_delivered')
+                 AND m.created_at_ms <= ?""",
+            (now_ms,),
+        ).fetchone()
+        return row[0] if row is not None and row[0] is not None else None
+
     def notifications_today(self, *, day_start_ms: int, now_ms: int) -> int:
         """Quota input (§10.4 额度): messages queued since local day start,
         excluding suppressed ones."""
@@ -3074,6 +4255,12 @@ class Store:
             next_due_ms=row["next_due_ms"],
             created_at_ms=row["created_at_ms"],
             updated_at_ms=row["updated_at_ms"],
+            reminder=(
+                canonical_loads(row["reminder_json"]) if row["reminder_json"] else None
+            ),
+            obligation=row["obligation"],
+            stopped_at_ms=row["stopped_at_ms"],
+            stop_reason=row["stop_reason"],
         )
 
     @staticmethod
@@ -3269,6 +4456,18 @@ class Store:
                 )
             return len(rows)
 
+    def run_tool_authority_counts(self) -> dict[str, int]:
+        """How many runs were governed by each authority.
+
+        ``status`` reports this so an operator can see at a glance whether
+        recent runs were actually constrained by PAS, instead of assuming it
+        (SPEC §22.1 item 5). Rows predating v0.1.2 count as ``unknown``.
+        """
+        rows = self.db.execute(
+            "SELECT tool_authority, COUNT(*) AS n FROM runs GROUP BY tool_authority"
+        ).fetchall()
+        return {str(row["tool_authority"]): int(row["n"]) for row in rows}
+
     def run_state_counts(self) -> dict[str, int]:
         rows = self.db.execute(
             "SELECT state, COUNT(*) AS n FROM runs GROUP BY state"
@@ -3301,6 +4500,10 @@ class Store:
             "hooks", "hook_invocations", "grants", "approvals",
             "actions", "outbox", "delivery_attempts", "owner_channels",
             "topic_mutes", "feedback", "inbox", "skill_installs",
+            # v0.1.1 additions: the occurrence ledger and the user-visible
+            # activity projection are part of the profile's data, so export
+            # and delete must not silently skip them.
+            "job_occurrences", "job_activity",
         )
         dump: dict[str, Any] = {}
         for table in tables:
@@ -3315,21 +4518,55 @@ class Store:
         """Delete all profile data rows (§14.1 delete), keeping the schema
         and identity binding. Called only by explicit user confirmation
         through the trusted control plane."""
+        # Strictly children-before-parents. A wipe that deletes a parent
+        # while a child still references it either fails or (worse) is
+        # silently skipped, leaving user data behind after the user was
+        # told everything was gone — so the order is derived from the FK
+        # graph and the result is verified with foreign_key_check.
         tables = (
-            "delivery_attempts", "outbox", "actions", "approvals", "grants",
-            "inbox", "feedback", "topic_mutes", "owner_channels",
-            "run_proposals", "run_events", "runs", "events", "hook_invocations",
-            "hooks", "snapshots", "source_state", "job_occurrences",
-            "jobs_idempotency", "jobs", "skill_installs", "blobs",
+            "job_activity",       # -> jobs, outbox, runs
+            "delivery_attempts",  # -> outbox
+            "inbox",              # -> outbox, runs
+            "feedback",           # -> outbox
+            "outbox",             # -> actions
+            "actions",            # -> runs, grants, approvals
+            "approvals",          # -> grants
+            "job_grants",         # -> jobs, grants
+            "job_occurrences",    # -> jobs, events
+            "jobs_idempotency",   # -> jobs
+            "grants",
+            "topic_mutes",
+            "owner_channels",
+            "run_proposals",      # -> runs
+            "run_events",         # -> runs
+            "runs",               # -> events
+            "hook_invocations",   # -> hooks, events
+            "hooks",
+            "snapshots",
+            "source_state",
+            "events",             # -> jobs
+            "jobs",
+            "skill_installs",
+            "blobs",
         )
         deleted: dict[str, int] = {}
         with self.transaction():
             for table in tables:
-                try:
-                    cur = self.db.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed set
-                    deleted[table] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-                except sqlite3.Error:
-                    continue
+                present = self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if present is None:
+                    continue  # table only exists in newer/older schemas
+                cur = self.db.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed set
+                deleted[table] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            residual = self.db.execute("PRAGMA foreign_key_check").fetchall()
+            if residual:
+                raise PASError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "profile wipe left foreign key violations:"
+                    f" {[tuple(row) for row in residual][:4]}",
+                    scope="store",
+                )
         return deleted
 
 

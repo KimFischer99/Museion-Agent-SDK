@@ -37,8 +37,13 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from .context import ContextPackBuilder, SnapshotMaterializer, SourceRegistry
-from .contracts import ErrorCode, PASError, content_hash
-from .executor import ExecutorOutcome, ToolLoopExecutor
+from .contracts import (
+    TOOL_AUTHORITY_PAS_BROKER,
+    ErrorCode,
+    PASError,
+    content_hash,
+)
+from .executor import ExecutorContext, ExecutorOutcome, RunExecutor
 from .store import RunLease, Store
 
 if TYPE_CHECKING:
@@ -54,12 +59,22 @@ class CoordinatorConfig:
     run_lease_ttl_ms: int = 60_000
     source_fetch_deadline_s: int = 10
     snapshot_default_ttl_ms: int = 30 * 60 * 1000
+    # SPEC §21.1 step 6: how far back the "what did we already say" summary
+    # reaches, and how many entries may travel into one pack.
+    recent_notification_window_ms: int = 24 * 3600 * 1000
+    recent_notification_limit: int = 20
 
     def __post_init__(self) -> None:
-        positive = ("run_lease_ttl_ms", "source_fetch_deadline_s", "snapshot_default_ttl_ms")
+        positive = (
+            "run_lease_ttl_ms",
+            "source_fetch_deadline_s",
+            "snapshot_default_ttl_ms",
+            "recent_notification_window_ms",
+            "recent_notification_limit",
+        )
         for name in positive:
             value = getattr(self, name)
-            if not isinstance(value, int) or value <= 0:
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"{name} must be a positive integer")
 
 
@@ -101,7 +116,7 @@ class ProactiveCoordinator:
         *,
         registry: SourceRegistry,
         pack_builder: ContextPackBuilder,
-        executor: ToolLoopExecutor,
+        executor: RunExecutor,
         config: CoordinatorConfig | None = None,
         tool_allowlist: tuple[str, ...] | None = None,
         policy_engine: "PolicyEngine | None" = None,
@@ -122,13 +137,47 @@ class ProactiveCoordinator:
         if lease is None:
             return None
         try:
-            return await self._process(lease, now_ms=now, cancel_event=cancel_event)
+            report = await self._process(lease, now_ms=now, cancel_event=cancel_event)
         except PASError as exc:
             self._fail(lease, error_class=exc.code.value, now_ms=now)
-            return RunReport(
+            report = RunReport(
                 run_id=lease.run_id, outcome="failed", error_code=exc.code.value,
                 reason=exc.safe_message,
             )
+        self._project_analysis(lease, report, now_ms=now)
+        return report
+
+    def _project_analysis(self, lease: RunLease, report: RunReport, *, now_ms: int) -> None:
+        """Mirror the analysis outcome onto the job activity projection.
+
+        Separate from the delivery phase on purpose: a run that proposed
+        nothing and a run whose proposal never reached the owner are two
+        different facts, and the user-visible view must be able to tell
+        them apart (SPEC §21.1 step 7). Wakes with no job (hook / manual)
+        have no job projection to write.
+        """
+        try:
+            event = self.store.get_event(lease.event_id)
+            job = self.store.get_job(event.job_id) if event and event.job_id else None
+            if job is None:
+                return
+            state = report.outcome if report.outcome in ("proposed", "suppressed", "failed") else "skipped"
+            reason = report.reason or report.error_code
+            self.store.record_job_activity(
+                job_id=job.job_id,
+                job_revision=job.revision,
+                phase="analysis",
+                state=state,
+                obligation=job.obligation,
+                reason=(str(reason)[:500] if reason else None),
+                run_id=lease.run_id,
+                dedupe_suffix=f"analysis:{state}",
+                now_ms=now_ms,
+            )
+        except PASError:
+            # The projection is derived; it must never fail a run that the
+            # ledgers already recorded correctly.
+            return
 
     # ------------------------------------------------------------------ #
     # Pipeline
@@ -144,14 +193,42 @@ class ProactiveCoordinator:
         instruction, goal_id, scope_label, mode = self._task_of(event, job)
         require_fresh = bool(job.task.get("require_fresh_sources")) if job else False
 
+        # The coordinator's entire view of the executor, asked once per run.
+        # A host-backed executor may have to ask its host here, so this is
+        # the one place that can fail before any analysis starts.
+        context = await self.executor.context()
+        # Pin, in the run ledger, whether PAS actually governed what this run
+        # may do. A host that keeps its own tools is recorded as such; the
+        # absence of a declaration is never read as coverage.
+        self.store.record_run_tool_authority(
+            lease,
+            authority=context.tool_authority,
+            reason=self._authority_reason(context),
+            now_ms=now_ms,
+        )
+
+        if event.authorization:
+            # Where a wake's authority came from is part of the ledger: an
+            # event-scoped binding is a different fact from a job's standing
+            # grant_refs, and the audit should not have to infer it.
+            self.store.append_run_event(
+                lease,
+                kind="wake_authorization",
+                safe_summary=(
+                    f"event-scoped: grants={len(event.authorization.get('grant_refs') or [])}"
+                    f" destination={event.authorization.get('destination_ref')}"
+                ),
+                now_ms=now_ms,
+            )
+
         # ---- L0: eligibility and change detection, zero model calls ----
-        entries = self.registry.entries()
+        entries = self._targeted_entries(job)
         fetched: list[tuple[Any, Any]] = []  # (SourceEntry, SourceBatch)
         unauthorized: list[str] = []
         source_errors: list[str] = []
         previous_cursors: dict[tuple[str, str], str | None] = {}
         for entry in entries:
-            if entry.required_capability not in self.executor.broker.capabilities:
+            if entry.required_capability not in context.capabilities:
                 unauthorized.append(f"{entry.source_id}:{entry.account_ref}")
                 continue
             previous = self.store.get_source_state(entry.source_id, entry.account_ref)
@@ -224,6 +301,11 @@ class ProactiveCoordinator:
         source_records: list[dict[str, Any]] = []
         for entry, batch in fetched:
             source_records.extend(materializer.materialize(batch, now_ms=now_ms))
+        recent = self.store.recent_sent_notifications(
+            now_ms=now_ms,
+            window_ms=self.config.recent_notification_window_ms,
+            limit=self.config.recent_notification_limit,
+        )
         try:
             pack = await self.pack_builder.build(
                 goal_id=goal_id,
@@ -231,6 +313,7 @@ class ProactiveCoordinator:
                 source_records=source_records,
                 now_ms=now_ms,
                 allow_stale=not require_fresh,
+                recent_notifications=recent,
             )
         except PASError as exc:
             if exc.code == ErrorCode.STALE_CONTEXT and mode == "heartbeat":
@@ -238,7 +321,7 @@ class ProactiveCoordinator:
             raise
 
         run_row = self.store.get_run(lease.run_id)
-        run_request = self._run_request(lease, run_row, now_ms)
+        run_request = self._run_request(lease, run_row, now_ms, context)
         self.store.append_run_event(
             lease,
             kind="context_built",
@@ -321,6 +404,41 @@ class ProactiveCoordinator:
     # Helpers
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _authority_reason(context: ExecutorContext) -> str:
+        if context.tool_authority == TOOL_AUTHORITY_PAS_BROKER:
+            return "executor routes tool calls through the PAS broker"
+        return (
+            "the host executes its own tools (external_tool_broker=false);"
+            " this run's side effects are not covered by PAS authorization"
+        )
+
+    def _targeted_entries(self, job: Any) -> tuple[Any, ...]:
+        """Sources to read this run.
+
+        A job that names ``task.refresh_source_ids`` reads exactly those
+        sources by id instead of scanning every registered binding — the
+        time-sensitive case (a calendar, a mailbox) should not pay for an
+        unrelated source, and a targeted read also keeps the pack small
+        (SPEC §21.1 step 5). An id with no registered binding is a
+        configuration error the user must see, not a silent no-op.
+        """
+        all_entries = self.registry.entries()
+        if job is None:
+            return all_entries
+        wanted = job.task.get("refresh_source_ids")
+        if not wanted:
+            return all_entries
+        by_id = {entry.source_id: entry for entry in all_entries}
+        missing = [source_id for source_id in wanted if source_id not in by_id]
+        if missing:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"task.refresh_source_ids names unregistered sources: {sorted(missing)}",
+                scope="coordinator",
+            )
+        return tuple(by_id[source_id] for source_id in wanted)
+
     def _task_of(self, event: Any, job: Any) -> tuple[str, str, str, str]:
         """Resolve (instruction, goal_id, scope, mode) from the event's
         origin. Job events use the stored task; hook/manual wakes carry
@@ -358,20 +476,27 @@ class ProactiveCoordinator:
             return None
         return content_hash([(item.fact_id, item.revision) for item in batch.items])[:32]
 
-    def _run_request(self, lease: RunLease, run_row: dict[str, Any] | None, now_ms: int) -> Any:
+    def _run_request(
+        self,
+        lease: RunLease,
+        run_row: dict[str, Any] | None,
+        now_ms: int,
+        context: ExecutorContext,
+    ) -> Any:
         from .contracts import RunRequest
 
         deadline_ms = (run_row or {}).get("deadline_ms") or now_ms + 300_000
-        budget = self.executor.config.budget
         allowlist = self.tool_allowlist
         if allowlist is None:
-            allowlist = self.executor.broker.tool_names()
+            # The executor declares which tools it can actually offer; an
+            # explicit operator allowlist still narrows that (never widens it).
+            allowlist = context.tool_names
         return RunRequest(
             run_id=lease.run_id,
             attempt=(run_row or {}).get("attempt") or 1,
             fence=lease.fence,
             context_ref=f"ctx:{lease.run_id}",
-            budget=budget,
+            budget=context.budget,
             deadline=_ms_to_rfc3339(deadline_ms),
             tool_allowlist=tuple(allowlist),
         )
