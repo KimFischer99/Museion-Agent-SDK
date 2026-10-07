@@ -10,7 +10,7 @@
 | P2 Hooks 与事件 | **done** | 2026-10-06 | 沙盒 runner、legacy parser、staging + CAS、hook 状态机；验收测试见下 |
 | P3 独立 Agent 闭环 | **done** | 2026-10-06 | Source/Memory ports、ContextPack、ToolLoopExecutor、OpenAI 兼容 ModelPort、L0/L1 coordinator；验收测试见下 |
 | P4 策略与投递 | **done** | 2026-10-06 | grants、冻结参数审批、owner channels、outbox 派发（attempt journal/幂等 key/unknown 对账）、本人 inbox、真实 webhook 通知 sink、feedback；验收测试见下 |
-| P5 宿主适配 | not started | — | Hermes Runs / Pi worker，锁定版本真实联调 |
+| P5 宿主适配 | **done** | 2026-10-07 | Hermes Runs executor、Pi worker 桥、JSON-RPC 2.0 控制面协议 + client-ts 生成、Hermes proactive 插件；锁定版本真实服务验证 8/8 PASS；验收测试见下 |
 | P6 Skills 能力 | not started | — | legacy importer、aliases、依赖闭包、Gmail/Calendar 最小兼容 |
 | P7 产品化与发布 | not started | — | daemon、备份恢复、SBOM、license gate、兼容矩阵 |
 
@@ -312,3 +312,85 @@ delivered 后同 key 重试/无权威源永远停摆/权威 delivered 收口）�
   webhook sink 目前仅禁跟随重定向 + 默认 TLS 验证；属 P4/P6 之间的网络层工作。
 - profile 级配额只有每日条数口径；预算账本（token/费用）仍待 P5+。
 - 快照正文已入 blobs；大附件的分块/外置 blob 存储策略在 P6 随连接器补齐。
+
+## P5 记录（2026-10-07）
+
+实现（对应 SPEC §12 / §14.2 / 工单 B 宿主部分）：
+
+- **`src/proactive_sdk/hermes.py`**：Hermes Runs executor（方式 C，PAS 驱动
+  宿主）。硬限制传输（HTTPS 或字面回环 HTTP、无代理、禁跟随重定向、2 MiB
+  响应上限、错误原文不入异常）；能力探测 fail closed（缺 run_submission /
+  run_status / run_stop / runs_idempotency 即拒绝启动）；`start` 只代表受理
+  （提交≠完成），完成仅来自轮询确认；`waiting_for_approval`/`stopping` 不算
+  终态；`cancel` 先 stop 再轮询到宿主确认终态，超时上报
+  `cancellation_unconfirmed`（取消≠已停，不伪装 cancelled，不启动替换
+  worker）；`reconcile` 用同一 operation key + 同 payload 重放对账，409
+  冲突永不静默改写；usage 映射 usage.json（未报告则 pricing_basis=unknown，
+  不造零）；events 只产出安全摘要（type+seq），完成判定不依赖事件流；
+  run_handle 对齐 schemas/v1/run_handle.json。
+- **`src/proactive_sdk/pi_worker/pi_worker.ts` + `src/proactive_sdk/pi_worker.py`**：
+  Pi worker（Node 进程）+ Python JSON-RPC 2.0 stdio 桥。worker 是纯
+  executor：每 run 一个 `SessionManager.inMemory()` 隔离会话；vetted factory
+  显式 cwd/agentDir/工具白名单，prompt 前用 `getActiveToolNames()` 复核
+  （名字是额外检查而非只读证明，白名单属部署方）；`prompt()` resolve 只是
+  ACK，idle + 终稿 envelope 才算完成；abort 后等 idle，未停如实上报
+  `cancellation_unconfirmed`；envelope 校验与 examples/pi_executor.ts 同规则；
+  桥对超长行/非 JSON 行判定协议失真并整 worker 替换；并发 run 超限拒绝
+  （BUDGET_EXCEEDED），预算诚实。
+- **`src/proactive_sdk/rpc.py`**：控制面 JSON-RPC 2.0 信封（§14.2）。冻结
+  方法集 20 个；`system.hello` 版本协商（major 不符拒绝），未协商会话调用
+  业务方法返回 auth_required；通知不产生可靠写入；PAS 错误码走
+  `data.code`，标准 wire code 对外；单帧 1 MiB 上限；handler 异常只泄
+  异常类名。
+- **`tools/gen_client_ts.py` + `packages/client-ts`**：TS 侧类型从
+  schemas/v1 生成（含 P1 的 `fold_policy` 同步，client-ts 缺口关闭）；
+  `rpc.ts` 提供 Endpoint 注入式 `PasRpcClient`（hello 协商、方法集冻结、
+  1 MiB 上限、通知不可靠语义注释）。源码分发；npm 发布与 facade 结果
+  类型绑定属 P7。测试断言生成物与 schema 同步（漂移即失败）。
+- **`examples/pas_hermes_plugin/`**：Hermes 插件（方式 B），官方入口
+  `register(ctx)` 暴露 proactive_schedule/status/pause/resume/
+  skills_inspect 五工具，全部落 PAS RPC；自包含最小客户端（回环/TLS、
+  无重定向、有界回复、hello 协商）；未配置 fail closed；不暴露
+  grants.create/approvals.resolve（§14.3）。**Hermes 官方
+  `plugins validate` 门 PASS**（含隔离 register 探测、工具声明一致、
+  安全扫描），未安装进任何活跃 profile（需操作者决定 + PAS daemon，属 P7）。
+- **`tools/validate_p5_real.py`**：锁定版本真实服务验证套件（8 探针），
+  在服务器本地执行；证据见 VALIDATION.md §5e。
+
+关键语义决定（与 SPEC 的对应）：
+
+- 完成判定唯一来源是宿主状态轮询：SSE/事件流只作观察（§12.1）；本版
+  Hermes `hermes serve` 网关不挂 Runs 面，真实提供者是 gateway 的
+  api_server platform——按实际安装核对后接 `/v1/runs` 全套路由。
+- 宿主隔离走 profile：服务器上为验证建 `pas-p5` 专用 profile（clone
+  tokenrhythm 配置），`platform_toolsets.api_server: []` 显式零工具
+  （Hermes #82010 fail-closed 语义），api_server 仅绑 127.0.0.1:8642，
+  profile 级 `API_SERVER_KEY` 独立于主监听器（非 default profile 不继承
+  宿主密钥）；Pi 走 `SessionManager.inMemory()` + mkdtemp scratch cwd。
+- 幂等对账与服务端语义逐条对齐真实实现：同 key 同 payload 重放返回原
+  run（`replayed: true`），同 key 异 payload HTTP 409
+  `idempotency_key_conflict`；idempotency 保留期 86400s 记入 capability
+  探测，超期对账不在本版自动化（unknown 停摆语义与 P4 outbox 一致）。
+- 跨语言 schema 单一来源：TS 类型从 schemas/v1 生成而非手抄；wire 字段
+  保持 snake_case。
+
+验收（§15.1 P5 行）：锁定版本（Hermes v0.21.5+8493.g9b38eb1、
+pi-coding-agent 1.0.4、node v22.19.0、tokenrhythm/glm-5.3-flash）真实
+服务 8/8 探针 PASS：Hermes capabilities/提交完成态（usage measured
+688+14 tokens）/幂等重放对账/取消确认/key 冲突；Pi 初始化/完成 envelope
+（usage measured 46+33，cache 1280）/取消未停如实上报。提交≠完成、
+取消≠已停、隔离 session、受控工具（零工具集）、版本不支持 fail closed
+均有真实验证 + 单测双覆盖。命令与数字见 VALIDATION.md §5e。
+
+已知缺口（不阻塞 P6，按阶段补）：
+
+- Hermes 插件未安装进活跃 profile（安装即改变宿主环境，需操作者决定；
+  且 PAS 常驻 daemon 属 P7）。pas-p5 网关为验证期会话进程，未装 systemd。
+- runs.events 只做了轮询观察路径；SSE 流式 adapter 未实现（SPEC 允许：
+  断线以状态查询恢复，SSE 本就只作观察）。
+- client-ts 为源码分发；facade 结果类型与 npm 发布随 P7；PAS RPC 服务端
+  facade（jobs.create 等的持久化实现）属 P7 daemon，插件与 client 已按
+  冻结方法集对接。
+- Pi 侧方式 B（Pi extension 注册 proactive.* 工具）未开工，随 P6 skills。
+- 验证期真实 provider 调用约 9 次微小 run（glm-5.3-flash，合计约
+  2.5k 输入 tokens 量级）；token/费用级预算账本仍未实现（P3 缺口延续）。

@@ -285,8 +285,73 @@ broker（域名 allowlist/DNS rebinding/SSRF/redirect 检查）未实现，sink 
 action 批准后经 webhook 派发"授权自动化请求"，真实外部动作执行器属 P5/P6；
 delivery 派发循环由调用方驱动（常驻 daemon 属 P7）。
 
+## 5e. P5 宿主适配（新增，2026-10-07）
+
+实际命令（本机，门禁）：
+
+- `python3 -m unittest discover -s tests` → **435 项全部通过**（交接 52 +
+  P1 125 + P2 76 + P3 58 + P4 63 + P5 新增 61：hermes 30、pi worker 13、
+  rpc 9、pas plugin 9），`python3 examples/reference_core.py`、
+  `agent_loop_demo.py`、`policy_delivery_demo.py` 输出不变；审计复现 OK；
+  license gate PASS（75 tracked files）。
+- `tsc --strict --target ES2022 --module commonjs --lib ES2022,DOM
+  --outDir /tmp/pas-ts-build examples/pi_executor.ts tests/pi_contract_test.ts`
+  → 4 项结构检查照旧通过；`tsc -p packages/client-ts/tsconfig.json`
+  （strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes）通过；
+  `python3 tools/gen_client_ts.py` 幂等（重跑 unchanged）。
+
+锁定版本真实服务验证（2026-10-07，服务器本地执行 `python3
+tools/validate_p5_real.py all`，非本机 mock）：
+
+- 环境：Azure 印度主机（Ubuntu 24.04）；Hermes Agent
+  v0.21.5+8493.g9b38eb1 (2026.9.24)；@earendil-works/pi-coding-agent
+  1.0.4；node v22.19.0；provider tokenrhythm（glm-5.3-flash，
+  chat_completions）。Hermes 侧走 gateway `api_server` platform
+  （127.0.0.1:8642），专用 `pas-p5` profile：
+  `platform_toolsets.api_server: []`（显式零工具，fail-closed）、profile
+  级 API_SERVER_KEY 独立（非 default profile 不继承宿主密钥，Hermes
+  fail-closed 语义）。Pi 侧 worker 进程内 `SessionManager.inMemory()`，
+  scratch cwd = mkdtemp，工具白名单 read/grep/find/ls。
+- 探针结果（8/8 PASS）：
+  1. `hermes.capabilities` — features.run_submission/run_status/run_stop
+     = true，runs_idempotency {supported, durable, retention_seconds:
+     86400}；
+  2. `hermes.submit_complete` — POST /v1/runs（Idempotency-Key）→
+     status: started（受理）→ 轮询 completed；output 字符串；usage
+     {input 688, output 14, elapsed_ms 2502, pricing_basis: measured}；
+  3. `hermes.idempotency_replay` — 同 key 同 payload 重放返回原 run_id
+     （服务端 replayed: true，不产生第二次模型调用）；
+  4. `hermes.cancel_confirmed` — POST stop → stopping → 轮询至
+     cancelled（completed:false, interrupted:true）；
+  5. `hermes.key_conflict` — 同 key 异 payload → HTTP 409
+     idempotency_key_conflict，适配器映射 CONFLICT，永不改写；
+  6. `pi.initialize` — worker 经 `node --experimental-strip-types` 加载
+     真实 Pi SDK，pi_version 1.0.4；
+  7. `pi.run_envelope` — createAgentSession（inMemory + 工具白名单）→
+     prompt → idle → 终稿 envelope {decision: silent, proposals: []}；
+     usage {input 46, output 33, cache_read 1280, pricing_basis:
+     measured}；
+  8. `pi.cancel` — 长 run 中途 abort → 会话未 idle，如实上报
+     cancellation_unconfirmed（取消≠已停）。
+- Hermes 插件真实入口校验：`hermes plugins validate
+  examples/pas_hermes_plugin` → **Validation passed**（requires_env/
+  loadable/capability probe register() 隔离运行/declared tools 一致/
+  安全扫描/无 core override 全部 ✓）。未安装进活跃 profile。
+- 成本口径：验证全程真实 provider 调用共约 9 次微小 run（含服务器端
+  人工探针），glm-5.3-flash 约 2.5k 输入 tokens 量级。
+
+P5 未做/边界（如实记录）：Hermes 插件未安装进活跃 profile（改变宿主
+环境需操作者决定；PAS daemon 属 P7）；pas-p5 网关为验证期会话进程未装
+systemd；runs.events 仅轮询观察，SSE 流式未实现（SPEC 允许：SSE 只作
+观察、断线状态查询恢复）；client-ts 源码分发、facade 结果类型与 npm
+发布随 P7；PAS RPC 服务端 facade（§14.2 方法的持久化实现）属 P7；
+Pi 方式 B（extension 注册 proactive.*）随 P6；idempotency 超期（>86400s）
+对账未自动化；token/费用预算账本未实现。
+
 ## 6. 明确未做（交接包历史记录，继续有效）
 
-没有对真实 Hermes gateway、真实 Pi SDK、Muse 后台、邮箱、日历、设备、push 服务或付费模型执行联调；没有发布、安装或提交到用户的仓库；没有验证全部 88 个 Skill 的实际功能；没有完成第三方代码再分发授权核验。
+交接包阶段（至 2026-10-06）没有对真实 Hermes gateway、真实 Pi SDK、Muse 后台、邮箱、日历、设备、push 服务或付费模型执行联调；没有发布、安装或提交到用户的仓库；没有验证全部 88 个 Skill 的实际功能；没有完成第三方代码再分发授权核验。
+
+**2026-10-07 P5 更新**：Hermes Runs gateway 与 Pi SDK 已按锁定版本完成真实服务联调（见 §5e，8/8 探针 PASS，含真实付费 provider 的微小调用）；邮箱、日历、设备、push 服务仍未联调；88 个 Skill 仍未验证；未完成第三方代码再分发授权核验。
 
 生产版本的完成标准以 SPEC P0–P7 和第 16 节为准。测试桩通过不能用来抹掉上述缺口。

@@ -1,0 +1,14 @@
+name: proactive
+version: 0.5.0
+description: "PAS proactive control surface for Hermes (SPEC §12.1). Registers proactive_schedule / proactive_status / proactive_pause / proactive_resume / proactive_skills_inspect tools; every operation lands in the PAS control plane over JSON-RPC 2.0 — the plugin holds no schedules, no grants, and no approval authority. Configure PAS_RPC_URL (loopback HTTP) and PAS_RPC_TOKEN before enabling."
+author: PAS handoff package
+kind: standalone
+platforms:
+  - linux
+  - darwin
+provides_tools:
+  - proactive_schedule
+  - proactive_status
+  - proactive_pause
+  - proactive_resume
+  - proactive_skills_inspect
