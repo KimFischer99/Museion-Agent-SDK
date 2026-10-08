@@ -3,7 +3,7 @@
 PAS 驱动已有宿主（方式 C）：PAS 持有调度、策略与账本；Hermes 提供推理与
 已审核工具。本模块只说 Hermes Runs HTTP 的话，不 import Hermes。
 
-语义边界（对锁定版本 v0.21.5 真实服务验证，见 VALIDATION.md §5e）：
+语义边界（对锁定版本 v0.21.5 真实服务验证，见 docs/COMPATIBILITY.md）：
 
 - ``start`` 返回只代表提交被接受（``status: started``），不是完成。
   完成只能来自 ``wait``/``status``/``events`` 的轮询确认。

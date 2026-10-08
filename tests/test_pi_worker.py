@@ -1,8 +1,8 @@
 """P5 Pi worker bridge: contract tests against a scripted worker process.
 
 The bridge is exercised over a real subprocess speaking the worker
-protocol (tests/fake_pi_worker.py); the real Pi SDK path is validated on
-the locked host (tools/validate_p5_real.py, recorded in VALIDATION.md).
+protocol (tests/fake_pi_worker.py); the real Pi SDK path was validated
+separately on the locked host (see docs/COMPATIBILITY.md).
 Pinned semantics: prompt ACK ≠ result, cancel waits for idle, unknown
 effects are honest, concurrent runs are refused, fail closed on init.
 """

@@ -1,60 +1,66 @@
-# 兼容矩阵（P7 / SPEC §17.3.3）
+# Compatibility matrix (P7 / SPEC §17.3.3)
 
-本文记录支持范围、已验证的宿主版本与未验证项。
-宿主版本记录不由 SDK 自动读取或锁定；部署方升级宿主后需重新验证兼容性。
+This document records the supported scope, the verified host versions and the unverified items.
+Host versions are not read or pinned automatically by the SDK; a deployer that upgrades a host
+must re-verify compatibility.
 
-## 支持范围（v0.1 边界）
+## Supported scope (v0.1 boundary)
 
-| 维度 | 支持 | 说明 |
+| Dimension | Supported | Notes |
 |---|---|---|
-| profile | 单 profile | 一个 state 目录、一个 DB、一个 owner destination（不是多租户产品） |
-| 主机 | 单主机 | 控制面默认 Unix socket；远程 TLS HTTP 未实现，属部署方自行方案 |
-| Python | ≥ 3.11 | 实测 3.14.4（macOS）；3.11/3.12 版本矩阵未跑，如实标注 |
-| 运行时依赖 | 仅标准库 | 可选 extra：`jsonschema`（conformance 工具用，不影响运行） |
+| profile | single profile | one state directory, one DB, one owner destination (not a multi-tenant product) |
+| host | single host | the control plane defaults to a Unix socket; remote TLS HTTP is not implemented and is left to the deployer's own approach |
+| Python | >= 3.11 | measured on 3.14.4 (macOS); the 3.11/3.12 matrix has not been run, recorded as such |
+| runtime dependencies | standard library only | optional extra: `jsonschema` (for conformance tooling, does not affect runtime) |
 
-## 外部宿主（已验证版本）
+## External hosts (verified versions)
 
-| 宿主 | 已验证版本 | 验证方式 | 结果 |
+| Host | Verified version | Method | Result |
 |---|---|---|---|
-| Hermes Runs gateway | 0.21.5+8493.g9b38eb1 (2026.9.24) | P5 真实服务探针 1–5（capabilities / submit / idempotency replay / cancel / key conflict） | 5/5 PASS |
-| @earendil-works/pi-coding-agent | 1.0.4 | P5 真实服务探针 6–8（initialize / run envelope / cancel 语义） | 3/3 PASS |
+| Hermes Runs gateway | 0.21.5+8493.g9b38eb1 (2026.9.24) | P5 real-service probes 1-5 (capabilities / submit / idempotency replay / cancel / key conflict) | 5/5 PASS |
+| @earendil-works/pi-coding-agent | 1.0.4 | P5 real-service probes 6-8 (initialize / run envelope / cancel semantics) | 3/3 PASS |
 
-宿主版本升级规则：升级后重跑 `tools/validate_p5_real.py` 的探针集，
-通过后再更新本文的已验证版本。协议大版本不匹配时
-控制面 `system.hello` 直接拒绝（fail closed）。
+Host upgrade rule: after an upgrade, re-run the probe set listed above and update the verified
+versions in this document only once it passes. On a protocol major-version mismatch the control
+plane refuses immediately at `system.hello` (fail closed).
 
-## 连接器与通知通道
+## Connectors and notification channels
 
-| 组件 | 状态 | `e2e_verified` |
+| Component | Status | `e2e_verified` |
 |---|---|---|
-| Gmail（GWS 受限 grammar） | 传输层契约测试（脚本替身 + 真实适配器代码路径） | ❌ |
-| Google Calendar（同上） | 传输层契约测试 | ❌ |
-| Webhook 通知 sink | loopback HTTP 契约（幂等键 / unknown 对账 / ACK 丢失不盲发） | ❌（未绑定外部 provider） |
-| 公开资料跟踪 | loopback TLS（自签 CA + IP 钉扎）验证传输与门禁 | ❌ |
+| Gmail (restricted GWS grammar) | Transport-layer contract tests (scripted stand-in plus the real adapter code path) | ❌ |
+| Google Calendar (same) | Transport-layer contract tests | ❌ |
+| Webhook notification sink | Loopback HTTP contract (idempotency key / unknown reconciliation / no blind send on a lost ACK) | ❌ (no external provider bound) |
+| Public material tracking | Loopback TLS (self-signed CA + IP pinning) verifying transport and gates | ❌ |
 
-无授权凭据，e2e 一列保持 ❌——README 与此同步，不冒充已联调。
+There are no authorized credentials, so the e2e column stays ❌ - the README is in sync with this
+and does not pretend an integration has been run.
 
-## Skills 兼容层
+## Skills compatibility layer
 
-- 产品附带 88 份 Skill 入口及目录内资源（377 个源文件），作为被动部署参考；默认不加载、不执行。
-- 安装后的目录为 `proactive_sdk/_deployment_reference/skills/`；部署方可显式选择兼容导入。
-- 审计：88 个入口，`tools/reproduce_audit.py` 可复现。
-- 导入管线：scan → sidecar → install 与审计一致（P6，88/88 字段级一致）。
-- 端到端能力验证：**0 个**。`technical_status` 到 `parsed` 为止；
-  `e2e_verified` 需要真实授权与逐项联调，缺口透明记录，不宣称
-  "88 个能力全部实现"。
+- The product bundles 88 Skill entry points plus their directory assets (377 source files) as
+  passive deployment reference; they are not loaded or executed by default.
+- The installed directory is `proactive_sdk/_deployment_reference/skills/`; a deployer may opt in
+  to a compatibility import explicitly.
+- Audit: 88 entry points, reproducible with `tools/reproduce_audit.py`.
+- Import pipeline: scan -> sidecar -> install agrees with the audit (P6, 88/88 field-level
+  agreement).
+- End-to-end capability verification: **0**. `technical_status` stops at `parsed`; `e2e_verified`
+  needs real authorization and item-by-item integration, and the gap is recorded transparently
+  rather than claiming "all 88 capabilities implemented".
 
-## 运维矩阵
+## Operations matrix
 
-| 平台 | 状态 |
+| Platform | Status |
 |---|---|
-| macOS（darwin 27 arm64） | 全量测试绿；sandbox-exec 可用（Apple 已弃用，探测失败即 fail closed） |
-| Linux（Ubuntu 24.04） | P5 真实服务验证所在主机；Bubblewrap argv/探测已测，hook 端到端未在该机复跑全量 |
+| macOS (darwin 27 arm64) | Full test suite green; sandbox-exec available (deprecated by Apple; a failed probe fails closed) |
+| Linux (Ubuntu 24.04) | The host where the P5 real-service verification ran; Bubblewrap argv/probe tested, but the hook end-to-end suite was not re-run in full on that machine |
 
-## 数据与升级规则
+## Data and upgrade rules
 
-- store 迁移只增不改；旧二进制拒绝打开新库；备份带 `schema_version`，
-  restore 遇到"备份比二进制新"即拒绝。
-- 控制面协议（`PAS_PROTOCOL_VERSION=1.0`）大版本变更会破坏 client-ts
-  客户端——hello 阶段协商失败即停。
-- 本文外部文档变化后先跑测试再更新矩阵（SPEC §17.3.6）。
+- store migrations are additive only; an old binary refuses to open a new database; backups carry
+  a `schema_version` and restore refuses when the backup is newer than the binary.
+- A major-version change of the control-plane protocol (`PAS_PROTOCOL_VERSION=1.0`) breaks
+  client-ts clients - a failed hello negotiation stops the connection.
+- After this document or an external document changes, run the tests before updating the matrix
+  (SPEC §17.3.6).

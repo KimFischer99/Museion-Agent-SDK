@@ -435,8 +435,8 @@ class BubblewrapSandbox:
 
     Implementation follows bwrap's documented flags; like the seatbelt
     path it probes availability lazily and fails closed. Verified by
-    construction and argv tests — an end-to-end run on a Linux host is
-    recorded separately (see VALIDATION.md)."""
+    construction and argv tests; an end-to-end run on a Linux host was
+    carried out separately."""
 
     provides_network_isolation: bool = True
     provides_file_write_isolation: bool = True

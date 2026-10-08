@@ -7,10 +7,11 @@ normalizes usage (§4.1 Usage: unmeasurable values are ``None``, never
 zero). The HTTP transport is injectable; the contract tests exercise the
 full adapter against a local scripted HTTP server.
 
-Honesty boundary (AGENTS.md): a scripted local server proves the adapter's
+Honesty boundary: a scripted local server proves the adapter's
 request/response logic, **not** compatibility with any deployed provider
 release. Live-provider validation against a locked version stays an open
-gate (SPEC §15.1 P5/P7) and VALIDATION.md records that boundary. Provider
+gate (SPEC §15.1 P5/P7) and docs/COMPATIBILITY.md records that boundary.
+Provider
 parameters travel in ``request.adapter_namespace`` and never leak into
 the public protocol; tokens and unredacted HTTP bodies never appear in
 error messages.

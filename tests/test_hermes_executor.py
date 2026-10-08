@@ -1,8 +1,8 @@
 """P5 Hermes Runs executor: contract tests against a scripted transport.
 
-All network behavior is fake here; the real-service validation lives in
-tools/validate_p5_real.py (run against a locked Hermes version, recorded in
-VALIDATION.md). These tests pin the adapter semantics that SPEC §12.1 and
+All network behavior is fake here; the real-service validation was run
+separately against a locked Hermes version (see docs/COMPATIBILITY.md).
+These tests pin the adapter semantics that SPEC §12.1 and
 §15.1 (P5 row) require: 提交≠完成、取消≠已停、幂等对账、fail closed。
 """
 
