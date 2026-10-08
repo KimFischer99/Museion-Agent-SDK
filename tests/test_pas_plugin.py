@@ -54,7 +54,7 @@ class _RpcServer(threading.Thread):
                               "methods": ["system.hello", "jobs.create", "jobs.list",
                                           "jobs.pause", "jobs.resume", "skills.explain"]}
                 elif method == "jobs.create":
-                    result = {"job_id": body["params"]["job"]["job_id"], "state": "scheduled"}
+                    result = {"job_id": body["params"]["job"]["id"], "state": "scheduled"}
                 elif method == "jobs.list":
                     result = {"jobs": [{"job_id": "daily-agenda"}]}
                 elif method in ("jobs.pause", "jobs.resume"):
@@ -141,7 +141,10 @@ class PluginHandlerTests(unittest.TestCase):
         self.assertEqual(reply["job"]["state"], "scheduled")
         created = [r for r in self.server.requests if r.get("method") == "jobs.create"]
         self.assertEqual(len(created), 1)
-        self.assertEqual(created[0]["params"]["job"]["job_id"], "daily-agenda")
+        self.assertEqual(created[0]["params"]["job"]["id"], "daily-agenda")
+        # jobs.create requires an idempotency_key (SPEC §14.2); sending it is
+        # what makes a replay idempotent instead of an error.
+        self.assertTrue(created[0]["params"]["idempotency_key"].startswith("plugin-"))
 
     def test_bad_job_id_refused_locally(self):
         reply = json.loads(plugin.handle_proactive_schedule({

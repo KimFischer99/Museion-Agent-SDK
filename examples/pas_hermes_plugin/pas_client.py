@@ -109,8 +109,10 @@ class PasRpcClient:
         self._negotiated = True
         return result
 
-    def jobs_create(self, job: dict) -> dict:
-        return self._call("jobs.create", {"job": job})
+    def jobs_create(self, job: dict, idempotency_key: str) -> dict:
+        return self._call(
+            "jobs.create", {"job": job, "idempotency_key": idempotency_key}
+        )
 
     def jobs_list(self) -> dict:
         return self._call("jobs.list", {})

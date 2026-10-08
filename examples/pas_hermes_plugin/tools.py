@@ -9,6 +9,7 @@ grants.create or approvals.resolve.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -55,24 +56,50 @@ def _ok(payload: dict[str, Any]) -> str:
     return json.dumps({"ok": True, **payload}, ensure_ascii=False)
 
 
+def _idempotency_key(job: dict) -> str:
+    """Replay-safe key for one job body.
+
+    The control plane requires an ``idempotency_key`` on ``jobs.create`` and
+    rejects the call without one. Hashing the body means an identical replay is
+    idempotent while a changed body lands as a new revision instead of a
+    conflict.
+    """
+    body = json.dumps(job, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "plugin-" + hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+
+
+def _grant_refs() -> list[str]:
+    """The operator's active grant refs, from ``PAS_NOTIFY_GRANT``.
+
+    PAS policy refuses a notification whose job carries no active
+    ``notify.self`` grant (``grant_missing``), so a plan created without one is
+    accepted and then can never speak. The refs are configuration, never model
+    output: the model may propose a plan, but it cannot grant itself the right
+    to notify anyone.
+    """
+    raw = os.environ.get("PAS_NOTIFY_GRANT", "")
+    return [ref.strip() for ref in raw.split(",") if ref.strip()]
+
+
 def handle_proactive_schedule(args: dict[str, Any], **_kw: Any) -> str:
     """proactive.schedule: propose one persisted plan. All policy (grants,
     quiet hours, approval) is decided by PAS — a successful reply means the
     job is stored and scheduled, never that a notification was sent."""
     try:
         job = {
-            "job_id": str(args["job_id"]),
+            "id": str(args["job_id"]),
             "mode": str(args["mode"]),
             "schedule": args["schedule"],
             "task": {"instruction": str(args["instruction"])},
+            "grant_refs": _grant_refs(),
             "enabled": True,
         }
     except KeyError as exc:
         return _err(f"missing required field {exc.args[0]!r}")
-    if not _JOB_ID_RE.fullmatch(job["job_id"]):
+    if not _JOB_ID_RE.fullmatch(job["id"]):
         return _err("job_id must be 3..128 chars of [a-z0-9._-], starting alphanumeric")
     try:
-        result = _client().jobs_create(job)
+        result = _client().jobs_create(job, _idempotency_key(job))
     except PluginRpcError as exc:
         return _err(f"PAS refused the schedule: {exc}")
     return _ok({"job": result})
@@ -126,8 +153,11 @@ PROACTIVE_SCHEDULE_SCHEMA = _schema(
     "Scheduling accepted is NOT a notification sent.",
     {
         "job_id": _str("Stable plan id, 3..128 chars [a-z0-9._-]"),
-        "mode": {"type": "string", "enum": ["heartbeat", "task", "watch"],
-                 "description": "Plan kind; task plans need an explicit task instruction"},
+        "mode": {"type": "string", "enum": ["heartbeat", "task"],
+                 "description": "Plan kind: 'task' runs the instruction on the schedule, "
+                                "'heartbeat' looks around opportunistically. 'task' reaches "
+                                "the model every occurrence; 'heartbeat' is suppressed with "
+                                "no model call when nothing changed."},
         "schedule": {"type": "object", "description":
                      "PAS schedule object, e.g. {\"kind\":\"daily\",\"local_time\":\"09:00\","
                      "\"timezone\":\"Europe/Berlin\"} or {\"kind\":\"interval\","
