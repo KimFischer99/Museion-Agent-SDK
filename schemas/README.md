@@ -1,59 +1,67 @@
-# JSON Schemas（PAS Interoperability Profile v1）
+# JSON Schemas (PAS Interoperability Profile v1)
 
-本目录是 SPEC 第 4 节统一契约的 JSON Schema 2020-12 定义。它们是**契约冻结的载体**：
-Python / TypeScript 实现与 fixtures 从这里派生，schema 变更须同步三处（见 AGENTS.md）。
+This directory holds the JSON Schema 2020-12 definitions of the unified contracts in SPEC
+section 4. They are the **carrier of the frozen contracts**: the Python / TypeScript
+implementations and the fixtures derive from them, and a schema change must land in all three
+places (see docs/CONTRIBUTING.md).
 
-## 约定
+## Conventions
 
-- 所有跨进程对象必须携带 `protocol_version`（`^\d+\.\d+$`）。当前为 `1.0`。
-- 外部时间一律 RFC 3339，带 `Z` 或显式 offset；内部毫秒整数字段以 `_ms` 结尾。
-- 变更类请求使用 `idempotency_key`；同 key 不同规范化内容返回 `conflict`。
-- 规范化 JSON：键排序、紧凑分隔符（见 `proactive_sdk.contracts.canonical_json`），
-  hash 一律 SHA-256 小写十六进制。
+- Every cross-process object must carry `protocol_version` (`^\d+\.\d+$`). Currently `1.0`.
+- External timestamps are always RFC 3339 with `Z` or an explicit offset; internal integer
+  millisecond fields end in `_ms`.
+- Mutating requests use `idempotency_key`; the same key with different canonical content
+  returns `conflict`.
+- Canonical JSON: sorted keys, compact separators (see `proactive_sdk.contracts.canonical_json`);
+  hashes are always lowercase hexadecimal SHA-256.
 
-## 校验器支持范围
+## Validator coverage
 
-`proactive_sdk.schema_validate` 实现本仓库 schema 实际使用的 2020-12 关键字子集：
-`type`（含 `["x","null"]`）、`properties`、`required`、`additionalProperties:false`、
-`enum`、`const`、`items`、`minItems`/`maxItems`、`minLength`/`maxLength`、
-`minimum`/`maximum`、`pattern`、`format: date-time`、`$defs`/内部 `$ref`。
-标注关键字（`title`/`description`/`$id`/`$schema`）忽略。
+`proactive_sdk.schema_validate` implements the subset of 2020-12 keywords this repository's
+schemas actually use: `type` (including `["x","null"]`), `properties`, `required`,
+`additionalProperties:false`, `enum`, `const`, `items`, `minItems`/`maxItems`,
+`minLength`/`maxLength`, `minimum`/`maximum`, `pattern`, `format: date-time`, `$defs`/internal
+`$ref`. Annotation keywords (`title`/`description`/`$id`/`$schema`) are ignored.
 
-**跨字段规则不在 schema 内表达**，由 `contracts.py` 的语义校验实现并有独立测试：
+**Cross-field rules are not expressed in the schemas.** They are implemented by the semantic
+validators in `contracts.py` and have dedicated tests:
 
-| 规则 | 位置 |
+| Rule | Location |
 |---|---|
-| `Schedule` 按 kind 的必填字段（interval⇒anchor+every_seconds；daily/monthly⇒local_time+timezone；weekly⇒weekdays+local_time+timezone；runonce⇒at） | `contracts.validate_schedule` |
-| `Schedule.fold_policy` 仅允许 `earliest`/`latest`（默认 `earliest`；DST 回拨重复时刻取哪一次，春令时跳空一律跳过。P1 起 schema 与实现同步支持） | `contracts.validate_schedule` |
-| `Decision.decision == "silent"` ⇒ `proposals` 为空；`"propose"` ⇒ 至少 1 条 | `contracts.validate_decision` |
-| `notify_self` 提案必须带 `evidence_refs` 与 `expires_at` | `contracts.validate_decision` |
-| `mode="reminder"` 必须有 `reminder` 且不得带 `task.instruction`；其他 mode 不得带 `reminder`；`reminder.timezone` 必须与 `schedule.timezone` 一致 | `contracts.validate_reminder`（JSON Schema 用 `allOf` 表达 mode/reminder 的联动） |
-| `reminder` 未知键拒绝；`artifact_refs` 的每一项必须可打开且逐字出现在 `body` | `proactive_sdk.artifacts` + `contracts.validate_reminder` |
-| `obligation` 仅 `due`/`opportunistic`，只能由可信任务配置给出 | `contracts.JobSpec` |
-| `ContextPack.recent_notifications` 有界、无 `body` 字段，`channel_kind` 仅两值 | `contracts.validate_context_pack` |
+| `Schedule` required fields per kind (interval⇒anchor+every_seconds; daily/monthly⇒local_time+timezone; weekly⇒weekdays+local_time+timezone; runonce⇒at) | `contracts.validate_schedule` |
+| `Schedule.fold_policy` allows only `earliest`/`latest` (default `earliest`; it selects which of the two repeated instants to use when DST falls back, and the spring-forward gap is always skipped. Schema and implementation have supported this in step since P1) | `contracts.validate_schedule` |
+| `Decision.decision == "silent"` ⇒ `proposals` is empty; `"propose"` ⇒ at least 1 | `contracts.validate_decision` |
+| A `notify_self` proposal must carry `evidence_refs` and `expires_at` | `contracts.validate_decision` |
+| `mode="reminder"` requires `reminder` and must not carry `task.instruction`; other modes must not carry `reminder`; `reminder.timezone` must match `schedule.timezone` | `contracts.validate_reminder` (JSON Schema expresses the mode/reminder coupling with `allOf`) |
+| Unknown keys in `reminder` are rejected; every entry in `artifact_refs` must be openable and must appear verbatim in `body` | `proactive_sdk.artifacts` + `contracts.validate_reminder` |
+| `obligation` is only `due`/`opportunistic`, and only trusted task configuration may supply it | `contracts.JobSpec` |
+| `ContextPack.recent_notifications` is bounded and has no `body` field; `channel_kind` has only two values | `contracts.validate_context_pack` |
 
-若后续引入 `jsonschema` 库做 conformance（P7），这些规则应同步写成
-`if/then` 或保留为代码层检查，两种途径的测试结果必须一致。
+If the `jsonschema` library is introduced later for conformance (P7), these rules should be
+written as `if/then` as well, or kept as code-level checks — both routes must produce identical
+test results.
 
-## 生成物同步
+## Generated artifacts stay in sync
 
-`packages/client-ts/src/schema_types.ts` 由 `tools/gen_client_ts.py` 从本目录
-生成，`tests/test_client_ts_drift.py` 会在生成结果与提交内容不一致时失败；
-`packages/client-ts/src/rpc.ts` 的方法表与 `proactive_sdk.rpc.PROACTIVE_RPC_METHODS`
-逐项比对。公共对象变动必须同时落地 Python、本目录、生成类型与 fixtures。
+`packages/client-ts/src/schema_types.ts` is generated from this directory by
+`tools/gen_client_ts.py`, and `tests/test_client_ts_drift.py` fails when the generated result
+differs from what is committed; the method table in `packages/client-ts/src/rpc.ts` is compared
+item by item against `proactive_sdk.rpc.PROACTIVE_RPC_METHODS`. A change to a public object must
+land in Python, this directory, the generated types and the fixtures together.
 
-## 文件
+## Files
 
-| Schema | 对应 SPEC 对象 |
+| Schema | SPEC object |
 |---|---|
-| `error.json` | §4.4 统一错误 |
-| `job_spec.json` | §4.1 JobSpec（含 Schedule） |
+| `error.json` | §4.4 unified error |
+| `job_spec.json` | §4.1 JobSpec (includes Schedule) |
 | `wake_event.json` | §4.1 WakeEvent |
 | `run_request.json` / `run_handle.json` | §4.1 RunRequest / RunHandle |
 | `context_pack.json` | §4.1 + §7.1 ContextPack |
 | `decision.json` | §4.1 Decision + ActionProposal |
 | `action_record.json` | §4.1 ActionRecord |
-| `delivery_attempt.json` | §4.1 DeliveryAttempt（含 outbox 状态机 §10.2） |
+| `delivery_attempt.json` | §4.1 DeliveryAttempt (includes the outbox state machine §10.2) |
 | `usage.json` | §4.1 Usage |
 
-示例值见 `tests/test_schemas.py`，与 SPEC §7.1 / §8.1 的示例保持一致（假数据）。
+Example values live in `tests/test_schemas.py` and match the examples in SPEC §7.1 / §8.1
+(fake data).
