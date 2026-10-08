@@ -72,11 +72,11 @@ class PiWorkerConfig:
             raise PASError(
                 ErrorCode.INVALID_CONFIG, "pi_entry must point at the Pi package entry index.js"
             )
-        if not self.allowed_tools or any(
+        if not isinstance(self.allowed_tools, (list, tuple)) or any(
             not isinstance(t, str) or not t for t in self.allowed_tools
         ):
             raise PASError(
-                ErrorCode.INVALID_CONFIG, "allowed_tools must be a non-empty tuple of tool names"
+                ErrorCode.INVALID_CONFIG, "allowed_tools must be a tuple of tool names (empty disables tools)"
             )
         for name in ("init_timeout_s", "run_timeout_s", "cancel_timeout_s"):
             value = getattr(self, name)

@@ -1,4 +1,4 @@
-# 施工进度（P0–P7）
+# Museion Agent SDK v0.1.2 施工进度
 
 按 SPEC §15.1 阶段推进；每阶段完成后在此登记，汇报格式遵循 AGENTS.md。
 "完成"以该阶段验收条件全部通过为准，不以代码写完为准。
@@ -11,10 +11,10 @@
 | P3 独立 Agent 闭环 | **done** | 2026-10-06 | Source/Memory ports、ContextPack、ToolLoopExecutor、OpenAI 兼容 ModelPort、L0/L1 coordinator；验收测试见下 |
 | P4 策略与投递 | **done** | 2026-10-06 | grants、冻结参数审批、owner channels、outbox 派发（attempt journal/幂等 key/unknown 对账）、本人 inbox、真实 webhook 通知 sink、feedback；验收测试见下 |
 | P5 宿主适配 | **done** | 2026-10-07 | Hermes Runs executor、Pi worker 桥、JSON-RPC 2.0 控制面协议 + client-ts 生成、Hermes proactive 插件；锁定版本真实服务验证 8/8 PASS；验收测试见下 |
-| v0.1.2 | **done** | 2026-10-07 | 十步全部完成：执行器 seam、决策契约一等化、通用宿主桥（真实 8/8）、宿主形态补齐、工具主权入账、非 job 唤醒授权（真实 4/4）、建议确认回路、真实推送接收端（真实 5/5）、开箱即用装配、整体验收；793 测试通过，版本统一 0.1.2；详见 `VALIDATION.md` §7.4–§7.6 |
 | P6 Skills 能力 | **done** | 2026-10-07 | legacy importer（88/88 审计一致）、canonical id/aliases、依赖闭包、sidecar、GWS 受限 grammar + 邮件/日历连接器、出站 broker、公开资料跟踪、四链路闭环 demo、Pi extension；验收测试见下 |
 | P7 产品化与发布 | **done** | 2026-10-07 | 公共 facade（ProactiveAgent）、常驻 daemon（单实例锁/恢复/drain 停机/磁盘满报警/health.json）、Unix socket 控制面 + 认证、CLI（pas serve/doctor/jobs/…）、备份恢复/导出/删除、结构化日志与指标、systemd/container/launchd 示例、wheel 构建产物门禁 + SBOM、兼容矩阵；安装 smoke PASS；验收测试见下 |
 | v0.1.1 优化（SPEC §21） | **done** | 2026-10-07 | 确定时间直接提醒（`mode=reminder`，零模型调用）、通知义务 vs 机会型分流、迟到/错过诚实语义、投递前时效来源复读、近 24h 语义查重摘要、可见活动投影与停止追踪、cadence 偏好与产物引用校验；迁移 007（重建 `jobs`/`actions`）原地升级 v0.1.0 库；608 测试全过；验收记录见 VALIDATION §6 |
+| v0.1.2 | **done** | 2026-10-07 | 十步全部完成：执行器 seam、决策契约一等化、通用宿主桥（真实 8/8）、宿主形态补齐、工具主权入账、非 job 唤醒授权（真实 4/4）、建议确认回路、真实推送接收端（真实 5/5）、开箱即用装配、整体验收；793 测试通过，版本统一 0.1.2；详见 `01/VALIDATION.md` §7.4–§7.6 |
 
 ## P0 记录（2026-10-06）
 
@@ -25,8 +25,8 @@
   validate_zip_member），zip-slip 与符号链接逃逸测试。
 - 许可门禁：`docs/LICENSES.md`（gate 标记）+ `tools/license_gate.py`
   （路径前缀 + 全量 hash 双重检查；status≠pass 即阻断）。
-- 审计复现：`tools/reproduce_audit.py` 对照 `audit/skills.json`（88 条）与
-  `audit/selected-source-manifest.json`（12 文件 hash/bytes/lines）逐项复算。
+- 审计复现：`tools/reproduce_audit.py` 对照 `tests/fixtures/skills.json`（88 条）与
+  `tests/fixtures/selected-source-manifest.json`（12 文件 hash/bytes/lines）逐项复算。
   平台标记启发式列为信息列不复算（审计端词法启发式，token 表不可从输出反推）。
 
 ## P1 记录（2026-10-06）
@@ -70,7 +70,7 @@
 验收（§15.1 P1 行）：时区/DST（gap/fold、转换日偏移）/跨月（31 日、闰年 2/29）/
 停机一周/重启/真实进程 kill/双连接并发 claim 测试通过；同 occurrence 单入队、
 旧 fence 拒提交、时钟回拨不重放、pause 赢过在途准入、due 扫描走
-`jobs_due` 索引（EXPLAIN 验证）+ 1000 任务扫描烟测。命令与数字见 VALIDATION.md。
+`jobs_due` 索引（EXPLAIN 验证）+ 1000 任务扫描烟测。命令与数字见 01/VALIDATION.md。
 
 已知缺口（不阻塞 P2，按阶段补）：
 
@@ -147,7 +147,7 @@
 
 - hook 常驻轮询循环/守护进程在 P7；`run_due_hooks` 由调用方驱动。
 - BubblewrapSandbox 按 bwrap 文档实现并做了 argv/探测测试，但本机是 macOS，
-  未做 Linux 端到端联调（VALIDATION.md 记录）。
+  未做 Linux 端到端联调（01/VALIDATION.md 记录）。
 - 网络 broker（域名范围/DNS/redirect 检查）属 P3/P4；当前网络控制只有沙盒级
   deny，不做域名白名单。
 - hook 定义尚无公开 schema 对象（§4.1 十对象不含 HookSpec），P3 冻结 facade
@@ -233,7 +233,7 @@
 - **deadline/预算有效**：turns/tools/wall_time/proposals 四预算 + 墙钟
   deadline + asyncio 硬超时 + cancel flag，各有测试。
 - **真实模型 fixture 不冒充**：FakeModel 标签（provider=fake、无 measured
-  usage）有断言；真实适配器仅本地脚本化 HTTP 服务器契约测试，VALIDATION.md
+  usage）有断言；真实适配器仅本地脚本化 HTTP 服务器契约测试，01/VALIDATION.md
   明确记录未做在线 provider 联调、不做兼容声明。
 
 已知缺口（不阻塞 P4，按阶段补）：
@@ -326,7 +326,7 @@ delivered 后同 key 重试/无权威源永远停摆/权威 delivered 收口）�
   共享 references/scripts，嵌套 artifacts 层共享资产入闭包，不复制单个
   SKILL.md）；§11.3 sidecar（source/canonical_name/aliases/requirements/
   compatibility/distribution + legacy 扩展记录）；`audit_consistency`
-  对照 audit/skills.json。符号链接逃逸在扫描与闭包两侧都被拒绝
+  对照 tests/fixtures/skills.json。符号链接逃逸在扫描与闭包两侧都被拒绝
   （pathsafe ensure_within against 扫描基）。
 - **store**：`record_skill_install` / `get_skill_install` /
   `list_skill_installs`——同 (name, hash) 幂等、状态可推进
@@ -438,7 +438,7 @@ delivered 后同 key 重试/无权威源永远停摆/权威 delivered 收口）�
   `plugins validate` 门 PASS**（含隔离 register 探测、工具声明一致、
   安全扫描），未安装进任何活跃 profile（需操作者决定 + PAS daemon，属 P7）。
 - **`tools/validate_p5_real.py`**：锁定版本真实服务验证套件（8 探针），
-  在服务器本地执行；证据见 VALIDATION.md §5e。
+  在服务器本地执行；证据见 01/VALIDATION.md §5e。
 
 关键语义决定（与 SPEC 的对应）：
 
@@ -463,7 +463,7 @@ pi-coding-agent 1.0.4、node v22.19.0、tokenrhythm/glm-5.3-flash）真实
 688+14 tokens）/幂等重放对账/取消确认/key 冲突；Pi 初始化/完成 envelope
 （usage measured 46+33，cache 1280）/取消未停如实上报。提交≠完成、
 取消≠已停、隔离 session、受控工具（零工具集）、版本不支持 fail closed
-均有真实验证 + 单测双覆盖。命令与数字见 VALIDATION.md §5e。
+均有真实验证 + 单测双覆盖。命令与数字见 01/VALIDATION.md §5e。
 
 已知缺口（不阻塞 P6，按阶段补）：
 
@@ -527,7 +527,7 @@ pi-coding-agent 1.0.4、node v22.19.0、tokenrhythm/glm-5.3-flash）真实
   `integrity_check`/`schema_version`/`export_profile_data`/
   `wipe_profile_data`。
 - **部署与发布**：`deploy/`（systemd 加固 unit、Containerfile + compose
-  含 healthcheck、launchd plist、README）；`compatibility-lock.json` +
+  含 healthcheck、launchd plist、README）；`01/compatibility-lock.json`（历史记录）+
   `docs/COMPATIBILITY.md`（Hermes 0.21.5 / Pi 1.0.4 锁定、e2e_verified
   如实为 false）；`tools/package_gate.py`（对 wheel/sdist 本体做禁止
   路径/hash/密钥扫描，PEM 检测为完整块结构避免误报）；`tools/gen_sbom.py`
@@ -605,7 +605,7 @@ pi-coding-agent 1.0.4、node v22.19.0、tokenrhythm/glm-5.3-flash）真实
   版本统一为 v0.1.1（`pyproject.toml` / `__init__.__version__` /
   `packages/client-ts/package.json`）。
 
-验收（命令与结果见 `VALIDATION.md` §6）：
+验收（命令与结果见 `01/VALIDATION.md` §6）：
 
 - `python3 -m unittest discover -s tests` → **608 项全部通过**。
 - 迁移升级：真实 v0.1.0 库（schema 6 + 代表性行）原地升级，行数不丢、
@@ -638,4 +638,3 @@ P7 未做/边界（如实记录，不作为已完成能力）：
   grant 撤销/feedback 路径，文档已注明语义边界）。
 - skills.explain 的 `binaries` 字段依赖 sidecar 记录；运行时 PATH 探测
   未实现（技术状态到 parsed 为止）。
-

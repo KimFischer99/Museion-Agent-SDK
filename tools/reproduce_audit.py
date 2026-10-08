@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Reproduce the legacy skill audit (audit/skills.json) and the selected-source
-hash manifest (audit/selected-source-manifest.json) from a local copy of the
+"""Reproduce the legacy skill audit (tests/fixtures/skills.json) and the selected-source
+hash manifest (tests/fixtures/selected-source-manifest.json) from a local copy of the
 vendor snapshot directory. Read-only: this tool never writes to the audit
 directory or the source directory.
 
@@ -22,7 +22,7 @@ note. Judgment constants are enforced: technical_status,
 distribution_status, full_prompt_included.
 
 Usage:
-  python tools/reproduce_audit.py --source-dir private-vendor/muse-sdk --audit-dir audit
+  python tools/reproduce_audit.py --source-dir 01/private-vendor/muse-sdk --audit-dir tests/fixtures
 Exit code 0 = audit is reproducible from this directory; 1 = mismatches.
 """
 
@@ -431,8 +431,8 @@ def verify_source_manifest(source_dir: Path, manifest: dict) -> dict[str, object
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-dir", type=Path, default=Path("private-vendor/muse-sdk"))
-    parser.add_argument("--audit-dir", type=Path, default=Path("audit"))
+    parser.add_argument("--source-dir", type=Path, default=Path("01/private-vendor/muse-sdk"))
+    parser.add_argument("--audit-dir", type=Path, default=Path("tests/fixtures"))
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     args = parser.parse_args(argv)
 

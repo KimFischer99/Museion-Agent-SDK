@@ -1,7 +1,7 @@
 # 兼容矩阵（P7 / SPEC §17.3.3）
 
-机器可读版本：仓库根目录 `compatibility-lock.json`。本文件是人读摘要；
-两者不一致时以 lock 文件 + VALIDATION.md 的实测证据为准。
+本文记录支持范围、已验证的宿主版本与未验证项。
+宿主版本记录不由 SDK 自动读取或锁定；部署方升级宿主后需重新验证兼容性。
 
 ## 支持范围（v0.1 边界）
 
@@ -12,15 +12,15 @@
 | Python | ≥ 3.11 | 实测 3.14.4（macOS）；3.11/3.12 版本矩阵未跑，如实标注 |
 | 运行时依赖 | 仅标准库 | 可选 extra：`jsonschema`（conformance 工具用，不影响运行） |
 
-## 外部宿主（锁定版本，真实服务验证）
+## 外部宿主（已验证版本）
 
-| 宿主 | 锁定版本 | 验证方式 | 结果 |
+| 宿主 | 已验证版本 | 验证方式 | 结果 |
 |---|---|---|---|
-| Hermes Runs gateway | 0.21.5+8493.g9b38eb1 (2026.9.24) | P5 真实服务探针 1–5（capabilities / submit / idempotency replay / cancel / key conflict） | 5/5 PASS（见 VALIDATION §5e） |
+| Hermes Runs gateway | 0.21.5+8493.g9b38eb1 (2026.9.24) | P5 真实服务探针 1–5（capabilities / submit / idempotency replay / cancel / key conflict） | 5/5 PASS |
 | @earendil-works/pi-coding-agent | 1.0.4 | P5 真实服务探针 6–8（initialize / run envelope / cancel 语义） | 3/3 PASS |
 
-宿主版本升级规则：升级前必须重跑 `tools/validate_p5_real.py` 的探针集，
-通过后才更新 `compatibility-lock.json` 的锁定版本。协议大版本不匹配时
+宿主版本升级规则：升级后重跑 `tools/validate_p5_real.py` 的探针集，
+通过后再更新本文的已验证版本。协议大版本不匹配时
 控制面 `system.hello` 直接拒绝（fail closed）。
 
 ## 连接器与通知通道
@@ -36,6 +36,8 @@
 
 ## Skills 兼容层
 
+- 产品附带 88 份 Skill 入口及目录内资源（377 个源文件），作为被动部署参考；默认不加载、不执行。
+- 安装后的目录为 `proactive_sdk/_deployment_reference/skills/`；部署方可显式选择兼容导入。
 - 审计：88 个入口，`tools/reproduce_audit.py` 可复现。
 - 导入管线：scan → sidecar → install 与审计一致（P6，88/88 字段级一致）。
 - 端到端能力验证：**0 个**。`technical_status` 到 `parsed` 为止；

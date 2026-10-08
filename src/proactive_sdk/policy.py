@@ -25,8 +25,11 @@ transaction and topic mutes right before the effect (§10.4 投递前复验).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from .artifacts import ArtifactRefError, missing_artifact_refs, normalize_artifact_ref
@@ -36,6 +39,7 @@ from .contracts import (
     OBLIGATION_DUE,
     ErrorCode,
     PASError,
+    canonical_json,
     content_hash,
 )
 from .store import Store
@@ -466,7 +470,13 @@ class PolicyEngine:
             return self._suppressed("channel_not_owner_bound")
 
         topic = arguments.get("topic")
+        preference_reason = self._proactive_preference_reason(topic, obligation)
+        if preference_reason:
+            return self._suppressed(preference_reason)
         reason = self._suppression_checks(proposal, topic, delivery_policy, now_ms)
+        if reason:
+            return self._suppressed(reason)
+        news_snapshot, reason = self._news_search_snapshot_binding(proposal, run_id, now_ms=now_ms)
         if reason:
             return self._suppressed(reason)
 
@@ -494,6 +504,9 @@ class PolicyEngine:
             proposal=proposal,
             payload=payload,
         )
+        if news_snapshot is not None:
+            request["news_search_snapshot"] = news_snapshot
+        request["obligation"] = obligation
         entry = self._entry(
             proposal=proposal,
             kind="notify_self",
@@ -720,12 +733,106 @@ class PolicyEngine:
         if self.store.fact_handled(proposal.get("fact_id") or ""):
             return "already_handled"
         if isinstance(topic, str) and topic:
-            if self.store.topic_is_muted(topic, now_ms=now_ms):
+            if self.store.topic_is_muted(topic, now_ms=now_ms) or self.store.topic_is_muted(topic.strip().casefold(), now_ms=now_ms):
                 return "topic_muted"
             muted_topics = delivery_policy.get("muted_topics")
             if isinstance(muted_topics, list) and topic in muted_topics:
                 return "topic_muted"
         return None
+
+    def _proactive_preference_reason(self, topic: Any, obligation: str) -> str | None:
+        """Enforce mutable user reach-out preferences for opportunistic notifications."""
+        if obligation == OBLIGATION_DUE:
+            return None
+        preferences = self.store.get_proactive_preferences()
+        if not preferences["enabled"]:
+            return "proactive_disabled"
+        allowed_topics = preferences["allowed_topics"]
+        if allowed_topics is not None:
+            candidate = topic.strip().casefold() if isinstance(topic, str) else ""
+            if candidate not in allowed_topics:
+                return "topic_not_allowed"
+        return None
+
+    def _news_search_snapshot_binding(
+        self, proposal: dict[str, Any], run_id: str, *, now_ms: int
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Bind news notifications to the fresh snapshot they cite.
+
+        News snapshots are special here: their short freshness window must
+        survive the queue so dispatch can suppress a delayed headline.
+        Other sources continue using the existing delivery policy.
+        """
+        fact_id = proposal.get("fact_id")
+        evidence_refs = proposal.get("evidence_refs") or []
+        prefix = "snapshot:news-search:"
+        refs = [ref for ref in evidence_refs if isinstance(ref, str) and ref.startswith(prefix)]
+        if not (isinstance(fact_id, str) and fact_id.startswith("news:") or refs):
+            return None, None
+        if not isinstance(fact_id, str) or not fact_id.startswith("news:") or not refs:
+            return None, "news_snapshot_unverified"
+
+        run = self.store.get_run(run_id)
+        pack = self.store.get_context_pack(run["context_ref"]) if run and run.get("context_ref") else None
+        if pack is None:
+            return None, "news_snapshot_unverified"
+        pack_sources = {
+            source.get("snapshot_ref"): source
+            for source in pack.get("sources", [])
+            if isinstance(source, dict)
+            and source.get("source_id") == "news-search"
+            and source.get("account_ref") == "account:public"
+        }
+        snapshots = {
+            snapshot.snapshot_id: snapshot
+            for snapshot in self.store.snapshots_for("news-search", "account:public", limit=64)
+        }
+        matching: list[tuple[str, int]] = []
+        for ref in refs:
+            source = pack_sources.get(ref)
+            snapshot_id = ref.removeprefix(prefix)
+            snapshot = snapshots.get(snapshot_id)
+            if (
+                source is None
+                or snapshot is None
+                or snapshot.sensitivity != "public"
+                or snapshot.tombstone
+            ):
+                continue
+            try:
+                content = json.loads(self.store.snapshot_content(snapshot_id) or "")
+                title = content["title"]
+                url = content["url"]
+                description = content["description"]
+                published_at = content["published_at"]
+                if not all(isinstance(value, str) for value in (title, url, description, published_at)):
+                    continue
+                stable_fields = {
+                    "description": description,
+                    "published_at": published_at,
+                    "title": title,
+                    "url": url,
+                }
+                item_fact_id = "news:" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+                revision = "sha256:" + hashlib.sha256(
+                    canonical_json(stable_fields).encode("utf-8")
+                ).hexdigest()[:32]
+                fresh_until_ms = int(datetime.fromisoformat(source["fresh_until"].replace("Z", "+00:00")).timestamp() * 1000)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if item_fact_id == fact_id and revision == proposal.get("revision"):
+                matching.append((ref, fresh_until_ms))
+        if not matching:
+            return None, "news_snapshot_unverified"
+        fresh = [(ref, until) for ref, until in matching if until > now_ms]
+        if not fresh:
+            return None, "news_snapshot_stale"
+        ref, fresh_until_ms = max(fresh, key=lambda item: item[1])
+        return {
+            "source_id": "news-search",
+            "snapshot_ref": ref,
+            "fresh_until_ms": fresh_until_ms,
+        }, None
 
     def _timing(
         self,
@@ -957,4 +1064,39 @@ class PolicyEngine:
         fact_id = payload.get("fact_id")
         if self.store.fact_handled(fact_id or ""):
             return "already_handled"
+        context = self.store.action_delivery_context(lease.action_id)
+        request = context.get("request") or {} if context is not None else {}
+        if request.get("kind") == "notify_self":
+            topic = (request.get("arguments") or {}).get("topic")
+            if isinstance(topic, str) and (
+                self.store.topic_is_muted(topic, now_ms=now_ms)
+                or self.store.topic_is_muted(topic.strip().casefold(), now_ms=now_ms)
+            ):
+                return "topic_muted"
+            preference_reason = self._proactive_preference_reason(
+                topic,
+                request.get("obligation") or (context.get("obligation") if context is not None else None) or "opportunistic",
+            )
+            if preference_reason:
+                return preference_reason
+            fact_id = request.get("fact_id")
+            evidence_refs = request.get("evidence_refs") or []
+            is_news = (
+                isinstance(fact_id, str) and fact_id.startswith("news:")
+            ) or any(
+                isinstance(ref, str) and ref.startswith("snapshot:news-search:")
+                for ref in evidence_refs
+            )
+            if is_news:
+                binding = request.get("news_search_snapshot")
+                if (
+                    not isinstance(binding, dict)
+                    or binding.get("source_id") != "news-search"
+                    or binding.get("snapshot_ref") not in evidence_refs
+                    or not isinstance(binding.get("fresh_until_ms"), int)
+                    or isinstance(binding.get("fresh_until_ms"), bool)
+                ):
+                    return "news_snapshot_unbound"
+                if binding["fresh_until_ms"] <= now_ms:
+                    return "news_snapshot_stale"
         return None

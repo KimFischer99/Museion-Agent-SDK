@@ -58,6 +58,7 @@ from .contracts import (
 from .context import (
     ContextPackBuilder,
     EphemeralMemoryPort,
+    SQLiteMemoryPort,
     MemoryPort,
     SnapshotMaterializer,
     SourceEntry,
@@ -283,6 +284,7 @@ __all__ = [
     # P3 context
     "ContextPackBuilder",
     "EphemeralMemoryPort",
+    "SQLiteMemoryPort",
     "MemoryPort",
     "SnapshotMaterializer",
     "SourceEntry",

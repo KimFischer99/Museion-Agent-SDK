@@ -1,9 +1,9 @@
 """Legacy Skill importer (SPEC §11; P6 Skills 能力).
 
-BYO 导入流程（§11.2）：本地显式选择目录 → 安全遍历与 hash → legacy
+显式导入流程（§11.2）：选择随包部署参考或其他本地目录 → 安全遍历与 hash → legacy
 frontmatter 解析 → 无碰撞 canonical id / aliases → 依赖闭包 →
 compatibility sidecar → 导入报告。原目录只读；本模块从不写入被导入的
-目录，也从不把原文件内容复制进包/仓库（AGENTS.md 分发门禁）。
+目录；随包参考资源由构建配置附带，本模块不会自动加载或执行它们。
 
 设计要点：
 
@@ -491,7 +491,7 @@ class LegacySkillImporter:
 def audit_consistency(
     report: dict[str, Any], audit: dict[str, Any]
 ) -> dict[str, Any]:
-    """Compare an import report against audit/skills.json. Recomputable
+    """Compare an import report against tests/fixtures/skills.json. Recomputable
     fields only; platform/token heuristics stay informational (same rule as
     tools/reproduce_audit.py)."""
     by_path = {s["source_path"]: s for s in report["skills"]}

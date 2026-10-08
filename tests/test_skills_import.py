@@ -4,7 +4,7 @@ Cover the parsing dialect (inline JSON, block maps, block lists,
 continuations), canonical ids/aliases/collisions, dependency closure
 (including nested-artifact shared assets), sidecar shape, store
 recording, and — when the private-vendor snapshot is present —
-exact consistency with audit/skills.json (88 entries, issue counts,
+exact consistency with tests/fixtures/skills.json (88 entries, issue counts,
 hashes).
 """
 
@@ -26,8 +26,8 @@ from proactive_sdk.skills import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-VENDOR = REPO / "private-vendor" / "muse-sdk"
-AUDIT = json.loads((REPO / "audit" / "skills.json").read_text(encoding="utf-8"))
+VENDOR = REPO / "src" / "proactive_sdk" / "_deployment_reference"
+AUDIT = json.loads((REPO / "tests" / "fixtures" / "skills.json").read_text(encoding="utf-8"))
 
 
 class FrontmatterTests(unittest.TestCase):

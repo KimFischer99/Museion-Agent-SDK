@@ -9,6 +9,8 @@ import asyncio
 import json
 import os
 import sys
+from importlib.resources import files
+from importlib.metadata import distribution
 
 from proactive_sdk import Job, ProactiveAgent
 from proactive_sdk.contracts import Decision, RunRequest
@@ -39,6 +41,10 @@ class SmokeExecutor(ToolLoopExecutor):
 
 
 async def main() -> int:
+    assert not any(str(p).startswith("proactive_sdk/_deployment_reference/")
+                   for p in distribution("proactive-sdk").files)
+    assert files("proactive_sdk").joinpath("pi_worker", "pi_worker.ts").is_file()
+    assert not any(name.startswith("proactive_sdk._deployment_reference") for name in sys.modules)
     state_dir = os.environ["PAS_SMOKE_STATE"]
     agent = ProactiveAgent(
         state_dir=state_dir,
@@ -62,8 +68,10 @@ async def main() -> int:
         assert status["jobs"]["total"] == 1, status
         assert status["health"]["alive"] is True
         assert isinstance(report, dict)
+        assert agent.store.list_skill_installs() == ()
         data = {
             "facade_tick": "ok",
+            "deployment_reference_skills": 0,
             "jobs": status["jobs"],
             "metrics_keys": sorted(status["metrics"]),
         }

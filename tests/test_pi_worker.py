@@ -52,9 +52,8 @@ class PiWorkerConfigTests(unittest.TestCase):
         with self.assertRaises(PASError):
             _config(pi_entry="")
 
-    def test_allowed_tools_required(self):
-        with self.assertRaises(PASError):
-            _config(allowed_tools=())
+    def test_allowed_tools_validate_and_can_disable_all_tools(self):
+        self.assertEqual(_config(allowed_tools=()).allowed_tools, ())
         with self.assertRaises(PASError):
             _config(allowed_tools=("read", ""))
 

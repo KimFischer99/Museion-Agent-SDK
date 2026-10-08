@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pas",
         description="Proactive personal agent runtime (PAS) — one profile, one state directory.",
         epilog=(
-            "serve/tick need an app module that builds a ProactiveAgent "
+            "serve/tick/proactive need an app module that builds a ProactiveAgent "
             "(--app module:factory). All other commands operate on the state "
             "directory directly and are safe alongside a running daemon."
         ),
@@ -82,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
     tick = add("tick", help_text="run one admission→analysis→delivery pass, then exit")
     tick.add_argument("--app", required=True, help="module:factory returning a ProactiveAgent")
     tick.add_argument("--max-runs", type=int, default=None, help="max runs to process in this pass")
+
+    proactive = add("proactive", help_text="trusted interest and notification controls")
+    proactive.add_argument("text", help="authenticated user's own text; may call the configured model")
+    proactive.add_argument("--app", required=True, help="module:factory returning a ProactiveAgent")
+    proactive.add_argument("--actor", default="cli")
+    proactive.add_argument("--inbox-id", help="notification being acknowledged as already handled")
 
     doctor = add("doctor", help_text="check environment, state dir, locks, socket and config")
     doctor.add_argument("--deep", action="store_true", help="also probe the control-plane socket")
@@ -174,8 +180,9 @@ def build_parser() -> argparse.ArgumentParser:
     notes.add_argument("action", choices=["list", "read", "feedback"])
     notes.add_argument("inbox_id", nargs="?")
     notes.add_argument("--unread-only", action="store_true")
-    notes.add_argument("--kind", required=False, help="feedback kind (mute_topic|unmute_topic|handled|seen)")
+    notes.add_argument("--kind", choices=["mute_topic", "unmute_topic", "handled", "not_useful", "wrong_target"])
     notes.add_argument("--topic", help="topic for mute_topic/unmute_topic feedback")
+    notes.add_argument("--fact-id", help="explicit fact for handled feedback without an inbox item")
     notes.add_argument("--actor", default="cli", help="authenticated actor string recorded with feedback")
 
     skills = add("skills", help_text="skill compatibility layer: audit|import|explain")
@@ -332,6 +339,21 @@ def _cmd_tick(args: argparse.Namespace) -> int:
 
     report = asyncio.run(_run())
     _print(report, _json_flag(args))
+    return 0
+
+
+def _cmd_proactive(args: argparse.Namespace) -> int:
+    from .proactive import ProactiveController
+
+    async def run() -> dict:
+        agent = _load_app(args)
+        try:
+            controller = getattr(agent, "proactive", None) or ProactiveController(agent)
+            return await controller.handle_input(args.text, actor=args.actor, inbox_id=args.inbox_id)
+        finally:
+            await agent.close()
+
+    _print(asyncio.run(run()), _json_flag(args))
     return 0
 
 
@@ -707,10 +729,13 @@ def _cmd_notifications(args: argparse.Namespace) -> int:
                 raise PASError(
                     ErrorCode.INVALID_CONFIG, "notifications feedback needs --kind", scope="cli"
                 )
-            scope = {"topic": args.topic} if args.topic else {}
-            record = agent.notifications_feedback(
-                kind=args.kind, actor=args.actor, message_id=args.inbox_id, scope=scope
-            )
+            scope = {"topic": args.topic.strip().casefold()} if args.topic else {}
+            if args.fact_id:
+                scope["fact_id"] = args.fact_id
+            if args.inbox_id:
+                record = agent.feedback_from_inbox(args.inbox_id, kind=args.kind, actor=args.actor, scope=scope)
+            else:
+                record = agent.notifications_feedback(kind=args.kind, actor=args.actor, scope=scope)
             _print(record, _json_flag(args))
     finally:
         agent.store.close()
@@ -930,6 +955,7 @@ def _cmd_version(_args: argparse.Namespace) -> int:
 _COMMANDS = {
     "serve": _cmd_serve,
     "tick": _cmd_tick,
+    "proactive": _cmd_proactive,
     "doctor": _cmd_doctor,
     "status": _cmd_status,
     "jobs": _cmd_jobs,

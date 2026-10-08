@@ -70,7 +70,7 @@ class UserWakeCase(unittest.TestCase):
         self.envelope = lambda: _envelope()
         self.agent = ProactiveAgent(
             state_dir=Path(self.tmp.name),
-            executor=HostBridge(self.host),
+            executor=HostBridge(self.host, capabilities=("memory.read",)),
             clock=self.clock,
             timezone="UTC",
             locale="en",
@@ -87,6 +87,7 @@ class UserWakeCase(unittest.TestCase):
             scope={},
             consent_evidence_ref="consent:wake",
         )
+        self.agent.grant("memory.read")
 
     def tearDown(self):
         asyncio.run(self.agent.close())

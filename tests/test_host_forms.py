@@ -234,6 +234,7 @@ class HostFormsThroughTheFacadeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _prepare(self, agent: ProactiveAgent) -> None:
+        agent.grant("memory.read")
         asyncio.run(
             agent.pack_builder.memory.remember(
                 MemoryEntry(memory_id=MEMORY_ID, content="用户在关注这件事", source="user")
@@ -308,7 +309,7 @@ class HostFormsThroughTheFacadeTests(unittest.TestCase):
         driver = CallableHostDriver(lambda _p: envelope)
         agent = ProactiveAgent(
             state_dir=Path(self.tmp.name),
-            executor=HostBridge(driver),
+            executor=HostBridge(driver, capabilities=("memory.read",)),
             clock=self.clock,
             timezone="UTC",
             locale="en",

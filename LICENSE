@@ -23,7 +23,8 @@ SOFTWARE.
 ---
 
 Scope note: this license covers the original code and documents authored in
-this repository (src/, schemas/, tests/, tools/, examples/, docs/, audit/
-metadata). It does NOT cover anything under private-vendor/, which is
-user-provided reference material kept outside version control; see
-docs/LICENSES.md.
+this repository (src/, schemas/, tests/ including fixture metadata, tools/,
+examples/, docs/), excluding src/proactive_sdk/_deployment_reference/skills/.
+The separately delivered Skill reference corpus and local material under 01/
+retain their original provenance and licensing status. Skills are excluded
+from the runtime wheel; see skills/NOTICE.md in the release for their scope.

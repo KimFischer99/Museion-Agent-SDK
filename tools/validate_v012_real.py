@@ -263,10 +263,10 @@ async def validate_hermes() -> bool:
 
 
 async def validate_pi() -> bool:
-    node = os.environ.get("PAS_NODE_BIN", "/home/anoki1018/nodejs/bin/node")
+    node = os.environ.get("PAS_NODE_BIN", str(Path.home() / "nodejs/bin/node"))
     pi_entry = os.environ.get(
         "PAS_PI_ENTRY",
-        "/home/anoki1018/nodejs/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+        str(Path.home() / "nodejs/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js"),
     )
     scratch = os.environ.get("PAS_PI_SCRATCH") or tempfile.mkdtemp(prefix="pas-v012-pi-")
     worker_ts = str(

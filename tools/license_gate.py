@@ -6,7 +6,7 @@ Blocks a release when:
      prefixes in BANNED_PREFIXES, plus __MACOSX/, .DS_Store);
   2. any tracked file's SHA-256 matches a hash recorded in the audit
      manifests (selected-source-manifest.json, skills.json) or the known
-     private helper hash;
+     private helper hash outside the exact registered deployment-reference files;
   3. docs/LICENSES.md is missing, or its license-gate marker says
      ``status: blocked`` (unknown-permission content present).
 
@@ -24,11 +24,50 @@ import subprocess
 import sys
 from pathlib import Path
 
-BANNED_PREFIXES = ("private-vendor/", "muse-sdk/", "muse-reuse/", "__MACOSX/")
-BANNED_BASENAMES = {".DS_Store"}
+BANNED_PREFIXES = ("01/", "audit/", "reuse/", "private-vendor/", "muse-refer/", "muse-sdk/", "muse-reuse/", "__MACOSX/")
+BANNED_BASENAMES = {".DS_Store", "AGENTS.md", "AUDIT_AND_REUSE.md", "SPEC.md", "VALIDATION.md"}
 HELPER_SHA256 = "c87af221181a1559e3adcb0cdd601f5be5d4bd91eec2fe0597c09dc27558e741"
 GATE_MARKER_RE = re.compile(r"<!--\s*license-gate\s*(.*?)-->", re.DOTALL)
 STATUS_RE = re.compile(r"^\s*status:\s*(\w+)\s*$", re.MULTILINE)
+REFERENCE_PREFIX = "proactive_sdk/_deployment_reference/"
+REFERENCE_METADATA = {REFERENCE_PREFIX + name for name in ("README.md", "NOTICE.md", "manifest.json")}
+
+
+def reference_tree_hash(hashes: dict[str, str]) -> str:
+    return hashlib.sha256("".join(f"{path}\0{hashes[path]}\n" for path in sorted(hashes)).encode()).hexdigest()
+
+
+def load_reference_hashes(repo: Path) -> dict[str, str]:
+    """Validate one tree checksum; calculate per-file hashes only for the build gate."""
+    root = repo / "src" / REFERENCE_PREFIX
+    doc = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    if doc.get("purpose") != "deployment_reference" or doc.get("auto_load") is not False or doc.get("auto_execute") is not False:
+        raise ValueError("reference manifest must declare passive deployment data")
+    hashes: dict[str, str] = {}
+    if (root / "skills").is_symlink():
+        raise ValueError("reference directory must not be a symlink")
+    for path in (root / "skills").rglob("*"):
+        if path.is_symlink():
+            raise ValueError("reference files must not be symlinks")
+        if path.is_file():
+            hashes[REFERENCE_PREFIX + path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if doc["file_count"] != len(hashes) or doc["skill_count"] != sum(p.endswith("/SKILL.md") for p in hashes):
+        raise ValueError("reference manifest counts disagree")
+    if reference_tree_hash(hashes) != doc.get("content_sha256"):
+        raise ValueError("reference directory checksum mismatch")
+    return hashes
+
+
+def reference_member_errors(member_hashes: dict[str, str], expected: dict[str, str]) -> list[str]:
+    problems = []
+    missing = sorted((set(expected) | REFERENCE_METADATA) - set(member_hashes))
+    if missing:
+        problems.append(f"missing {len(missing)} deployment reference files: {missing[:5]}")
+    for path, digest in member_hashes.items():
+        if path.startswith(REFERENCE_PREFIX) and path not in REFERENCE_METADATA:
+            if expected.get(path) != digest:
+                problems.append(f"unregistered or changed deployment reference: {path}")
+    return problems
 
 
 def banned_tracked_paths(tracked: list[str]) -> list[str]:
@@ -47,8 +86,11 @@ def collect_forbidden_hashes(manifest: dict, skills_doc: dict) -> set[str]:
     return hashes
 
 
-def find_forbidden_hash_matches(tracked_hashes: dict[str, str], forbidden: set[str]) -> list[str]:
-    return sorted(path for path, digest in tracked_hashes.items() if digest in forbidden)
+def find_forbidden_hash_matches(
+    tracked_hashes: dict[str, str], forbidden: set[str], allowed_references: dict[str, str] | None = None
+) -> list[str]:
+    allowed = allowed_references or {}
+    return sorted(path for path, digest in tracked_hashes.items() if digest in forbidden and allowed.get(path) != digest)
 
 
 def read_gate_status(licenses_text: str) -> str | None:
@@ -93,15 +135,22 @@ def main(argv: list[str] | None = None) -> int:
         if file_path.is_file():
             tracked_hashes[relpath] = hashlib.sha256(file_path.read_bytes()).hexdigest()
 
-    manifest_path = repo / "audit/selected-source-manifest.json"
-    skills_path = repo / "audit/skills.json"
+    manifest_path = repo / "tests/fixtures/selected-source-manifest.json"
+    skills_path = repo / "tests/fixtures/skills.json"
     if not manifest_path.is_file() or not skills_path.is_file():
         print("license_gate: audit manifests missing; cannot build forbidden-hash set", file=sys.stderr)
         return 2
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     skills_doc = json.loads(skills_path.read_text(encoding="utf-8"))
     forbidden = collect_forbidden_hashes(manifest, skills_doc)
-    hash_matches = find_forbidden_hash_matches(tracked_hashes, forbidden)
+    try:
+        references = load_reference_hashes(repo)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        print(f"license_gate: invalid deployment reference manifest: {exc}", file=sys.stderr)
+        return 2
+    package_hashes = {path.removeprefix("src/"): digest for path, digest in tracked_hashes.items()}
+    blocked.extend(reference_member_errors(package_hashes, references))
+    hash_matches = find_forbidden_hash_matches(tracked_hashes, forbidden, {"src/" + p: h for p, h in references.items()})
     if hash_matches:
         blocked.append(f"tracked files match recorded private-source hashes: {hash_matches}")
 

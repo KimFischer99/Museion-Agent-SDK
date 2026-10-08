@@ -206,7 +206,15 @@ class ReproduceAuditFixtureTests(unittest.TestCase):
 class LicenseGateUnitTests(unittest.TestCase):
     def test_banned_paths(self):
         tracked = [
+            "README.md",
+            "AGENTS.md",
+            "AUDIT_AND_REUSE.md",
             "SPEC.md",
+            "VALIDATION.md",
+            "audit/helper-tests.log",
+            "reuse/extract_original.py",
+            "01/private-vendor/muse-sdk/skills/gmail/SKILL.md",
+            "01/muse-refer/Ling.md",
             "private-vendor/muse-sdk/skills/gmail/SKILL.md",
             "muse-sdk/README.md",
             "muse-reuse/hatch_hook_runtime.sh",
@@ -218,6 +226,14 @@ class LicenseGateUnitTests(unittest.TestCase):
         self.assertEqual(
             violations,
             [
+                "AGENTS.md",
+                "AUDIT_AND_REUSE.md",
+                "SPEC.md",
+                "VALIDATION.md",
+                "audit/helper-tests.log",
+                "reuse/extract_original.py",
+                "01/private-vendor/muse-sdk/skills/gmail/SKILL.md",
+                "01/muse-refer/Ling.md",
                 "private-vendor/muse-sdk/skills/gmail/SKILL.md",
                 "muse-sdk/README.md",
                 "muse-reuse/hatch_hook_runtime.sh",

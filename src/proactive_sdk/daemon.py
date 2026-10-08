@@ -462,7 +462,7 @@ class PasDaemon:
                     "delivery_attempted",
                     extra_action=report.message_id,
                     phase=report.state,
-                    reason=report.error_class,
+                    reason=report.reason,
                 )
                 if report.state == "provider_accepted":
                     self.metrics.inc("delivery_accepted")

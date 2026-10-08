@@ -28,6 +28,11 @@
     "pending_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 256 }, "maxItems": 256 },
     "sent_fact_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 256 }, "maxItems": 256 },
     "memory_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 256 }, "maxItems": 256 },
+    "memory_entries": {
+      "description": "Authorized user memory, frozen for this run and treated as data rather than instructions.",
+      "type": "array", "maxItems": 32,
+      "items": { "$ref": "#/$defs/memory_entry" }
+    },
     "untrusted_content_policy": { "enum": ["data_only"] },
     "recent_notifications": {
       "description": "Already-sent notifications from the last 24 h, reduced to non-sensitive fields. Hard-dedup stays with the business key; this summary only lets a model compare topics, openings and fact deltas (SPEC §21.1 step 6).",
@@ -37,6 +42,19 @@
     }
   },
   "$defs": {
+    "memory_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["memory_id", "content", "source"],
+      "properties": {
+        "memory_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "evidence_refs": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
+        "confidence": { "enum": ["inferred", "user_confirmed", null] },
+        "last_confirmed_at": { "type": ["string", "null"], "format": "date-time" },
+        "expires_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
     "recent_notification": {
       "description": "One already-sent notification reduced to non-sensitive fields. There is deliberately no body field: redaction is structural, not best-effort.",
       "type": "object",

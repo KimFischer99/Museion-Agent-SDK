@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .context import evidence_universe, render_context_message
 from .contracts import ErrorCode, PASError, RunBudget, RunRequest
@@ -124,7 +124,7 @@ class HostBridge:
         self,
         driver: HostDriver,
         *,
-        capabilities: frozenset[str] | set[str] | tuple[str, ...] = (),
+        capabilities: frozenset[str] | set[str] | tuple[str, ...] | Callable[[], Any] = (),
         tool_names: tuple[str, ...] = (),
         budget: RunBudget | None = None,
         host_timeout_s: float = _DEFAULT_HOST_TIMEOUT_S,
@@ -140,7 +140,7 @@ class HostBridge:
         if not isinstance(host_timeout_s, (int, float)) or host_timeout_s <= 0:
             raise PASError(ErrorCode.INVALID_CONFIG, "host_timeout_s must be positive")
         self.driver = driver
-        self._capabilities = frozenset(capabilities)
+        self._capabilities = capabilities if callable(capabilities) else frozenset(capabilities)
         self._tool_names = tuple(tool_names)
         self._budget = budget or RunBudget()
         self.host_timeout_s = float(host_timeout_s)
@@ -157,11 +157,14 @@ class HostBridge:
 
     async def context(self) -> ExecutorContext:
         return ExecutorContext(
-            capabilities=self._capabilities,
+            capabilities=frozenset(self._capabilities() if callable(self._capabilities) else self._capabilities),
             tool_names=self._tool_names,
             budget=self._budget,
             external_tool_broker=self.external_tool_broker,
         )
+
+    async def close(self) -> None:
+        await self.driver.close()
 
     async def execute(
         self,

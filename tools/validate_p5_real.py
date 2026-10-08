@@ -155,7 +155,7 @@ async def validate_pi() -> bool:
     node = os.environ.get("PAS_NODE_BIN", "node")
     pi_entry = os.environ.get(
         "PAS_PI_ENTRY",
-        "/home/anoki1018/nodejs/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+        str(Path.home() / "nodejs/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js"),
     )
     scratch = os.environ.get("PAS_PI_SCRATCH") or tempfile.mkdtemp(prefix="pas-p5-pi-")
     worker_ts = str(

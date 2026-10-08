@@ -1,0 +1,3 @@
+# Preserve the original reference bytes for provenance hashes on every platform.
+# Their TSV empty columns and original notices retain source trailing whitespace.
+src/proactive_sdk/_deployment_reference/skills/** -text whitespace=-blank-at-eol

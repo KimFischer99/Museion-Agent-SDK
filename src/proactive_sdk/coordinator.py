@@ -314,6 +314,7 @@ class ProactiveCoordinator:
                 now_ms=now_ms,
                 allow_stale=not require_fresh,
                 recent_notifications=recent,
+                include_memory="memory.read" in context.capabilities,
             )
         except PASError as exc:
             if exc.code == ErrorCode.STALE_CONTEXT and mode == "heartbeat":
@@ -424,11 +425,15 @@ class ProactiveCoordinator:
         configuration error the user must see, not a silent no-op.
         """
         all_entries = self.registry.entries()
+        default_entries = tuple(
+            entry for entry in all_entries
+            if not getattr(entry.source, "requires_explicit_selection", False)
+        )
         if job is None:
-            return all_entries
+            return default_entries
         wanted = job.task.get("refresh_source_ids")
         if not wanted:
-            return all_entries
+            return default_entries
         by_id = {entry.source_id: entry for entry in all_entries}
         missing = [source_id for source_id in wanted if source_id not in by_id]
         if missing:

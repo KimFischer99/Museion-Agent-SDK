@@ -150,7 +150,7 @@ class BridgeEndToEndTests(unittest.TestCase):
     def _agent(self, host: TextInTextOutHost) -> ProactiveAgent:
         agent = ProactiveAgent(
             state_dir=Path(self.tmp.name),
-            executor=_bridge(host),
+            executor=_bridge(host, capabilities=("memory.read",)),
             clock=self.clock,
             timezone="UTC",
             locale="en",

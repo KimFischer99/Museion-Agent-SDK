@@ -38,12 +38,13 @@ from .backup import create_backup, restore_backup
 from .contracts import (
     ErrorCode,
     JobSpec,
+    MemoryEntry,
     PASError,
     ProfileConfig,
     RuntimeConfig,
     content_hash,
 )
-from .context import ContextPackBuilder, EphemeralMemoryPort, SourceRegistry
+from .context import ContextPackBuilder, MemoryPort, SQLiteMemoryPort, SourceRegistry
 from .coordinator import CoordinatorConfig, ProactiveCoordinator
 from .delivery import DispatchConfig, FeedbackManager, OutboxDispatcher, WebhookNotificationSink
 from .hooks import HookRunner, HookSpec, HookSandbox, platform_sandbox
@@ -149,6 +150,7 @@ class ProactiveAgent:
         tools: tuple[Any, ...] | list[Any] = (),
         include_builtin_tools: bool = True,
         sources: tuple[Any, ...] = (),
+        memory: MemoryPort | None = None,
         sinks: tuple[Any, ...] | list[Any] = (),
         timezone: str = "UTC",
         locale: str = "en",
@@ -256,7 +258,8 @@ class ProactiveAgent:
             self._attach_sink(sink_spec)
 
         # Coordinator --------------------------------------------------------
-        self.pack_builder = ContextPackBuilder(locale=locale, timezone=timezone, memory=EphemeralMemoryPort())
+        self.pack_builder = ContextPackBuilder(locale=locale, timezone=timezone,
+                                             memory=memory if memory is not None else SQLiteMemoryPort(self.store))
         if self.executor is None:
             self.executor = self._assemble_builtin_executor(model, include_builtin_tools)
         self.coordinator = ProactiveCoordinator(
@@ -335,7 +338,12 @@ class ProactiveAgent:
         if self._closed:
             return
         self._closed = True
-        self.store.close()
+        try:
+            close = getattr(self.executor, "close", None)
+            if close is not None:
+                await close()
+        finally:
+            self.store.close()
 
     def _close_quietly(self) -> None:
         try:
@@ -826,6 +834,17 @@ class ProactiveAgent:
         self.metrics.inc("grant_revoked")
         return revoked
 
+    async def remember_user_context(self, entry: MemoryEntry) -> None:
+        """Trusted user-side memory write. Memory never creates tool or notification authority."""
+        await self.pack_builder.memory.remember(entry)
+
+    def proactive_preferences(self) -> dict[str, Any]:
+        return self.store.get_proactive_preferences()
+
+    def set_proactive_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]:
+        """Apply explicit user preferences from the trusted UI or CLI."""
+        return self.store.set_proactive_preferences(preferences)
+
     def grants_list(self, *, include_revoked: bool = False) -> list[Any]:
         return self.store.list_grants(include_revoked=include_revoked)
 
@@ -854,6 +873,24 @@ class ProactiveAgent:
         self, *, kind: str, actor: str, message_id: str | None = None, scope: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         return self.feedback.record(kind=kind, scope=scope or {}, actor=actor, message_id=message_id)
+
+    def feedback_from_inbox(
+        self, inbox_id: str, *, kind: str, actor: str, scope: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Resolve a displayed inbox item to its owned message and fact before feedback."""
+        row = self.store.db.execute(
+            "SELECT message_id, fact_id FROM inbox WHERE inbox_id=?", (inbox_id,)
+        ).fetchone()
+        if row is None:
+            raise PASError(ErrorCode.INVALID_CONFIG, "unknown inbox item", scope="feedback")
+        resolved = dict(scope or {})
+        if kind == "handled":
+            if not row["fact_id"]:
+                raise PASError(ErrorCode.INVALID_CONFIG, "this inbox item has no fact; use read or stop its job", scope="feedback")
+            if resolved.get("fact_id") not in (None, row["fact_id"]):
+                raise PASError(ErrorCode.INVALID_CONFIG, "feedback fact must match the inbox item", scope="feedback")
+            resolved["fact_id"] = row["fact_id"]
+        return self.notifications_feedback(kind=kind, actor=actor, message_id=row["message_id"], scope=resolved)
 
     # ------------------------------------------------------------------ #
     # Skills (audit / import / explain — §11, §14.1)
@@ -1134,6 +1171,8 @@ class ProactiveAgent:
     def _rebind_store(self) -> None:
         """After a restore the Store object must be rebuilt; repoint the
         kernels that hold a store reference."""
+        if isinstance(self.pack_builder.memory, SQLiteMemoryPort):
+            self.pack_builder.memory.store = self.store
         self.grants = GrantManager(self.store)
         self.channels = OwnerChannelRegistry(self.store)
         self.approvals = ApprovalManager(self.store)

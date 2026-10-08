@@ -2,14 +2,13 @@
 
 ## 前提阅读
 
-`SPEC.md`（契约与验收）、`AGENTS.md`（不可妥协约束）、`VALIDATION.md`
-（测试边界：mock 与真实集成的区别）。**不要**把 skip、mock、TODO 或
+`docs/SEMANTIC_MATRIX.md`（任务语义）、`docs/SECURITY.md`（权限边界）、
+`schemas/README.md`（公共契约）、`docs/COMPATIBILITY.md`（实测支持范围）。**不要**把 skip、mock、TODO 或
 接口桩描述成已完成能力。
 
 ## 施工约定
 
-- P0–P7 已完成；后续工作按工单/缺口推进（VALIDATION 各阶段"未做"清单
-  是当前缺口的事实来源）。
+- 后续工作按兼容矩阵中的缺口推进；区分脚本化契约测试与真实服务联调。
 - 每个 PR 保持可运行、可测试；公共 schema 变更须同步 Python、
   TypeScript（`packages/client-ts` 经 `tools/gen_client_ts.py` 生成）与
   fixtures。
@@ -25,7 +24,6 @@ python examples/reference_core.py               # 参考 demo 输出不得变化
 python examples/agent_loop_demo.py
 python examples/policy_delivery_demo.py
 python examples/skills_loop_demo.py
-python tools/reproduce_audit.py                 # 88 入口审计复现
 python tools/license_gate.py                    # 许可门禁
 python tools/gen_client_ts.py                   # client-ts 幂等
 npm exec --yes --package=typescript@5.8.3 -- tsc -p packages/client-ts/tsconfig.json
@@ -35,6 +33,11 @@ python tools/gen_sbom.py dist/*.whl -o dist/sbom.cdx.json
 python tools/install_smoke.py dist              # 全新 venv 安装 smoke
 ```
 
+`tests/fixtures/skills.json` 保留 88 入口的兼容性回归基线；
+`tests/fixtures/selected-source-manifest.json` 用于防止私有原文件混入产物。
+两者是开发与构建数据，不参与 SDK runtime。若本机保留完整私有原附件，
+可另行运行 `python tools/reproduce_audit.py` 重现原始审计；它不属于部署前置条件。
+
 ## 提交信息
 
 一行主题（阶段/工单 + 概要），正文列出：改变契约、兼容性影响、测试
@@ -42,8 +45,9 @@ python tools/install_smoke.py dist              # 全新 venv 安装 smoke
 
 ## 分发红线
 
-- `private-vendor/`（Muse 原文件、私有 helper 副本、凭据、环境文件）
+- `01/`（含 `private-vendor/` 的 Muse 原文件、私有 helper 副本、凭据、环境文件与 `muse-refer/`）
   只存本地：不进 git、不进包、不进容器、不上传公开渠道。
+- `_deployment_reference/skills/` 是明确附带的部署参考文件；保持来源清单和文件 hash 一致，不将其接入默认 runtime 或自动执行。
 - 不用他处同名 Muse SDK 的许可证覆盖本项目约束。
 - 容器/生成包做来源/许可/隐私扫描时针对产物本体（package_gate），
   不能只扫 git tracked files。

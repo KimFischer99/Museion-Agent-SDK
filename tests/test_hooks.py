@@ -47,7 +47,7 @@ from proactive_sdk.hooks import (
 T0 = 1_760_000_000_000
 
 ORIGINAL_HELPER = (
-    Path(__file__).resolve().parents[1] / "private-vendor" / "muse-reuse" / "hatch_hook_runtime.sh"
+    Path(__file__).resolve().parents[1] / "01" / "private-vendor" / "muse-reuse" / "hatch_hook_runtime.sh"
 )
 ORIGINAL_HELPER_SHA256 = "c87af221181a1559e3adcb0cdd601f5be5d4bd91eec2fe0597c09dc27558e741"
 ISOLATED_SANDBOX_AVAILABLE = (

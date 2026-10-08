@@ -36,10 +36,23 @@ export interface ContextPack {
   "pending_refs": ReadonlyArray<string>;
   "sent_fact_refs": ReadonlyArray<string>;
   "memory_refs": ReadonlyArray<string>;
+  /** Authorized user memory, frozen for this run and treated as data rather than instructions. */
+  "memory_entries"?: ReadonlyArray<Memoryentry>;
   "untrusted_content_policy": "data_only";
   /** Already-sent notifications from the last 24 h, reduced to non-sensitive fields. Hard-dedup stays with the business key; this summary only lets a model compare t */
   "recent_notifications"?: ReadonlyArray<Recentnotification>;
 }
+
+// memory_entry
+export type Memoryentry = {
+    "memory_id": string;
+    "content": string;
+    "source": string;
+    "evidence_refs"?: ReadonlyArray<string>;
+    "confidence"?: "inferred" | "user_confirmed" | null;
+    "last_confirmed_at"?: string | null;
+    "expires_at"?: string | null;
+  };
 
 // recent_notification: One already-sent notification reduced to non-sensitive fields. There is deliberately no body field: redaction is structural, not best-effort.
 export type Recentnotification = {

@@ -996,6 +996,7 @@ class ContextPack:
     memory_refs: tuple[str, ...] = ()
     untrusted_content_policy: str = "data_only"
     recent_notifications: tuple["RecentNotification", ...] = ()
+    memory_entries: tuple["MemoryEntry", ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_goal_id, str) or not 1 <= len(self.task_goal_id) <= 128:
@@ -1038,6 +1039,15 @@ class ContextPack:
                 raise PASError(
                     ErrorCode.INVALID_CONFIG, "recent_notifications entries must be typed"
                 )
+        if len(self.memory_entries) > 32:
+            raise PASError(ErrorCode.INVALID_CONFIG, "memory_entries allows at most 32 entries")
+        ids: set[str] = set()
+        for entry in self.memory_entries:
+            if not isinstance(entry, MemoryEntry) or entry.memory_id not in self.memory_refs:
+                raise PASError(ErrorCode.INVALID_CONFIG, "memory entries require a matching memory ref")
+            if entry.memory_id in ids:
+                raise PASError(ErrorCode.INVALID_CONFIG, "memory entry ids must be unique")
+            ids.add(entry.memory_id)
 
     @property
     def evidence_refs(self) -> frozenset[str]:
@@ -1048,7 +1058,7 @@ class ContextPack:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "schema_version": "1.0",
             "task": {"goal_id": self.task_goal_id, "scope": self.task_scope},
             "locale": self.locale,
@@ -1071,6 +1081,9 @@ class ContextPack:
             "recent_notifications": [entry.to_dict() for entry in self.recent_notifications],
             "untrusted_content_policy": self.untrusted_content_policy,
         }
+        if self.memory_entries:
+            out["memory_entries"] = [entry.to_dict() for entry in self.memory_entries]
+        return out
 
 
 def validate_context_pack(pack: dict[str, Any]) -> list[str]:
@@ -1091,6 +1104,19 @@ def validate_context_pack(pack: dict[str, Any]) -> list[str]:
     for name in ("pending_refs", "sent_fact_refs", "memory_refs"):
         if len(pack.get(name, [])) > 256:
             errors.append(f"{name} exceeds 256 items")
+    memories = pack.get("memory_entries", [])
+    if not isinstance(memories, (list, tuple)) or len(memories) > 32:
+        errors.append("memory_entries must contain at most 32 entries")
+        memories = []
+    memory_ids: set[str] = set()
+    for value in memories:
+        try:
+            entry = MemoryEntry.from_dict(value)
+            if entry.memory_id not in pack.get("memory_refs", []) or entry.memory_id in memory_ids:
+                errors.append("memory entries require unique matching memory refs")
+            memory_ids.add(entry.memory_id)
+        except PASError as exc:
+            errors.append(exc.safe_message)
     recent = pack.get("recent_notifications", [])
     if len(recent) > MAX_RECENT_NOTIFICATIONS:
         errors.append(f"recent_notifications exceeds {MAX_RECENT_NOTIFICATIONS} items")
@@ -1246,7 +1272,8 @@ class MemoryEntry:
             raise PASError(ErrorCode.INVALID_CONFIG, "memory content must be 1..2000 chars")
         if not isinstance(self.source, str) or not 1 <= len(self.source) <= 128:
             raise PASError(ErrorCode.INVALID_CONFIG, "memory source must be 1..128 chars")
-        if any(not isinstance(r, str) or not 1 <= len(r) <= 256 for r in self.evidence_refs):
+        if (not isinstance(self.evidence_refs, (list, tuple)) or len(self.evidence_refs) > 64
+                or any(not isinstance(r, str) or not 1 <= len(r) <= 256 for r in self.evidence_refs)):
             raise PASError(ErrorCode.INVALID_CONFIG, "evidence_refs must be 1..256-char strings")
         if self.confidence is not None and self.confidence not in (
             "inferred",
@@ -1262,6 +1289,27 @@ class MemoryEntry:
                     require_utc_timestamp(value)
                 except ValueError as exc:
                     raise PASError(ErrorCode.INVALID_CONFIG, f"{name}: {exc}") from None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "memory_id": self.memory_id, "content": self.content, "source": self.source,
+            "evidence_refs": list(self.evidence_refs), "confidence": self.confidence,
+            "last_confirmed_at": self.last_confirmed_at, "expires_at": self.expires_at,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "MemoryEntry":
+        if not isinstance(value, dict) or set(value) - {
+            "memory_id", "content", "source", "evidence_refs", "confidence", "last_confirmed_at", "expires_at"
+        }:
+            raise PASError(ErrorCode.INVALID_CONFIG, "memory entry must be an object with known fields")
+        refs = value.get("evidence_refs", ())
+        if not isinstance(refs, (list, tuple)):
+            raise PASError(ErrorCode.INVALID_CONFIG, "memory evidence_refs must be an array")
+        try:
+            return cls(**{**value, "evidence_refs": tuple(refs)})
+        except TypeError as exc:
+            raise PASError(ErrorCode.INVALID_CONFIG, "memory entry requires id, content and source") from exc
 
 
 # --------------------------------------------------------------------------- #

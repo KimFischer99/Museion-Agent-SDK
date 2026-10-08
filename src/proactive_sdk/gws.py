@@ -23,6 +23,13 @@
 
 from __future__ import annotations
 
+import json
+import math
+import os
+import selectors
+import signal
+import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +39,7 @@ __all__ = [
     "GwsAdapter",
     "GwsResult",
     "GwsConnector",
+    "SubprocessGwsConnector",
     "GwsStatus",
 ]
 
@@ -47,6 +55,115 @@ class GwsConnector:
 
     def call(self, service: str, args: list[str]) -> dict[str, Any]:
         raise NotImplementedError
+
+
+class SubprocessGwsConnector(GwsConnector):
+    """Run a configured read-only-compatible ``hatch_gws_cli`` command."""
+
+    def __init__(
+        self,
+        command: tuple[str, ...] | list[str],
+        *,
+        timeout_s: float = 10,
+        max_output_bytes: int = 1_048_576,
+    ) -> None:
+        if not isinstance(command, (tuple, list)) or not command or not all(
+            isinstance(part, str) and part for part in command
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "command must be a non-empty argv", scope="gws")
+        if (
+            not isinstance(timeout_s, (int, float))
+            or isinstance(timeout_s, bool)
+            or not math.isfinite(timeout_s)
+            or not 0 < timeout_s <= 120
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "timeout_s must be in (0, 120]", scope="gws")
+        if (
+            not isinstance(max_output_bytes, int)
+            or isinstance(max_output_bytes, bool)
+            or not 1 <= max_output_bytes <= 1_048_576
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "max_output_bytes must be 1..1MiB", scope="gws")
+        self.command = tuple(command)
+        self.timeout_s = float(timeout_s)
+        self.max_output_bytes = max_output_bytes
+
+    def call(self, service: str, args: list[str]) -> dict[str, Any]:
+        if service not in ("gmail", "calendar"):
+            raise PASError(ErrorCode.UNSUPPORTED_CAPABILITY, "unsupported GWS service", scope="gws")
+        if not isinstance(args, list) or not all(isinstance(arg, str) and arg for arg in args):
+            raise PASError(ErrorCode.INVALID_CONFIG, "args must be a list of non-empty strings", scope="gws")
+
+        try:
+            proc = subprocess.Popen(
+                [*self.command, service, *args],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
+        except (OSError, ValueError) as exc:
+            raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "could not start GWS CLI", scope="gws") from exc
+
+        assert proc.stdout is not None
+        deadline = time.monotonic() + self.timeout_s
+        output = bytearray()
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "GWS CLI timed out", scope="gws")
+                    chunk = os.read(proc.stdout.fileno(), min(65536, self.max_output_bytes + 1 - len(output)))
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > self.max_output_bytes:
+                        raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "GWS CLI output exceeded limit", scope="gws")
+            try:
+                return_code = proc.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as exc:
+                raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "GWS CLI timed out", scope="gws") from exc
+            if return_code != 0:
+                raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, f"GWS CLI exited with status {return_code}", scope="gws")
+        except PASError:
+            self._terminate(proc)
+            raise
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            self._terminate(proc)
+            raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "GWS CLI I/O failed", scope="gws") from exc
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            if proc.poll() is None:
+                self._terminate(proc)
+
+        try:
+            data = json.loads(output.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "GWS CLI returned invalid JSON", scope="gws") from exc
+        if not isinstance(data, dict):
+            raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "GWS CLI JSON must be an object", scope="gws")
+        return data
+
+    @staticmethod
+    def _terminate(proc: subprocess.Popen[bytes]) -> None:
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                if proc.poll() is None:
+                    proc.kill()
+        else:
+            if proc.poll() is None:
+                proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 @dataclass(frozen=True)

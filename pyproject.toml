@@ -27,10 +27,11 @@ pas = "proactive_sdk.service:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["proactive_sdk._deployment_reference*"]
 
 [tool.setuptools.package-data]
-proactive_sdk = ["py.typed", "migrations/*.sql"]
+proactive_sdk = ["py.typed", "migrations/*.sql", "pi_worker/*.ts"]
 
 [tool.setuptools]
-# private-vendor/ and any user material live outside src/ and are never
-# packaged; tools/package_gate.py verifies the built artifacts anyway.
+include-package-data = false
+# Skills are delivered separately in release/skills, never in the runtime wheel.

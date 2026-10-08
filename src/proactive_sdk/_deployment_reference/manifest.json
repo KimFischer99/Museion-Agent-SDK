@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "purpose": "deployment_reference",
+  "auto_load": false,
+  "auto_execute": false,
+  "source_archive": "muse-sdk.zip",
+  "source_archive_sha256": "088277b0a712fec0e2bcecb61c25e5450a277e08cd84579ec963ff2061bbde8c",
+  "skill_count": 88,
+  "file_count": 377,
+  "source_license_status": "not_verified",
+  "content_sha256": "6693a51b49632b7a982d1d9d7dea142da10bc9d1e8f7affcea641dcfbc272b35"
+}

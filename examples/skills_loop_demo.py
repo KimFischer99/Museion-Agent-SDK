@@ -4,7 +4,7 @@
 本人通知——全部落在 PAS 记账上：
 
 1. import     —— legacy importer 扫描 vendor 快照目录（private-vendor 存在时
-                 用真实 88 入口语料并与 audit/skills.json 断言一致；缺席
+                 用真实 88 入口语料并与 tests/fixtures/skills.json 断言一致；缺席
                  时用内置 mini fixture，显式注明），写 skill_installs；
 2. mail       —— GmailMailSource（scripted GwsConnector，标注 fake）→
                  coordinator L0→L1 → notify_self 提案 → 策略 → outbox →
@@ -79,13 +79,13 @@ def _mini_fixture() -> Path:
 
 
 def scenario_import(store: Store) -> dict:
-    vendor = REPO / "private-vendor" / "muse-sdk"
+    vendor = REPO / "src" / "proactive_sdk" / "_deployment_reference"
     if vendor.is_dir():
         importer = LegacySkillImporter(root=vendor)
         skills = importer.scan()
         report = importer.report(skills)
-        consistency = audit_consistency(report, json.loads((REPO / "audit" / "skills.json").read_text()))
-        source_label = "private-vendor snapshot (real 88-entry corpus)"
+        consistency = audit_consistency(report, json.loads((REPO / "tests" / "fixtures" / "skills.json").read_text()))
+        source_label = "bundled deployment references (real 88-entry corpus)"
         assert consistency["match"], consistency
     else:
         importer = LegacySkillImporter(root=_mini_fixture())
@@ -381,7 +381,7 @@ def main() -> int:
         json.dumps(
             {
                 "boundary": "GwsConnector 为显式标注的脚本替身；未连接/授权语义走真实代码路径；"
-                "本人通知经本地 inbox，无外发；88 入口审计断言仅在 private-vendor 存在时执行",
+                "本人通知经本地 inbox，无外发；随包 88 入口只作为部署参考，默认不执行",
                 "delivered_external": 0,
             },
             ensure_ascii=False,

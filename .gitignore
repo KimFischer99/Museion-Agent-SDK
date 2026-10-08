@@ -1,18 +1,38 @@
 # 本地私有素材（vendor 附件解包、提取的 helper）——自用，不进 git
+/01/
+/release/
 private-vendor/
 muse-refer/
 
 # 运行时产物
 private-state/
+pas-state/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.sock
+
+# 本地环境文件；示例配置允许提交
 .env
+.env.*
+settings.json
+!.env.example
+!.env.sample
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
+*.egg-info/
 
 # Node / TS
 node_modules/
@@ -21,6 +41,3 @@ build/
 
 # macOS / 编辑器
 .DS_Store
-
-# 打包中间产物
-src/*.egg-info/

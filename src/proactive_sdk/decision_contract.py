@@ -205,10 +205,10 @@ def decision_contract() -> str:
     Deliberately free of task text and budget so a host can cache it.
     """
     lines = [
-        "Respond with ONLY one JSON object:",
+        "Respond with ONLY one JSON object, as raw JSON. No Markdown, code fences, commentary, or protocol_version field:",
         '{"decision": "propose"|"silent", "summary": str, "proposals": [ ... ]}',
         "Each proposal is an object with: "
-        '"kind" (required), "fact_id" (required), "revision" (required), '
+        '"kind" (required string), "fact_id" (required string), "revision" (required string), '
         'optional "body", "arguments", "evidence_refs", "expires_at".',
         "Rules:",
     ]

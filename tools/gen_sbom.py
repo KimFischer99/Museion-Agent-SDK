@@ -2,8 +2,8 @@
 """P7 SBOM generator (SPEC §17.3.3): CycloneDX 1.5 JSON for a built wheel.
 
 The SDK's runtime dependency set is the Python standard library only, so
-the SBOM's components are: the wheel itself (with per-member SHA-256
-hashes) and its declared install extras (documented, optional). If a
+the SBOM's components are: the wheel itself (with one SHA-256 checksum)
+and its declared install extras (documented, optional). If a
 future version gains real dependencies, extend ``components`` from the
 wheel METADATA Requires-Dist — the generator reads METADATA and records
 what it finds, so third-party entries cannot be silently omitted.
@@ -47,14 +47,6 @@ def generate_sbom(wheel: Path) -> dict:
         names = zf.namelist()
         metadata_name = next(n for n in names if n.endswith(".dist-info/METADATA"))
         metadata = _parse_metadata(zf.read(metadata_name).decode("utf-8"))
-        members = [
-            {
-                "name": name,
-                "sha256": _sha256(zf.read(name)),
-                "size": zf.getinfo(name).file_size,
-            }
-            for name in sorted(names)
-        ]
 
     version = metadata.get("version", ["unknown"])[0]
     name = metadata.get("name", ["proactive-sdk"])[0]
@@ -70,7 +62,7 @@ def generate_sbom(wheel: Path) -> dict:
             "scope": "required",
             "hashes": [{"alg": "SHA-256", "content": _sha256(wheel.read_bytes())}],
             "properties": [
-                {"name": "pas:member-count", "value": str(len(members))},
+                {"name": "pas:member-count", "value": str(len(names))},
                 {"name": "pas:runtime-dependencies", "value": "none (stdlib only)" if not requires_dist else ", ".join(requires_dist)},
             ],
         }
@@ -101,8 +93,8 @@ def generate_sbom(wheel: Path) -> dict:
             "properties": [
                 {"name": "pas:generator", "value": "tools/gen_sbom.py"},
                 {"name": "pas:source-package-file", "value": wheel.name},
-                {"name": "pas:member-sha256", "value": json.dumps(members, sort_keys=True)},
                 {"name": "pas:private-vendor-included", "value": "false"},
+                {"name": "pas:deployment-skill-reference-count", "value": str(sum(n.startswith("proactive_sdk/_deployment_reference/skills/") and n.endswith("/SKILL.md") for n in names))},
             ],
         },
         "components": components[1:],

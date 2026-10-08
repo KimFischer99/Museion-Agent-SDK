@@ -27,7 +27,8 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from .clock import Clock, SystemClock
@@ -38,10 +39,12 @@ from .contracts import (
     OBLIGATION_DUE,
     ErrorCode,
     JobSpec,
+    MemoryEntry,
     PASError,
     canonical_json,
     content_hash,
     validate_context_pack,
+    require_utc_timestamp,
 )
 from .windows import local_day_end_ms, local_day_start_ms, quiet_end_ms
 
@@ -408,6 +411,141 @@ class Store:
 
     def close(self) -> None:
         self.db.close()
+
+    def remember_memory(
+        self, entry: MemoryEntry, *, now_ms: int | None = None, max_entries: int = 256
+    ) -> None:
+        if not isinstance(entry, MemoryEntry):
+            raise PASError(ErrorCode.INVALID_CONFIG, "entry must be a MemoryEntry")
+        if type(max_entries) is not int or not 1 <= max_entries <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "max_entries must be 1..256")
+        timestamp = self._memory_now_ms(now_ms)
+        payload = canonical_json(asdict(entry))
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO memory_entries(memory_id, entry_json, updated_at_ms)
+                   VALUES (?, ?, ?) ON CONFLICT(memory_id) DO UPDATE SET
+                   entry_json=excluded.entry_json, updated_at_ms=excluded.updated_at_ms""",
+                (entry.memory_id, payload, timestamp),
+            )
+            self.db.execute(
+                """DELETE FROM memory_entries WHERE memory_id IN (
+                     SELECT memory_id FROM memory_entries
+                     ORDER BY updated_at_ms, memory_id LIMIT MAX(0,
+                       (SELECT COUNT(*) FROM memory_entries) - ?)
+                   )""",
+                (max_entries,),
+            )
+
+    def recall_memory(
+        self, *, limit: int = 16, now_ms: int | None = None
+    ) -> tuple[MemoryEntry, ...]:
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be 1..256")
+        timestamp = self._memory_now_ms(now_ms)
+        rows = self.db.execute(
+            """SELECT entry_json FROM memory_entries ORDER BY updated_at_ms, memory_id"""
+        ).fetchall()
+        entries: list[MemoryEntry] = []
+        for row in rows:
+            try:
+                data = canonical_loads(row["entry_json"])
+                if not isinstance(data, dict) or set(data) != {
+                    "memory_id", "content", "source", "evidence_refs", "confidence",
+                    "last_confirmed_at", "expires_at",
+                }:
+                    raise ValueError("invalid MemoryEntry object")
+                expires_at = data["expires_at"]
+                if expires_at is not None and self._memory_expiry_ms(expires_at) <= timestamp:
+                    continue
+                data["evidence_refs"] = tuple(data["evidence_refs"])
+                entries.append(MemoryEntry(**data))
+            except (TypeError, ValueError, KeyError, PASError) as exc:
+                raise PASError(
+                    ErrorCode.INTERNAL_ERROR, "stored memory entry is invalid", scope="store"
+                ) from exc
+        return tuple(entries[-limit:])
+
+    def forget_memory(self, memory_id: str) -> bool:
+        if not isinstance(memory_id, str) or not 1 <= len(memory_id) <= 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "memory_id must be 1..128 chars")
+        with self.transaction():
+            cur = self.db.execute("DELETE FROM memory_entries WHERE memory_id=?", (memory_id,))
+            return cur.rowcount > 0
+
+    def get_proactive_preferences(self) -> dict[str, Any]:
+        row = self.db.execute(
+            "SELECT enabled, allowed_topics_json FROM proactive_preferences WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            return {"enabled": True, "allowed_topics": None}
+        return {
+            "enabled": bool(row["enabled"]),
+            "allowed_topics": (
+                canonical_loads(row["allowed_topics_json"])
+                if row["allowed_topics_json"] is not None else None
+            ),
+        }
+
+    def set_proactive_preferences(
+        self, preferences: dict[str, Any], *, now_ms: int | None = None
+    ) -> dict[str, Any]:
+        timestamp = self._memory_now_ms(now_ms)
+        if (
+            not isinstance(preferences, dict)
+            or set(preferences) != {"enabled", "allowed_topics"}
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "preferences must contain enabled and allowed_topics only",
+            )
+        enabled = preferences["enabled"]
+        topics = preferences["allowed_topics"]
+        if type(enabled) is not bool:
+            raise PASError(ErrorCode.INVALID_CONFIG, "enabled must be boolean")
+        if topics is not None:
+            if not isinstance(topics, list) or len(topics) > 64:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "allowed_topics must be null or a list of up to 64 topics",
+                )
+            normalized: list[str] = []
+            for topic in topics:
+                if not isinstance(topic, str) or not 1 <= len(topic) <= 128:
+                    raise PASError(ErrorCode.INVALID_CONFIG, "topics must be 1..128-char strings")
+                canonical = topic.strip().casefold()
+                if not canonical or len(canonical) > 128:
+                    raise PASError(ErrorCode.INVALID_CONFIG, "topics must be 1..128-char strings")
+                if canonical not in normalized:
+                    normalized.append(canonical)
+            topics = normalized
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO proactive_preferences(
+                       singleton, enabled, allowed_topics_json, updated_at_ms
+                   )
+                   VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET
+                   enabled=excluded.enabled, allowed_topics_json=excluded.allowed_topics_json,
+                   updated_at_ms=excluded.updated_at_ms""",
+                (int(enabled), canonical_json(topics) if topics is not None else None, timestamp),
+            )
+        return {"enabled": enabled, "allowed_topics": topics}
+
+    def _memory_now_ms(self, now_ms: int | None) -> int:
+        if now_ms is None:
+            return self.clock.wall_now_ms()
+        if type(now_ms) is not int:
+            raise PASError(ErrorCode.INVALID_CONFIG, "now_ms must be an integer")
+        return now_ms
+
+    @staticmethod
+    def _memory_expiry_ms(value: str) -> int:
+        try:
+            require_utc_timestamp(value)
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+            return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+        except ValueError as exc:
+            raise PASError(ErrorCode.INVALID_CONFIG, f"invalid memory expiry: {exc}") from None
 
     # ------------------------------------------------------------------ #
     # Transactions and migrations
@@ -4078,6 +4216,9 @@ class Store:
             )
         if not isinstance(scope, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "scope must be an object", scope="feedback")
+        if kind == "handled" and (not isinstance(scope.get("fact_id"), str)
+                                  or not 1 <= len(scope["fact_id"]) <= 256):
+            raise PASError(ErrorCode.INVALID_CONFIG, "handled feedback requires a fact_id", scope="feedback")
         scope_json = canonical_json(scope)
         if len(scope_json.encode("utf-8")) > 4096:
             raise PASError(ErrorCode.INVALID_CONFIG, "feedback scope exceeds 4096 bytes", scope="feedback")
@@ -4504,6 +4645,7 @@ class Store:
             # activity projection are part of the profile's data, so export
             # and delete must not silently skip them.
             "job_occurrences", "job_activity",
+            "context_packs", "memory_entries", "proactive_preferences",
         )
         dump: dict[str, Any] = {}
         for table in tables:
@@ -4525,6 +4667,9 @@ class Store:
         # graph and the result is verified with foreign_key_check.
         tables = (
             "job_activity",       # -> jobs, outbox, runs
+            "context_packs",      # -> runs; packs can contain copied memory text
+            "memory_entries",
+            "proactive_preferences",
             "delivery_attempts",  # -> outbox
             "inbox",              # -> outbox, runs
             "feedback",           # -> outbox

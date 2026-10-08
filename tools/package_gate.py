@@ -29,6 +29,8 @@ from license_gate import (  # noqa: E402  (local tool import, pinned contract)
     BANNED_BASENAMES,
     BANNED_PREFIXES,
     collect_forbidden_hashes,
+    REFERENCE_PREFIX,
+    reference_member_errors,
 )
 
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".env")
@@ -57,11 +59,26 @@ def iter_members(archive: Path) -> list[tuple[str, bytes]]:
     return members
 
 
-def check_archive(archive: Path, forbidden_hashes: set[str]) -> list[str]:
+def check_archive(
+    archive: Path, forbidden_hashes: set[str], references: dict[str, str] | None = None
+) -> list[str]:
     problems: list[str] = []
+    member_hashes: dict[str, str] = {}
+    references = references or {}
     for name, payload in iter_members(archive):
         posix = name.replace("\\", "/")
+        # sdist has a distribution-name root; wheel paths start at the package.
+        if archive.name.endswith((".tar.gz", ".tgz")):
+            posix = posix.split("/", 1)[-1]
+        posix = posix.removeprefix("src/")
         lowered = posix.lower()
+        if posix.startswith(REFERENCE_PREFIX) and not references:
+            problems.append(f"{archive.name}: Skills belong in the separate skills directory: {posix}")
+        digest = hashlib.sha256(payload).hexdigest()
+        if posix in member_hashes:
+            problems.append(f"{archive.name}: duplicate member {posix}")
+        member_hashes[posix] = digest
+        approved_reference = references.get(posix) == digest
         if any(lowered.startswith(p) for p in BANNED_CONTAINER_PREFIXES):
             problems.append(f"{archive.name}: banned path member {posix}")
         if Path(posix).name in BANNED_CONTAINER_NAMES:
@@ -69,11 +86,12 @@ def check_archive(archive: Path, forbidden_hashes: set[str]) -> list[str]:
         if lowered.endswith(SECRET_SUFFIXES):
             problems.append(f"{archive.name}: secret-shaped member {posix}")
         base = Path(posix).name.lower()
-        if any(part in base for part in SECRET_NAME_PARTS):
+        if any(part in base for part in SECRET_NAME_PARTS) and not approved_reference:
             problems.append(f"{archive.name}: secret-named member {posix}")
-        digest = hashlib.sha256(payload).hexdigest()
-        if digest in forbidden_hashes:
+        if digest in forbidden_hashes and not approved_reference:
             problems.append(f"{archive.name}: member {posix} matches a forbidden audit hash")
+    if references:
+        problems.extend(f"{archive.name}: {p}" for p in reference_member_errors(member_hashes, references))
     return problems
 
 
@@ -108,11 +126,10 @@ def main(argv: list[str]) -> int:
         print("usage: package_gate.py dist/*.whl dist/*.tar.gz", file=sys.stderr)
         return 2
     manifest = json.loads(
-        (REPO / "audit" / "selected-source-manifest.json").read_text(encoding="utf-8")
+        (REPO / "tests" / "fixtures" / "selected-source-manifest.json").read_text(encoding="utf-8")
     )
-    skills_doc = json.loads((REPO / "audit" / "skills.json").read_text(encoding="utf-8"))
+    skills_doc = json.loads((REPO / "tests" / "fixtures" / "skills.json").read_text(encoding="utf-8"))
     forbidden = collect_forbidden_hashes(manifest, skills_doc)
-
     all_problems: list[str] = []
     for archive in archives:
         if not archive.is_file():
