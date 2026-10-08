@@ -1,12 +1,12 @@
 # Museion Agent SDK v0.1.2
 
-Museion Agent SDK is developed based on Muse. It provides a local Python runtime for scheduled reminders, opt-in news research, persistent interests, and notification delivery.
+Museion Agent SDK is developed based on Muse. It provides a proactive agent runtime for scheduled reminders, opt-in news research, persistent interests, and notification delivery.
 
 The Python package is `proactive-sdk`, imported as `proactive_sdk`. The core runtime uses the Python standard library and supports model APIs, Pi, and Hermes as analysis backends.
 
 ## Getting started
 
-Use macOS or Linux with Python 3.11+ and `venv`/`ensurepip` available. Download and extract the archive from [Releases](https://github.com/KimFischer99/Museion-Agent-SDK/releases), then run from its `runtime/` directory:
+Use Python 3.11+ and `venv`/`ensurepip` available. Download and extract the archive from [Releases](https://github.com/KimFischer99/Museion-Agent-SDK/releases), then run from its `runtime/` directory:
 
 ```bash
 python3 app.py
