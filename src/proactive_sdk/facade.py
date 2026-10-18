@@ -45,7 +45,7 @@ from .contracts import (
     content_hash,
 )
 from .context import ContextPackBuilder, MemoryPort, SQLiteMemoryPort, SourceRegistry
-from .coordinator import CoordinatorConfig, ProactiveCoordinator
+from .coordinator import ActivityProbe, CoordinatorConfig, ProactiveCoordinator
 from .delivery import DispatchConfig, FeedbackManager, OutboxDispatcher, WebhookNotificationSink
 from .hooks import HookRunner, HookSpec, HookSandbox, platform_sandbox
 from .observability import Metrics, StructuredLogger, free_disk_mb, health_snapshot
@@ -160,6 +160,7 @@ class ProactiveAgent:
         clock: Any | None = None,
         coordinator_config: CoordinatorConfig | None = None,
         policy_config: PolicyConfig | None = None,
+        activity_probe: ActivityProbe | None = None,
         dispatch_config: DispatchConfig | None = None,
         tool_allowlist: tuple[str, ...] | None = None,
         hook_sandbox: HookSandbox | None = None,
@@ -191,6 +192,9 @@ class ProactiveAgent:
         self.executor = executor
         self.config = config
         self.clock = clock
+        #: Optional host-provided presence probe (W2). The coordinator also
+        #: always keeps its own store-backed probe; the later timestamp wins.
+        self.activity_probe = activity_probe
         self.metrics = Metrics()
         self.logger = StructuredLogger(component="pas.facade", fields={"profile": profile})
 
@@ -262,6 +266,11 @@ class ProactiveAgent:
                                              memory=memory if memory is not None else SQLiteMemoryPort(self.store))
         if self.executor is None:
             self.executor = self._assemble_builtin_executor(model, include_builtin_tools)
+        resolved_coordinator_config = (
+            coordinator_config
+            if coordinator_config is not None
+            else self._coordinator_config_from_agent_config()
+        )
         self.coordinator = ProactiveCoordinator(
             self.store,
             registry=self.registry,
@@ -270,9 +279,10 @@ class ProactiveAgent:
             # the executor is assembled just above, and passing the original
             # parameter here would hand the coordinator a None.
             executor=self.executor,
-            config=coordinator_config,
+            config=resolved_coordinator_config,
             tool_allowlist=tool_allowlist,
             policy_engine=self.policy,
+            activity_probe=activity_probe,
         )
         self.scheduler = Scheduler(
             self.store,
@@ -1101,6 +1111,22 @@ class ProactiveAgent:
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
+
+    def _coordinator_config_from_agent_config(self) -> CoordinatorConfig:
+        """Map the user YAML's policy block onto the coordinator's knobs.
+
+        The idle gate is a coordinator-level decision (it must run before a
+        model call), while its configuration belongs with the other policy
+        settings the deployer edits — an explicit ``coordinator_config=``
+        argument still wins wholesale.
+        """
+        if self.config is None:
+            return CoordinatorConfig()
+        policy = self.config.policy
+        return CoordinatorConfig(
+            idle_gate=policy.idle_gate,
+            idle_min_minutes=policy.idle_min_minutes,
+        )
 
     def _policy_config_from_agent_config(self) -> PolicyConfig:
         if self.config is None:

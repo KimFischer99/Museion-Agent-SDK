@@ -55,7 +55,7 @@ _HEARTBEAT_KEYS = ("enabled", "every_seconds", "misfire", "checklist")
 _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "external_writes", "lockscreen_content", "allow_untrusted_shell_skills",
                 "cadence", "cadence_min_gap_seconds", "cadence_max_per_day",
-                "require_reason")
+                "require_reason", "idle_gate", "idle_min_minutes")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -251,6 +251,10 @@ class PolicySection:
     #: reason is accepted and recorded as ``unspecified``. Illegal values
     #: are rejected either way.
     require_reason: bool = True
+    #: W2 presence gate: skip analysis runs while the user was active within
+    #: ``idle_min_minutes``. Reminders and just-raised user wakes are exempt.
+    idle_gate: bool = True
+    idle_min_minutes: int = 60
 
     @property
     def cadence_configured(self) -> bool:
@@ -466,6 +470,14 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
     require_reason = policy_raw.get("require_reason", True)
     if not isinstance(require_reason, bool):
         raise ConfigError("policy.require_reason must be a boolean")
+    idle_gate = policy_raw.get("idle_gate", True)
+    if not isinstance(idle_gate, bool):
+        raise ConfigError("policy.idle_gate must be a boolean")
+    idle_min_minutes = _positive_int(
+        "policy",
+        policy_raw.get("idle_min_minutes", 60),
+        "idle_min_minutes",
+    )
     policy = PolicySection(
         cadence=cadence,
         cadence_min_gap_seconds=(
@@ -491,6 +503,8 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         lockscreen_content=lockscreen,
         allow_untrusted_shell_skills=bool(policy_raw.get("allow_untrusted_shell_skills", False)),
         require_reason=require_reason,
+        idle_gate=idle_gate,
+        idle_min_minutes=idle_min_minutes,
     )
 
     skills_raw = raw.get("skills", {})

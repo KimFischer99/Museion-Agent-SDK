@@ -70,7 +70,13 @@ from .context import (
     SourceRegistry,
     render_context_blocks,
 )
-from .coordinator import CoordinatorConfig, ProactiveCoordinator, RunReport
+from .coordinator import (
+    ActivityProbe,
+    CoordinatorConfig,
+    ProactiveCoordinator,
+    RunReport,
+    StoreUserActivityProbe,
+)
 from .delivery import (
     DeliveryRequest,
     DispatchConfig,
@@ -319,6 +325,8 @@ __all__ = [
     "ExecutorOutcome",
     "RunCancelled",
     "ToolLoopExecutor",
+    "ActivityProbe",
+    "StoreUserActivityProbe",
     "CoordinatorConfig",
     "ProactiveCoordinator",
     "RunReport",

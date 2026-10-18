@@ -32,9 +32,10 @@ state lives in the outbox and is reported by the dispatcher.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .context import ContextPackBuilder, SnapshotMaterializer, SourceRegistry
 from .contracts import (
@@ -49,9 +50,55 @@ from .store import RunLease, Store
 if TYPE_CHECKING:
     from .policy import PolicyEngine
 
-__all__ = ["CoordinatorConfig", "RunReport", "ProactiveCoordinator"]
+__all__ = [
+    "ActivityProbe",
+    "CoordinatorConfig",
+    "RunReport",
+    "ProactiveCoordinator",
+    "StoreUserActivityProbe",
+]
+
+_LOG = logging.getLogger(__name__)
 
 _MAX_INSTRUCTION_CHARS = 10000
+
+
+@runtime_checkable
+class ActivityProbe(Protocol):
+    """Answers "when did the user last say something" for the idle gate.
+
+    Implementations may read the host's own session store; they MUST be
+    read-only and bounded, and any failure other than returning ``None`` is
+    treated as "unknown" (fail open) by the coordinator, never as
+    "the user is away": a broken host integration must not silently mute
+    the agent forever.
+
+    Returns epoch milliseconds (same basis as ``Store.clock``), or ``None``
+    when the answer is unknown.
+    """
+
+    def last_user_activity_at_ms(self) -> int | None: ...
+
+
+class StoreUserActivityProbe:
+    """Built-in probe over PAS's own trusted user-input events.
+
+    ``input.note`` / user wakes are admitted as ``origin='manual'`` events,
+    so the store already knows when the user last spoke *to PAS*. A host
+    session that never goes through PAS is invisible here — that is what an
+    injected probe is for (the coordinator takes the maximum of both).
+    """
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def last_user_activity_at_ms(self) -> int | None:
+        row = self.store.db.execute(
+            "SELECT MAX(observed_at_ms) AS last FROM events WHERE origin='manual'"
+        ).fetchone()
+        if row is None or row["last"] is None:
+            return None
+        return int(row["last"])
 
 
 @dataclass(frozen=True)
@@ -63,6 +110,11 @@ class CoordinatorConfig:
     # reaches, and how many entries may travel into one pack.
     recent_notification_window_ms: int = 24 * 3600 * 1000
     recent_notification_limit: int = 20
+    #: W2 idle gate: do not start an analysis run while the user is (or was
+    #: just) active. Reminders never pass through the coordinator, and
+    #: ``origin='manual'`` wakes are exempt by construction.
+    idle_gate: bool = True
+    idle_min_minutes: int = 60
 
     def __post_init__(self) -> None:
         positive = (
@@ -71,11 +123,14 @@ class CoordinatorConfig:
             "snapshot_default_ttl_ms",
             "recent_notification_window_ms",
             "recent_notification_limit",
+            "idle_min_minutes",
         )
         for name in positive:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"{name} must be a positive integer")
+        if not isinstance(self.idle_gate, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "idle_gate must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -107,6 +162,7 @@ class RunReport:
 #: inventing a bucket.
 _SILENCE_BY_RAW_REASON = {
     "l0_no_source_change": "no_source_change",
+    "user_active": "user_active",
 }
 
 
@@ -137,6 +193,7 @@ class ProactiveCoordinator:
         config: CoordinatorConfig | None = None,
         tool_allowlist: tuple[str, ...] | None = None,
         policy_engine: "PolicyEngine | None" = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> None:
         self.store = store
         self.registry = registry
@@ -145,6 +202,14 @@ class ProactiveCoordinator:
         self.config = config if config is not None else CoordinatorConfig()
         self.tool_allowlist = tool_allowlist
         self.policy_engine = policy_engine
+        # Two independent sources of presence: PAS's own trusted input
+        # events and (optionally) the host's session store. The maximum is
+        # used, so whichever knows about the more recent message wins.
+        self.activity_probes: tuple[ActivityProbe, ...] = tuple(
+            probe
+            for probe in (StoreUserActivityProbe(store), activity_probe)
+            if probe is not None
+        )
 
     async def process_pending_run(
         self, *, now_ms: int | None = None, cancel_event: Any | None = None
@@ -163,6 +228,33 @@ class ProactiveCoordinator:
             )
         self._project_analysis(lease, report, now_ms=now)
         return report
+
+    def _last_user_activity(self, now_ms: int) -> tuple[int | None, list[str]]:
+        """Latest known user activity across all probes, plus probe errors.
+
+        A failing probe contributes nothing (fail open): the gate suppresses
+        only when some probe positively reports a recent user message.
+        """
+        latest: int | None = None
+        failures: list[str] = []
+        for probe in self.activity_probes:
+            try:
+                value = probe.last_user_activity_at_ms()
+            except Exception as exc:  # noqa: BLE001 - host integration must not mute us
+                failures.append(f"{type(probe).__name__}: {type(exc).__name__}")
+                _LOG.warning(
+                    "activity_probe_failed",
+                    extra={"probe": type(probe).__name__, "error": type(exc).__name__},
+                )
+                continue
+            if value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool):
+                failures.append(f"{type(probe).__name__}: non-integer timestamp")
+                continue
+            if latest is None or value > latest:
+                latest = value
+        return latest, failures
 
     def _project_analysis(self, lease: RunLease, report: RunReport, *, now_ms: int) -> None:
         """Mirror the analysis outcome onto the job activity projection.
@@ -212,6 +304,31 @@ class ProactiveCoordinator:
         job = self.store.get_job(event.job_id) if event.job_id else None
         instruction, goal_id, scope_label, mode = self._task_of(event, job)
         require_fresh = bool(job.task.get("require_fresh_sources")) if job else False
+
+        # ---- W2 idle gate: do not spend a model call on a user who is here.
+        # Reminders never reach the coordinator at all (scheduler path), and
+        # a wake the user just raised is exempt: the probe would see that
+        # very input event and otherwise swallow the user's own request.
+        if (
+            self.config.idle_gate
+            and job is not None
+            and mode != "reminder"
+            and event.origin != "manual"
+        ):
+            last_activity, probe_failures = self._last_user_activity(now_ms)
+            if probe_failures:
+                for failure in probe_failures:
+                    self.store.append_run_event(
+                        lease,
+                        kind="activity_probe_failed",
+                        safe_summary=failure[:200],
+                        now_ms=now_ms,
+                    )
+            if last_activity is not None:
+                idle_ms = self.config.idle_min_minutes * 60_000
+                if now_ms - last_activity < idle_ms:
+                    # Fail open on unknown, suppress only on a known presence.
+                    return self._suppress(lease, "user_active", now_ms)
 
         # The coordinator's entire view of the executor, asked once per run.
         # A host-backed executor may have to ask its host here, so this is
