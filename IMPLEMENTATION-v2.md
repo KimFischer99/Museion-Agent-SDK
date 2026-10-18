@@ -2,7 +2,7 @@
 
 - 分支：`feat/pas-v2`（基线 `b875f88`，即 `origin/main`）
 - 规模：58 files changed, 6530 insertions(+), 130 deletions(-)；新增 109 个测试
-- 验证环境：macOS，Python 3.14.4（3.11/3.12 未跑，见「未验项」）
+- 验证环境：macOS Python 3.14.4（全量）；Linux Python 3.12.3（全量，沙箱类环境项除外）；Python 3.11.16（定向）
 - 依据文档：《Museion PAS 主动层 v2 改进计划.md》《Museion PAS 主动层 v2 施工清单.md》（同分支已提交）
 
 ---
@@ -160,3 +160,43 @@ git show 7d5e6ed   # W6 feedback + pas stats
 git diff b875f88..HEAD -- docs/COMPATIBILITY.md README.md
 python3 -m unittest discover -s tests
 ```
+
+## v0.1.3 发布候选验证（2026-10-18）
+
+版本定为 `0.1.3`；代码提交 `cd3a9f1`（评审修复：Pi envelope 契约、sitemap 重检语义、宿主灰度）、
+`ce42390`（版本 0.1.3）、`6da9665`（Python 3.11/3.12 的 PEP 604 @tool 注解修复），本文件所在 docs 提交为最终快照。
+
+### 真实宿主 e2e（隔离 Linux 测试主机，Python 3.12.3，真实模型回复）
+
+`SUMMARY {"probes": 8, "passed": 8, "failed": []}`：
+
+- Hermes Runs gateway：config / capabilities / bridge_envelope / contract_injected / cancel 全 PASS。
+  cancel 证据 `{"level":"confirmed","settled":"cancelled","observed_running":true,"proof":"cancelled"}`——
+  先观察到 running 才取消，host 确认且 run 以 cancelled 收尾（不再是 completed-despite-cancel）。
+- Pi 1.0.4：initialize / bridge_envelope（真实回复含 v2 `silence_reason`）/ in-flight cancel 全 PASS；
+  cancel 为 `requested + errored(conflict)` 的诚实请求语义，未冒充 confirmed。
+- 门脚本已收紧（Hermes 必须 settled=cancelled 才记 PASS；Pi 先确认 in-flight 再取消，已完成则显式失败），
+  归档于 `01/pas-review/validate_hosts.py`；未触碰主 Hermes profile，未启用外部消息通道，测试后网关已停止。
+
+### 测试与打包门
+
+- 全量：`Ran 966 tests`。
+  - macOS 3.14.4：0 failures，28 个 error 全为 hook 子进程沙箱类环境错误（记录用 shell 无 sandbox 后端）。
+  - Linux 3.12.3：0 代码缺陷失败；20 个 error 为 bubblewrap 不可用、9 skipped；另有 1 个环境相关性能守卫
+    `test_thousand_jobs_scan_is_bounded` 在该慢速共享主机 41s > 30s 上限（测试自述非基准声明，Mac 上通过）。
+  - 发布验证中发现并修复真实兼容缺陷：Python 3.11/3.12 上 `X | None` 的 @tool 注解被拒（3.14 统一了
+    `typing.Union` 与 `types.UnionType`，旧版是不同对象）。
+- Python 3.11.16：定向 259 tests OK + 候选 wheel 全新 venv install smoke PASS（上一轮证据，最终轮未重跑全量）。
+- 候选包：`proactive_sdk-0.1.3-py3-none-any.whl`（310,996 bytes），
+  sha256 `8c3e4b40666ca3f49633cc6316556005788dfec1ec4e99bef62a4b95d57611dd`（实际产物为准；
+  同一提交独立构建的 wheel 成员逐一相同，字节级 sha 因 ZIP 时间戳不同而不同）。
+- `license_gate` PASS（571 tracked files）、`build_release` PASS（377 skills 逐项哈希）、`package_gate` PASS、
+  `install_smoke` PASS（macOS 3.14.4）、SBOM 生成 PASS、`gen_client_ts` idempotent、`git diff --check` 干净。
+
+### 正式发布前剩余（非代码）
+
+1. push `feat/pas-v2` 与 `v0.1.3` tag（本轮只建了本地 tag）。
+2. 在具备 hook 沙箱的 macOS 终端跑一次 `python3 -m unittest discover -s tests`（本 shell 无法完成 sandbox 门）。
+3. 写 GitHub Release notes：v2 能力、三条行为变更（task 每槽必跑 → `task.always_run`；sitemap 变化时重检当前条目；
+   decision contract 1.1）、真实宿主 8/8 结果、未验项（公网来源/外部通知/回复通道、W7、Python 全绿矩阵未宣称）。
+4. 清理含凭据的临时测试目录（隔离 Hermes 数据根等），不要打包或附在报告里。
