@@ -141,6 +141,8 @@ export interface JobSpec {
     "instruction": string;
     "goal_id"?: string;
     "skill_refs"?: ReadonlyArray<string>;
+        /** W5 compatibility switch: run the task on every slot even when no source candidate changed (pre-v2 task semantics). Default false: the two-stage path runs only w */
+"always_run"?: boolean;
   };
   "grant_refs"?: ReadonlyArray<string>;
   "delivery_policy"?: {

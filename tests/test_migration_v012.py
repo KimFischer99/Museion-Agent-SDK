@@ -1,4 +1,4 @@
-"""Migration 012: a v1.1 database gains v2 reason/silence columns in place.
+"""Migrations 012–013: a v1.1 database gains the v2 columns in place.
 
 The upgrade must be additive and idempotent: old ``run_proposals`` rows are
 backfilled to ``unspecified`` (no guessing), old ``runs`` rows keep a NULL
@@ -89,9 +89,13 @@ class MigrationV2ColumnsTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row["reason"], "unspecified")
             run = store.db.execute(
-                "SELECT silence_reason FROM runs WHERE run_id='run-legacy'"
+                "SELECT silence_reason, candidates_count, truncated_count"
+                " FROM runs WHERE run_id='run-legacy'"
             ).fetchone()
             self.assertIsNone(run["silence_reason"])
+            # m013: cost counters are NULL (unknown) on legacy rows, never 0.
+            self.assertIsNone(run["candidates_count"])
+            self.assertIsNone(run["truncated_count"])
             applied = [
                 r["version"]
                 for r in store.db.execute("SELECT version FROM schema_migrations ORDER BY version")

@@ -234,9 +234,28 @@ class HeartbeatClosedLoopTests(P3TestCase):
 
 
 class ExplicitTaskTests(P3TestCase):
-    def test_task_runs_even_without_source_change(self):
+    def test_task_without_source_change_is_suppressed_by_default(self):
+        # W5: a job-driven task runs through the same two-stage path as a
+        # heartbeat; with no candidate the model is not called.
         store, _ = make_store()
         job = make_job(job_id="daily-agenda", mode="task")
+        store.upsert_job(job, idempotency_key="k1")
+        admit_job_event(store, job)
+        model = ScriptedModel([])
+        source = ScriptedSource([static_batch(items=[], cursor="cursor-1")])
+        coordinator = make_coordinator(store, model, source)
+        report = self.run_async(coordinator.process_pending_run())
+        self.assertEqual(report.outcome, "suppressed")
+        self.assertEqual(report.reason, "l0_no_source_change")
+        self.assertEqual(model.calls, [])
+
+    def test_task_always_run_keeps_the_pre_v2_semantics(self):
+        store, _ = make_store()
+        job = make_job(
+            job_id="daily-agenda",
+            mode="task",
+            task={**make_job(job_id="x").task, "always_run": True},
+        )
         store.upsert_job(job, idempotency_key="k1")
         admit_job_event(store, job)
         model = ScriptedModel(
@@ -253,7 +272,7 @@ class ExplicitTaskTests(P3TestCase):
         coordinator = make_coordinator(store, model, source)
         report = self.run_async(coordinator.process_pending_run())
         self.assertEqual(report.outcome, "proposed")
-        self.assertEqual(len(model.calls), 1)  # explicit task semantics: L1 runs
+        self.assertEqual(len(model.calls), 1)
 
     def test_task_with_no_authorized_source_fails_visibly(self):
         store, _ = make_store()
@@ -272,7 +291,16 @@ class ExplicitTaskTests(P3TestCase):
 
     def test_task_with_unauthorized_but_also_working_source_still_runs(self):
         store, _ = make_store()
-        job = make_job(job_id="daily-agenda", mode="task")
+        # No candidates are involved here: always_run keeps this test about
+        # the capability gate rather than the W5 candidate gate.
+        job = make_job(
+            job_id="daily-agenda",
+            mode="task",
+            task={
+                "instruction": INSTRUCTION,
+                "always_run": True,
+            },
+        )
         store.upsert_job(job, idempotency_key="k1")
         admit_job_event(store, job)
         model = ScriptedModel(

@@ -264,6 +264,7 @@ class ControlPlaneServer:
                         dict(job["reminder"]) if isinstance(job.get("reminder"), dict) else None
                     ),
                     obligation=job.get("obligation"),
+                    always_run=job.get("always_run", False),
                 ),
                 idempotency_key=str(require(p, "idempotency_key")),
             )
@@ -287,7 +288,14 @@ class ControlPlaneServer:
                         job_id=job_id,
                         mode=existing.mode,
                         schedule=dict(existing.schedule),
-                        task={"instruction": str(require(p, "instruction"))},
+                        task={
+                            "instruction": str(require(p, "instruction")),
+                            **(
+                                {"always_run": True}
+                                if existing.task.get("always_run")
+                                else {}
+                            ),
+                        },
                         grant_refs=tuple(existing.grant_refs),
                         delivery_policy=dict(existing.delivery_policy),
                         misfire_policy=existing.misfire_policy,

@@ -119,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="trusted notification obligation (default: mode-derived)",
     )
+    jobs.add_argument(
+        "--always-run",
+        dest="always_run",
+        action="store_true",
+        help="task: run every slot even without source changes (pre-v2 semantics)",
+    )
     jobs.add_argument("--grant-ref", action="append", default=[], help="grant ref (repeatable)")
     jobs.add_argument("--idempotency-key", help="idempotency key for create")
     jobs.add_argument("--reason", help="reason recorded for stop/delete")
@@ -555,6 +561,7 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     grant_refs=tuple(args.grant_ref),
                     reminder=reminder,
                     obligation=args.obligation,
+                    always_run=args.always_run,
                 ),
                 idempotency_key=args.idempotency_key or f"cli-{args.job_id}",
             )

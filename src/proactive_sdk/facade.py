@@ -94,6 +94,9 @@ class Job:
     delivery_policy: dict[str, Any] = field(default_factory=dict)
     reminder: dict[str, Any] | None = None
     obligation: str | None = None
+    #: W5 compatibility switch: keep the pre-v2 "run every slot" semantics
+    #: for a task job (see ``JobSpec.task.always_run``).
+    always_run: bool = False
     #: Explicit version. Changing a job's behaviour means bumping this:
     #: every policy decision (dedup keys, grants, quiet hours) is keyed on
     #: the revision, so an edit that kept the old number would look like a
@@ -108,6 +111,8 @@ class Job:
         task: dict[str, Any] = {}
         if self.mode != "reminder":
             task["instruction"] = self.instruction
+            if self.always_run:
+                task["always_run"] = True
         return JobSpec(
             job_id=self.id,
             revision=self.revision,
@@ -1126,6 +1131,7 @@ class ProactiveAgent:
         return CoordinatorConfig(
             idle_gate=policy.idle_gate,
             idle_min_minutes=policy.idle_min_minutes,
+            max_candidates=policy.max_candidates,
         )
 
     def _policy_config_from_agent_config(self) -> PolicyConfig:

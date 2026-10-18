@@ -2894,6 +2894,8 @@ class Store:
         reason: str,
         now_ms: int,
         silence_reason: str | None = None,
+        candidates_count: int = 0,
+        truncated_count: int = 0,
     ) -> None:
         """End a run before any model call with its machine reason (§5.3
         L0: 空清单、无变化、未授权等直接结束，记录机器原因但不通知).
@@ -2924,8 +2926,15 @@ class Store:
             )
             self.db.execute(
                 """UPDATE runs SET state='suppressed', lease_until_ms=0,
-                       silence_reason=?, updated_at_ms=? WHERE run_id=?""",
-                (silence_reason, now_ms, lease.run_id),
+                       silence_reason=?, candidates_count=?, truncated_count=?,
+                       updated_at_ms=? WHERE run_id=?""",
+                (
+                    silence_reason,
+                    int(candidates_count),
+                    int(truncated_count),
+                    now_ms,
+                    lease.run_id,
+                ),
             )
 
     def record_run_decision(
@@ -2937,6 +2946,8 @@ class Store:
         proposals: list[dict[str, Any]],
         usage: dict[str, Any] | None,
         now_ms: int,
+        candidates_count: int = 0,
+        truncated_count: int = 0,
     ) -> str:
         """Commit one finished analysis in a single transaction (§13.2:
         决策完成 = 校验 run fence + 保存审计 + 建 proposals + 更新 run state).
@@ -3053,13 +3064,16 @@ class Store:
             self.db.execute(
                 """UPDATE runs SET state='proposed', lease_until_ms=0,
                        decision_summary=?, proposal_count=?, usage_json=?,
-                       silence_reason=?, updated_at_ms=?
+                       silence_reason=?, candidates_count=?, truncated_count=?,
+                       updated_at_ms=?
                    WHERE run_id=?""",
                 (
                     summary,
                     len(proposals),
                     canonical_json(usage) if usage is not None else None,
                     silence_reason,
+                    int(candidates_count),
+                    int(truncated_count),
                     now_ms,
                     lease.run_id,
                 ),
@@ -3115,7 +3129,8 @@ class Store:
             rows = self.db.execute(
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
                           decision_summary, proposal_count, context_ref, deadline_ms,
-                          silence_reason, tool_authority, tool_authority_reason
+                          silence_reason, candidates_count, truncated_count,
+                          tool_authority, tool_authority_reason
                    FROM runs WHERE state=? ORDER BY rowid LIMIT ?""",
                 (state, int(limit)),
             ).fetchall()
@@ -3123,7 +3138,8 @@ class Store:
             rows = self.db.execute(
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
                           decision_summary, proposal_count, context_ref, deadline_ms,
-                          silence_reason, tool_authority, tool_authority_reason
+                          silence_reason, candidates_count, truncated_count,
+                          tool_authority, tool_authority_reason
                    FROM runs ORDER BY rowid LIMIT ?""",
                 (int(limit),),
             ).fetchall()
@@ -3133,7 +3149,8 @@ class Store:
         row = self.db.execute(
             """SELECT run_id, event_id, state, attempt, fence, lease_until_ms, deadline_ms,
                       error_class, decision_summary, proposal_count, usage_json, context_ref,
-                      silence_reason, tool_authority, tool_authority_reason
+                      silence_reason, candidates_count, truncated_count,
+                      tool_authority, tool_authority_reason
                FROM runs WHERE run_id=?""",
             (run_id,),
         ).fetchone()

@@ -42,6 +42,7 @@ from .contracts import (
     TOOL_AUTHORITY_PAS_BROKER,
     ErrorCode,
     PASError,
+    SourceBatch,
     content_hash,
 )
 from .executor import ExecutorContext, ExecutorOutcome, RunExecutor
@@ -115,6 +116,10 @@ class CoordinatorConfig:
     #: ``origin='manual'`` wakes are exempt by construction.
     idle_gate: bool = True
     idle_min_minutes: int = 60
+    #: W5 two-stage path: hard cap on candidate items entering one run.
+    #: Items beyond it are counted as truncated (the ledger keeps the
+    #: number), never silently dropped from the count.
+    max_candidates: int = 10
 
     def __post_init__(self) -> None:
         positive = (
@@ -124,6 +129,7 @@ class CoordinatorConfig:
             "recent_notification_window_ms",
             "recent_notification_limit",
             "idle_min_minutes",
+            "max_candidates",
         )
         for name in positive:
             value = getattr(self, name)
@@ -146,6 +152,10 @@ class RunReport:
     #: when the raw machine verdict has no honest mapping (the raw string
     #: stays in ``reason``/run events).
     silence_reason: str | None = None
+    #: W5 cost accounting: candidates admitted into the run and how many
+    #: were cut by ``max_candidates``.
+    candidates: int = 0
+    truncated: int = 0
     error_code: str | None = None
     model_turns: int = 0
     proposals: int = 0
@@ -389,9 +399,17 @@ class ProactiveCoordinator:
             )
             fetched.append((entry, batch))
 
+        always_run = bool(job.task.get("always_run")) if job is not None else False
+        changed_batches = [
+            (entry, batch)
+            for entry, batch in fetched
+            if batch.cursor_ref != previous_cursors[(entry.source_id, entry.account_ref)]
+            or bool(batch.items)
+        ]
+
         if mode == "heartbeat":
-            # Opportunistic heartbeat: nothing checkable or nothing changed
-            # ends here — machine reason, zero model calls (§5.3 L0).
+            # Opportunistic heartbeat: nothing checkable ends here — machine
+            # reason, zero model calls (§5.3 L0).
             if not entries:
                 return self._suppress(lease, "l0_nothing_to_check", now_ms)
             if not fetched:
@@ -400,13 +418,6 @@ class ProactiveCoordinator:
                 return self._suppress(
                     lease, "l0_source_error:" + ",".join(source_errors)[:480], now_ms
                 )
-            changed = any(
-                batch.cursor_ref != previous_cursors[(entry.source_id, entry.account_ref)]
-                or bool(batch.items)
-                for entry, batch in fetched
-            )
-            if not changed:
-                return self._suppress(lease, "l0_no_source_change", now_ms)
         else:
             # Explicit task / hook wake: authorization and provider
             # failures are real failures the user must see, not silent
@@ -425,6 +436,25 @@ class ProactiveCoordinator:
                     scope="coordinator",
                 )
 
+        # ---- W5 two-stage path: candidates before analysis ----
+        # The probe/candidates stage is model-free; a job-driven run with no
+        # candidate is suppressed instead of paying for a full analysis.
+        # Preserved semantics: a source-less task is pure reasoning, a job
+        # with ``task.always_run=true`` keeps the old every-slot behaviour,
+        # and a wake the user raised manually is explicitly wanted. Hook and
+        # host-delegate wakes have no job and are explicit signals too.
+        candidates, deduped_total = self._select_candidates(changed_batches)
+        if (
+            job is not None
+            and entries
+            and not always_run
+            and event.origin != "manual"
+            and not candidates
+        ):
+            return self._suppress(lease, "l0_no_source_change", now_ms)
+        candidates_count = len(candidates)
+        truncated_count = max(0, deduped_total - candidates_count)
+
         if unauthorized:
             self.store.append_run_event(
                 lease,
@@ -434,10 +464,21 @@ class ProactiveCoordinator:
             )
 
         # ---- L1 preparation: snapshots + immutable ContextPack ----
+        # Only the candidates that made the cut become snapshots; the full
+        # batch was already accounted for in ``source_state`` above.
         materializer = SnapshotMaterializer(self.store)
         source_records: list[dict[str, Any]] = []
-        for entry, batch in fetched:
-            source_records.extend(materializer.materialize(batch, now_ms=now_ms))
+        for entry, batch, items in self._candidate_batches(candidates):
+            filtered = SourceBatch(
+                source_id=batch.source_id,
+                account_ref=batch.account_ref,
+                observed_at=batch.observed_at,
+                items=tuple(items),
+                cursor_ref=batch.cursor_ref,
+                has_more=batch.has_more,
+                fresh_until=batch.fresh_until,
+            )
+            source_records.extend(materializer.materialize(filtered, now_ms=now_ms))
         recent = self.store.recent_sent_notifications(
             now_ms=now_ms,
             window_ms=self.config.recent_notification_window_ms,
@@ -484,12 +525,16 @@ class ProactiveCoordinator:
             proposals=[proposal.to_dict() for proposal in outcome.decision.proposals],
             usage={"protocol_version": "1.0", **outcome.usage},
             now_ms=now_ms,
+            candidates_count=candidates_count,
+            truncated_count=truncated_count,
         )
         report = RunReport(
             run_id=lease.run_id,
             outcome="proposed",
             reason=outcome.decision.summary,
             silence_reason=outcome.decision.silence_reason,
+            candidates=candidates_count,
+            truncated=truncated_count,
             model_turns=outcome.model_turns,
             proposals=len(outcome.decision.proposals),
             context_ref=context_ref,
@@ -520,6 +565,8 @@ class ProactiveCoordinator:
                 outcome=report.outcome,
                 reason=report.reason,
                 silence_reason=report.silence_reason,
+                candidates=report.candidates,
+                truncated=report.truncated,
                 error_code=report.error_code,
                 model_turns=report.model_turns,
                 proposals=report.proposals,
@@ -531,6 +578,8 @@ class ProactiveCoordinator:
             outcome=report.outcome,
             reason=report.reason,
             silence_reason=report.silence_reason,
+            candidates=report.candidates,
+            truncated=report.truncated,
             error_code=report.error_code,
             model_turns=report.model_turns,
             proposals=report.proposals,
@@ -544,6 +593,53 @@ class ProactiveCoordinator:
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+
+    def _select_candidates(
+        self, changed_batches: list[tuple[Any, Any]]
+    ) -> tuple[list[tuple[int, Any, Any, Any]], int]:
+        """Flatten, de-duplicate and truncate the changed items (W5).
+
+        Returns ``(selected, deduped_total)`` where ``selected`` is
+        ``(observed_ms, entry, batch, item)`` sorted by freshness and capped
+        at ``max_candidates``; ``deduped_total`` is the count before the cap,
+        so the ledger's ``truncated`` never counts a duplicate as lost work.
+        De-duplication is by ``(source_id, fact_id, revision)``: the same
+        content revision must pay for exactly one context slot, while a
+        genuinely new revision of a known fact is a new candidate.
+        """
+        seen: dict[tuple[str, str, str], tuple[int, Any, Any, Any]] = {}
+        for entry, batch in changed_batches:
+            for item in batch.items:
+                key = (entry.source_id, item.fact_id, item.revision)
+                rank = self._observed_ms(item.observed_at)
+                previous = seen.get(key)
+                if previous is None or rank > previous[0]:
+                    seen[key] = (rank, entry, batch, item)
+        ordered = sorted(seen.values(), key=lambda entry: entry[0], reverse=True)
+        return ordered[: self.config.max_candidates], len(ordered)
+
+    @staticmethod
+    def _candidate_batches(
+        candidates: list[tuple[int, Any, Any, Any]]
+    ) -> list[tuple[Any, Any, list[Any]]]:
+        """Group selected candidates back into per-batch item lists."""
+        grouped: dict[int, tuple[Any, Any, list[Any]]] = {}
+        for _rank, entry, batch, item in candidates:
+            bucket = grouped.setdefault(id(batch), (entry, batch, []))
+            bucket[2].append(item)
+        return list(grouped.values())
+
+    @staticmethod
+    def _observed_ms(value: str) -> int:
+        try:
+            return int(
+                datetime.fromisoformat(
+                    value.replace("Z", "+00:00").replace("z", "+00:00")
+                ).timestamp()
+                * 1000
+            )
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _authority_reason(context: ExecutorContext) -> str:
@@ -646,16 +742,31 @@ class ProactiveCoordinator:
             tool_allowlist=tuple(allowlist),
         )
 
-    def _suppress(self, lease: RunLease, reason: str, now_ms: int) -> RunReport:
+    def _suppress(
+        self,
+        lease: RunLease,
+        reason: str,
+        now_ms: int,
+        *,
+        candidates_count: int = 0,
+        truncated_count: int = 0,
+    ) -> RunReport:
         silence_reason = _silence_reason_for(reason)
         self.store.record_run_suppressed(
-            lease, reason=reason, now_ms=now_ms, silence_reason=silence_reason
+            lease,
+            reason=reason,
+            now_ms=now_ms,
+            silence_reason=silence_reason,
+            candidates_count=candidates_count,
+            truncated_count=truncated_count,
         )
         return RunReport(
             run_id=lease.run_id,
             outcome="suppressed",
             reason=reason,
             silence_reason=silence_reason,
+            candidates=candidates_count,
+            truncated=truncated_count,
             model_turns=0,
         )
 

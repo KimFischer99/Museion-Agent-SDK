@@ -55,7 +55,8 @@ _HEARTBEAT_KEYS = ("enabled", "every_seconds", "misfire", "checklist")
 _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "external_writes", "lockscreen_content", "allow_untrusted_shell_skills",
                 "cadence", "cadence_min_gap_seconds", "cadence_max_per_day",
-                "require_reason", "idle_gate", "idle_min_minutes")
+                "require_reason", "idle_gate", "idle_min_minutes",
+                "max_candidates")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -255,6 +256,8 @@ class PolicySection:
     #: ``idle_min_minutes``. Reminders and just-raised user wakes are exempt.
     idle_gate: bool = True
     idle_min_minutes: int = 60
+    #: W5 candidate cap: how many changed source items may enter one run.
+    max_candidates: int = 10
 
     @property
     def cadence_configured(self) -> bool:
@@ -478,6 +481,11 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         policy_raw.get("idle_min_minutes", 60),
         "idle_min_minutes",
     )
+    max_candidates = _positive_int(
+        "policy",
+        policy_raw.get("max_candidates", 10),
+        "max_candidates",
+    )
     policy = PolicySection(
         cadence=cadence,
         cadence_min_gap_seconds=(
@@ -505,6 +513,7 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         require_reason=require_reason,
         idle_gate=idle_gate,
         idle_min_minutes=idle_min_minutes,
+        max_candidates=max_candidates,
     )
 
     skills_raw = raw.get("skills", {})

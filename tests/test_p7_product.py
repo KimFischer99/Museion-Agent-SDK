@@ -282,6 +282,11 @@ class FacadeTests(unittest.TestCase):
                             "every_seconds": 1800,
                         },
                         instruction="检查日历变化",
+                        # W5: a job whose source only advances its cursor
+                        # without items is quiet by default; this test is
+                        # about tick accounting, so keep the pre-v2
+                        # every-slot semantics explicitly.
+                        always_run=True,
                     ),
                     idempotency_key="p7-tick-1",
                 )

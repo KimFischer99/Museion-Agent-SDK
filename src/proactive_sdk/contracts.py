@@ -634,6 +634,9 @@ class JobSpec:
             raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
         if not isinstance(self.task, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "task must be an object")
+        always_run = self.task.get("always_run")
+        if always_run is not None and not isinstance(always_run, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "task.always_run must be a boolean")
         instruction = self.task.get("instruction")
         if self.mode == "reminder":
             # A reminder carries no agent instruction at all: it must not be
