@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import types
 import typing
 from dataclasses import dataclass
 from typing import Any, Callable, get_args, get_origin, get_type_hints
@@ -40,7 +41,11 @@ def schema_for_type(annotation: Any, *, name: str) -> dict[str, Any]:
     """
     origin = get_origin(annotation)
 
-    if origin is typing.Union:  # Optional[X] and X | None
+    # ``Optional[X]`` and ``X | None``. Python 3.14 unified the two forms, but
+    # on 3.11/3.12 the PEP 604 union has a distinct origin — both spellings
+    # are supported on every runtime this SDK claims (>=3.11) instead of
+    # failing at tool-registration time on the older ones.
+    if origin is typing.Union or origin is types.UnionType:
         members = [arg for arg in get_args(annotation) if arg is not _NONE_TYPE]
         if len(members) == 1:
             return schema_for_type(members[0], name=name)
