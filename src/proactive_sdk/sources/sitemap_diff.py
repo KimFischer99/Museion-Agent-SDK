@@ -1,7 +1,7 @@
 """Sitemap-diff source connector (W4b).
 
-Reads a ``sitemap.xml`` (or a one-level ``sitemapindex``) and reports only
-entries that are new or changed since the previous fetch. No model call:
+Reads a ``sitemap.xml`` (or a one-level ``sitemapindex``) and reports the current
+bounded entry set when the sitemap changes. No model call:
 the whole diff is computed by this connector.
 
 Stateless by design: the only state PAS keeps for a source is
@@ -13,12 +13,10 @@ whole URL table::
 
 * first fetch (no cursor) → baseline only, zero items (never a false alarm);
 * unchanged URL set + unchanged ``lastmod`` → zero items;
-* a newer ``lastmod`` → exactly the entries newer than the watermark;
-* sitemap without usable ``lastmod`` values → the set hash decides, and the
-  current entries are reported (bounded by ``max_items``) when it changes.
+* any URL/``lastmod`` change → current entries (bounded by ``max_items``).
 
-Removals are not reported: the v2 contract only asks for new/changed
-entries, and "a URL disappeared" has no useful notification value.
+Removed URLs are not emitted, but removals can trigger a recheck of remaining
+entries. This compact cursor does not identify an exact per-URL delta.
 """
 
 from __future__ import annotations
@@ -82,7 +80,7 @@ def _cursor_for(url_hashes: str, watermark_ms: int) -> str:
 
 
 class SitemapDiffSource:
-    """Report new/changed entries from one sitemap (zero model calls)."""
+    """Recheck current entries when a sitemap changes (zero model calls)."""
 
     requires_explicit_selection = True
 
@@ -219,7 +217,7 @@ class SitemapDiffSource:
                 ErrorCode.DEADLINE_EXCEEDED, "source request deadline has expired", scope="sources"
             )
 
-        entries = await self._collect_entries(remaining_s)
+        entries = await self._collect_entries(deadline)
         observed_at = rfc3339(datetime.now(timezone.utc))
 
         # URL-set hash and lastmod watermark: both fit comfortably in the
@@ -238,22 +236,12 @@ class SitemapDiffSource:
         elif request.cursor_ref == cursor:
             items = ()
         else:
-            previous_hash, previous_watermark = previous
-            changed: list[tuple[str, int | None]] = []
-            if watermark_ms > previous_watermark:
-                changed = [
-                    (loc, lastmod)
-                    for loc, lastmod in entries.items()
-                    if lastmod is not None and lastmod > previous_watermark
-                ]
-            elif previous_hash != url_hashes and not any(
-                lastmod is not None for lastmod in entries.values()
-            ):
-                # No usable lastmod anywhere: the set hash changed, so report
-                # the current bounded entry set rather than guessing a diff.
-                changed = list(entries.items())
-            items = tuple(self._item_for(loc, lastmod, observed_at) for loc, lastmod in changed)
-            items = items[: self.max_items]
+            # shortcut: compact cursors cannot identify exact URL deltas;
+            # store per-URL state if exact incrementality becomes required.
+            items = tuple(
+                self._item_for(loc, lastmod, observed_at)
+                for loc, lastmod in list(entries.items())[: self.max_items]
+            )
 
         return SourceBatch(
             source_id=self.source_id,
@@ -264,8 +252,8 @@ class SitemapDiffSource:
             fresh_until=rfc3339(datetime.now(timezone.utc) + timedelta(seconds=self.fresh_ttl_s)),
         )
 
-    async def _collect_entries(self, remaining_s: float) -> dict[str, int | None]:
-        text = await self._fetch_text(self.url, remaining_s)
+    async def _collect_entries(self, deadline: datetime) -> dict[str, int | None]:
+        text = await self._fetch_text(self.url, deadline)
         root = self._parse_xml(text)
         kind = local_name(root.tag)
         entries: dict[str, int | None] = {}
@@ -277,7 +265,7 @@ class SitemapDiffSource:
             ]
             children = [child for child in children if child][: self.max_children]
             for child in children:
-                child_entries = self._urlset_entries(self._parse_xml(await self._fetch_text(child, remaining_s)))
+                child_entries = self._urlset_entries(self._parse_xml(await self._fetch_text(child, deadline)))
                 for loc, lastmod in child_entries:
                     entries[loc] = max(
                         (existing for existing in (entries.get(loc), lastmod) if existing is not None),
@@ -336,7 +324,7 @@ class SitemapDiffSource:
             found.append((loc, lastmod))
         return found
 
-    async def _fetch_text(self, url: str, remaining_s: float) -> str:
+    async def _fetch_text(self, url: str, deadline: datetime) -> str:
         host = urlsplit(url).hostname or ""
         if not any(host == allowed or host.endswith("." + allowed) for allowed in self.allowed_hosts):
             raise PASError(
@@ -344,9 +332,14 @@ class SitemapDiffSource:
                 f"sitemap child {url!r} is not covered by the allowlist",
                 scope="sources",
             )
+        remaining_s = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining_s <= 0:
+            raise PASError(
+                ErrorCode.DEADLINE_EXCEEDED, "source request deadline has expired", scope="sources"
+            )
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self.broker.fetch_text, url), max(0.001, remaining_s)
+                asyncio.to_thread(self.broker.fetch_text, url), remaining_s
             )
         except TimeoutError as exc:
             raise PASError(

@@ -34,7 +34,7 @@ export async function createAgentSession(options) {
   return {session: {
     async prompt() {}, async waitForIdle() {}, async abort() {}, dispose() {},
     isIdle: () => true, getActiveToolNames: () => [],
-    getLastAssistantText: () => JSON.stringify({decision:"silent", summary:"test", proposals:[]}),
+    getLastAssistantText: () => JSON.stringify({decision:"silent", summary:"test", proposals:[], silence_reason:"not_useful_now"}),
     getSessionStats: () => ({toolCalls:0,tokens:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}})
   }};
 }
@@ -47,6 +47,7 @@ export async function createAgentSession(options) {
                 await executor.start()
                 reply = await executor.run(run_id="test-analysis", instruction="return silent", cwd=tmp)
                 self.assertEqual(reply.envelope["decision"], "silent")
+                self.assertEqual(reply.envelope["silence_reason"], "not_useful_now")
             finally:
                 await executor.close()
 

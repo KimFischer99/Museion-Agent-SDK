@@ -6,12 +6,13 @@ async function main(): Promise<void> {
   const session: VettedPiSession = {
     async prompt() { await Promise.resolve(); finished = true; },
     async abort() {}, async waitForIdle() {},
-    getLastAssistantText() { return finished ? '{"decision":"silent","summary":"No change","proposals":[]}' : undefined; },
+    getLastAssistantText() { return finished ? '{"decision":"silent","summary":"No change","proposals":[],"silence_reason":"not_useful_now"}' : undefined; },
     getActiveToolNames() { return ["source_read"]; },
     dispose() { disposed = true; }
   };
   const result = await runPiDecision(async () => session, "test", new Set(["source_read"]));
   ok(result.decision === "silent" && disposed && finished, "finalization failed");
+  ok(result.silence_reason === "not_useful_now", "v2 silence reason was lost");
   let rejected = false;
   try { parseDecision('{"decision":"silent","summary":"x","proposals":[{}]}'); }
   catch { rejected = true; }

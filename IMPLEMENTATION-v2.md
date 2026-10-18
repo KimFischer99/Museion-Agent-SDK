@@ -67,7 +67,7 @@ PAS 从「有骨架的主动运行时」推进到 v2：决策有结构化理由�
 - 新包 `src/proactive_sdk/sources/`：
   - `feed.py`：共享 RSS/Atom 解析（从原 news source 抽出，行为不变）；
   - `rss.py`：`RssSource`，任意 RSS/Atom URL；
-  - `sitemap_diff.py`：`SitemapDiffSource`，无状态 diff（cursor 只带 `v1:<URL集哈希>:<lastmod watermark>`），首轮只建基线，一层 sitemapindex（子 URL 逐个 allowlist 校验），删除不汇报；
+  - `sitemap_diff.py`：`SitemapDiffSource`，无状态 diff（cursor 只带 `v1:<URL集哈希>:<lastmod watermark>`），首轮只建基线，一层 sitemapindex（子 URL 逐个 allowlist 校验）；URL/lastmod 变化时重新检查当前条目（保留 max_items 上限，可能重复检查），不承诺精确增量；删除的 URL 不输出，但删除可触发剩余条目重检；
   - `page_hash.py`：`PageHashSource`，正文抽取（去 script/style/nav/header/footer 等）→ 5-gram shingle → 64-bit simhash，Hamming 距离 > 阈值（默认 8/64）才算变化；小页面退化为精确哈希。
 - 安全默认（owner 评审后）：
   - 仅 HTTPS；allowlist 必填（覆盖子域）；SSRF 防护（解析后拒私网/回环/reserved）+ IP pinning；

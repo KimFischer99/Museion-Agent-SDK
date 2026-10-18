@@ -122,6 +122,7 @@ def build_agent(config=None) -> ProactiveAgent:
         executor = HostBridge(
             HermesHostDriver(HermesRunsExecutor(base_url, token)),
             capabilities=lambda: agent.store.active_capabilities(now_ms=agent.store.clock.wall_now_ms()),
+            require_reason=config.policy.require_reason if config is not None else True,
         )
     elif executor_kind == "pi":
         command_text = os.environ.get("PAS_PI_COMMAND", "").strip()
@@ -152,6 +153,7 @@ def build_agent(config=None) -> ProactiveAgent:
         executor = HostBridge(
             PiHostDriver(pi_executor, cwd=cwd),
             capabilities=lambda: agent.store.active_capabilities(now_ms=agent.store.clock.wall_now_ms()),
+            require_reason=config.policy.require_reason if config is not None else True,
         )
     else:
         raise PASError(

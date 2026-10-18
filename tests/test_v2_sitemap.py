@@ -14,6 +14,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -120,21 +121,37 @@ class SitemapBaselineTests(unittest.TestCase):
         self.assertEqual(second.items, ())
         self.assertEqual(second.cursor_ref, first.cursor_ref)
 
-    def test_changed_lastmod_produces_exactly_one_candidate(self):
+    def test_changed_lastmod_rechecks_current_entries(self):
         source = _source(ScriptedBroker(SITEMAP, SITEMAP_CHANGED))
         first = asyncio.run(source.fetch_delta(_request()))
         changed = asyncio.run(source.fetch_delta(_request(cursor=first.cursor_ref)))
-        self.assertEqual(len(changed.items), 1)
+        self.assertEqual(len(changed.items), 2)
         payload = json.loads(changed.items[0].content)
         self.assertEqual(payload["loc"], "https://example.org/a")
         self.assertEqual(payload["kind"], "sitemap_diff")
 
-    def test_added_url_is_the_only_candidate(self):
+    def test_added_url_rechecks_current_entries(self):
         source = _source(ScriptedBroker(SITEMAP, SITEMAP_ADDED))
         first = asyncio.run(source.fetch_delta(_request()))
         changed = asyncio.run(source.fetch_delta(_request(cursor=first.cursor_ref)))
-        self.assertEqual(len(changed.items), 1)
-        self.assertEqual(json.loads(changed.items[0].content)["loc"], "https://example.org/c")
+        self.assertEqual(
+            [json.loads(item.content)["loc"] for item in changed.items],
+            ["https://example.org/a", "https://example.org/b", "https://example.org/c"],
+        )
+
+    def test_added_url_without_lastmod_is_rechecked(self):
+        added = SITEMAP.replace(
+            "</urlset>", "<url><loc>https://example.org/new</loc></url></urlset>",
+        )
+        source = _source(ScriptedBroker(SITEMAP, added, added))
+        first = asyncio.run(source.fetch_delta(_request()))
+        changed = asyncio.run(source.fetch_delta(_request(cursor=first.cursor_ref)))
+        self.assertEqual(
+            [json.loads(item.content)["loc"] for item in changed.items],
+            ["https://example.org/a", "https://example.org/b", "https://example.org/new"],
+        )
+        unchanged = asyncio.run(source.fetch_delta(_request(cursor=changed.cursor_ref)))
+        self.assertEqual(unchanged.items, ())
 
     def test_lastmod_less_sitemap_falls_back_to_set_hash(self):
         source = _source(ScriptedBroker(SITEMAP_NO_LASTMOD, SITEMAP_NO_LASTMOD_CHANGED))
@@ -161,8 +178,32 @@ class SitemapIndexTests(unittest.TestCase):
         self.assertEqual(first.items, ())
         self.assertEqual(len(broker.calls), 3)  # index + two children
         changed = asyncio.run(source.fetch_delta(_request(cursor=first.cursor_ref)))
-        self.assertEqual(len(changed.items), 1)
-        self.assertEqual(json.loads(changed.items[0].content)["loc"], "https://example.org/two")
+        self.assertEqual(
+            [json.loads(item.content)["loc"] for item in changed.items],
+            ["https://example.org/one", "https://example.org/two"],
+        )
+
+    def test_index_shares_one_deadline(self):
+        now = datetime.now(timezone.utc)
+
+        class AdvancingBroker(ScriptedBroker):
+            def fetch_text(self, url):
+                nonlocal now
+                now += timedelta(seconds=0.6)
+                return super().fetch_text(url)
+
+        broker = AdvancingBroker(INDEX, CHILD_1, CHILD_2)
+        request = SourceRequest(
+            source_id="sitemap", account_ref="account:public",
+            deadline=(now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+        )
+        with patch("proactive_sdk.sources.sitemap_diff.datetime") as clock:
+            clock.now.side_effect = lambda tz: now
+            clock.fromisoformat.side_effect = datetime.fromisoformat
+            with self.assertRaises(PASError) as caught:
+                asyncio.run(_source(broker).fetch_delta(request))
+        self.assertEqual(caught.exception.code, ErrorCode.DEADLINE_EXCEEDED)
+        self.assertEqual(broker.calls, ["https://example.org/sitemap.xml", "https://example.org/child-1.xml"])
 
     def test_children_are_allowlist_checked(self):
         index = INDEX.replace("https://example.org/child-2.xml", "https://evil.example/x.xml")

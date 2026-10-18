@@ -14,6 +14,7 @@ export interface VettedPiSession {
 
 export interface DecisionEnvelope {
   decision: "silent" | "propose";
+  silence_reason?: unknown; // Normalized by the shared Python decision parser.
   summary: string;
   proposals: unknown[]; // Production JSON Schema validator refines each action.
 }
@@ -25,11 +26,12 @@ export function parseDecision(text: string): DecisionEnvelope {
     throw new Error("Decision must be an object");
   }
   const o = x as Record<string, unknown>;
-  if (Object.keys(o).some(k => !["decision", "summary", "proposals"].includes(k)) ||
+  if (Object.keys(o).some(k => !["decision", "summary", "proposals", "silence_reason"].includes(k)) ||
       (o.decision !== "silent" && o.decision !== "propose") ||
       typeof o.summary !== "string" || o.summary.length > 2048 ||
       !Array.isArray(o.proposals) || o.proposals.length > 8 ||
-      (o.decision === "silent" && o.proposals.length !== 0)) {
+      (o.decision === "silent" && o.proposals.length !== 0) ||
+      (o.decision !== "silent" && o.silence_reason != null)) {
     throw new Error("Invalid decision envelope");
   }
   return o as unknown as DecisionEnvelope;

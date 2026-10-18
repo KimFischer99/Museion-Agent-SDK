@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from examples import release_app  # noqa: E402
 from proactive_sdk import ErrorCode, Job, OpenAICompatibleModel, PASError
-from proactive_sdk.config import PasConfig
+from proactive_sdk.config import PasConfig, PolicySection
 from proactive_sdk.host_bridge import HostBridge
 from proactive_sdk.host_drivers import HermesHostDriver, PiHostDriver
 from proactive_sdk.gws import SubprocessGwsConnector
@@ -164,6 +164,29 @@ class ReleaseAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pi.executor.driver.executor._config.allowed_tools, ())
             finally:
                 await pi.close()
+
+    async def test_host_executor_honors_reason_gray_switch(self):
+        from test_host_bridge import TextInTextOutHost, _envelope, _pack, _request
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "PAS_EXECUTOR": "hermes", "PAS_HERMES_URL": "https://hermes.invalid",
+            "PAS_HERMES_TOKEN": "test-token",
+        }, clear=True):
+            agent = release_app.build_agent(PasConfig(
+                state_dir=tmp, timezone="UTC", profile="gray-test", locale="en",
+                policy=PolicySection(require_reason=False),
+            ))
+            answer = _envelope()
+            del answer["proposals"][0]["reason"]
+            agent.executor.driver = TextInTextOutHost(answer)
+            try:
+                result = await agent.executor.execute(
+                    _request(), _pack(), [], instruction="test gray switch",
+                )
+                self.assertEqual(result.decision.decision, "propose")
+                self.assertIsNone(result.decision.proposals[0].reason)
+            finally:
+                await agent.close()
 
     async def test_trusted_webhook_and_optional_gmail_source_are_bound_from_env(self):
         env = {
