@@ -190,7 +190,23 @@ class _MutableSite(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path == "/big":
-            body = b"x" * (2 * 1024 * 1024 + 10)
+            body = b"x" * (5 * 1024 * 1024 + 10)
+        elif path == "/xhtml":
+            body = PAGE.replace("<!doctype html>", '<!doctype html><html xmlns="http://www.w3.org/1999/xhtml">').encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xhtml+xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        elif path == "/binary":
+            body = b"\x00\x01\x02"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         elif path in self.state:
             body = self.state[path].encode("utf-8")
         else:
@@ -311,7 +327,7 @@ class OfflineSiteEndToEndTests(unittest.TestCase):
         )
         with self.assertRaises(EgressBlocked):
             asyncio.run(redirect_source.fetch_delta(_request()))
-        # Oversized response: bounded before parsing.
+        # Oversized response (> 5 MiB cap): bounded before parsing.
         big_source = PageHashSource(
             url=f"https://localhost:{self.port}/big",
             source_id="page",
@@ -320,6 +336,24 @@ class OfflineSiteEndToEndTests(unittest.TestCase):
         )
         with self.assertRaises(EgressBlocked):
             asyncio.run(big_source.fetch_delta(_request()))
+        # application/xhtml+xml is an allowed content type (owner decision),
+        # while opaque binary types stay refused.
+        xhtml_source = PageHashSource(
+            url=f"https://localhost:{self.port}/xhtml",
+            source_id="page",
+            allowed_hosts=("localhost",),
+            broker=self.broker,
+        )
+        batch = asyncio.run(xhtml_source.fetch_delta(_request()))
+        self.assertEqual(batch.items, ())  # baseline
+        binary_source = PageHashSource(
+            url=f"https://localhost:{self.port}/binary",
+            source_id="page",
+            allowed_hosts=("localhost",),
+            broker=self.broker,
+        )
+        with self.assertRaises(EgressBlocked):
+            asyncio.run(binary_source.fetch_delta(_request()))
 
 
 if __name__ == "__main__":

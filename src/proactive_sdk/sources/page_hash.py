@@ -32,7 +32,7 @@ __all__ = ["PageHashSource"]
 _SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _ACCOUNT_MAX = 256
 _CURSOR_PREFIX = "v1:"
-MAX_BYTES = 2 * 1024 * 1024
+MAX_BYTES = 5 * 1024 * 1024  # owner decision: 5 MiB for pages
 #: Bound on extracted text before shingling (a hostile page cannot force
 #: unbounded CPU here; the broker already bounds the bytes).
 MAX_TEXT_CHARS = 200_000

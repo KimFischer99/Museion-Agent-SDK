@@ -41,9 +41,9 @@ __all__ = ["RssSource"]
 
 _SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _ACCOUNT_MAX = 256
-#: Feed bodies are text; 2 MiB is the v2 recommendation for page-shaped
-#: sources. The broker enforces it before the body reaches the parser.
-DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+#: Response cap for feed-shaped sources (owner decision: 5 MiB). The broker
+#: enforces it before the body reaches the parser.
+DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_FRESH_TTL_S = 600
 DEFAULT_MAX_ITEMS = 50
 

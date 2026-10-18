@@ -89,7 +89,7 @@ def build_agent(config):
 
 Security defaults enforced by the connector (no configuration needed):
 HTTPS only, explicit host allowlist, private/loopback addresses refused, bounded
-response size (2 MiB) and timeouts, redirects refused, fixed User-Agent. The
+response size (5 MiB) and timeouts, redirects refused, fixed User-Agent. The
 `public.read` capability must be granted through the normal trusted-consent path.
 
 Sitemap sources follow the same shape with `SitemapDiffSource` (first fetch is a

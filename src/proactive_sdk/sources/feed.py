@@ -36,9 +36,9 @@ __all__ = [
 ]
 
 #: A feed larger than this is refused before XML parsing (the egress broker
-#: already bounds the response; this is the parser's own sanity bound for
-#: callers that hand it text directly).
-MAX_FEED_CHARS = 4 * 1024 * 1024
+#: already bounds the response at 5 MiB; this parser budget sits above it so
+#: the transport cap is the effective limit, not a lower parser surprise).
+MAX_FEED_CHARS = 8 * 1024 * 1024
 
 _FACT_PREFIX = "feed:"
 

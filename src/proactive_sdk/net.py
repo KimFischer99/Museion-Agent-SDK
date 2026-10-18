@@ -37,6 +37,7 @@ _ALLOWED_TYPES_PREFIX = (
     "application/json",
     "application/atom+xml",
     "application/rss+xml",
+    "application/xhtml+xml",
     "application/xml",
 )
 
