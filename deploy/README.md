@@ -62,3 +62,38 @@ sudo systemctl start pas
 
 A backup file is 0600 plus a `.meta.json` (profile/schema_version/sha256). restore validates the
 identity and the schema version and refuses on any mismatch (fail closed).
+
+## Registering data sources (v2, programmatic)
+
+PAS is plugin-first: extra sources are registered in the deployer's **app module**
+(`--app module:factory`), not through the config-file schema. A source that is never
+registered creates no network surface.
+
+```python
+from proactive_sdk.sources import RssSource
+
+def build_agent(config):
+    agent = ...  # ProactiveAgent(...) as usual
+    agent.registry.register(
+        source_id="museum-news",
+        account_ref="account:public",
+        required_capability="public.read",
+        source=RssSource(
+            url="https://museum.example.org/feed.xml",
+            source_id="museum-news",
+            allowed_hosts=("museum.example.org",),   # mandatory
+        ),
+    )
+    return agent
+```
+
+Security defaults enforced by the connector (no configuration needed):
+HTTPS only, explicit host allowlist, private/loopback addresses refused, bounded
+response size (2 MiB) and timeouts, redirects refused, fixed User-Agent. The
+`public.read` capability must be granted through the normal trusted-consent path.
+
+New network sources are **default-off for untargeted heartbeats**
+(`requires_explicit_selection = True`): a job opts in with
+`task.refresh_source_ids: ["museum-news"]`. Example references:
+`examples/custom_sources_app.py`, and `PAS_RSS_SOURCES` (JSON array) in
+`release/runtime/app.py`.

@@ -51,6 +51,7 @@ __all__ = [
     "assert_single_profile",
     "AgentExecutor",
     "Source",
+    "SourceConnector",
     "ToolBroker",
     "DeliverySink",
     "ModelPort",
@@ -756,7 +757,25 @@ class AgentExecutor(Protocol):
 
 @runtime_checkable
 class Source(Protocol):
+    """One registered source binding. ``fetch_delta`` *is* the probe: the
+    coordinator fetches, compares the returned cursor/items to the stored
+    source state and only then decides whether an analysis is worth it."""
+
     async def fetch_delta(self, request: Any) -> Any: ...
+
+
+@runtime_checkable
+class SourceConnector(Protocol):
+    """A self-describing source connector (v2, W4).
+
+    ``describe()`` is the machine-readable binding summary used by
+    registration and documentation. It returns plain JSON data only — never
+    secrets, tokens or content from the last fetch.
+    """
+
+    async def fetch_delta(self, request: Any) -> Any: ...
+
+    def describe(self) -> dict[str, Any]: ...
 
 
 @runtime_checkable

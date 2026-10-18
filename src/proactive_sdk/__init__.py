@@ -37,6 +37,7 @@ from .contracts import (
     RunRequest,
     RuntimeConfig,
     SourceBatch,
+    SourceConnector,
     SourceItem,
     SourceRequest,
     assert_single_profile,
@@ -96,6 +97,7 @@ from .decision_contract import (
     agent_system_prompt,
     decision_contract,
 )
+from .sources import RssSource
 from .host_forms import CallableHostDriver, SubprocessHostDriver, extract_envelope
 from .host_drivers import HermesHostDriver, PiHostDriver
 from .host_bridge import (
@@ -295,6 +297,7 @@ __all__ = [
     "RunBudget",
     "RunRequest",
     "SourceBatch",
+    "SourceConnector",
     "SourceItem",
     "SourceRequest",
     # P3 context
@@ -327,6 +330,7 @@ __all__ = [
     "ToolLoopExecutor",
     "ActivityProbe",
     "StoreUserActivityProbe",
+    "RssSource",
     "CoordinatorConfig",
     "ProactiveCoordinator",
     "RunReport",

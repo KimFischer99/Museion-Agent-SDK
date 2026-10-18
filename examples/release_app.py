@@ -67,6 +67,7 @@ from proactive_sdk.policy import PolicyConfig
 from proactive_sdk.pi_worker import PiWorkerConfig, PiWorkerExecutor
 from proactive_sdk.proactive import ProactiveController
 from proactive_sdk.research import NewsSearchSource
+from proactive_sdk.sources import RssSource
 
 _MODEL_ENV = ("PAS_MODEL_BASE_URL", "PAS_MODEL_API_KEY", "PAS_MODEL_NAME")
 
@@ -192,6 +193,22 @@ def build_agent(config=None) -> ProactiveAgent:
         ),
         required_capability="public.read",
     )
+    # v2 W4: extra public sources are registered programmatically by the
+    # deployment (no config-schema change). An unset/empty env means no
+    # extra network surface at all.
+    for spec in _rss_source_specs():
+        agent.registry.register(
+            source_id=spec["source_id"],
+            account_ref=spec.get("account_ref", "account:public"),
+            required_capability=spec.get("required_capability", "public.read"),
+            source=RssSource(
+                url=spec["url"],
+                source_id=spec["source_id"],
+                account_ref=spec.get("account_ref", "account:public"),
+                allowed_hosts=tuple(spec.get("allowed_hosts") or ()),
+                required_capability=spec.get("required_capability", "public.read"),
+            ),
+        )
     if gws_command is not None:
         mail = GmailMailSource(
             adapter=GwsAdapter(connector=SubprocessGwsConnector(gws_command)),
@@ -204,6 +221,49 @@ def build_agent(config=None) -> ProactiveAgent:
             required_capability="gmail.read",
         )
     return agent
+
+
+def _rss_source_specs() -> list[dict[str, Any]]:
+    """Parse ``PAS_RSS_SOURCES`` (JSON array) into validated source specs.
+
+    Each entry needs ``source_id`` + ``url`` + a non-empty
+    ``allowed_hosts`` list; nothing is registered when the variable is
+    unset, so the default deployment has no extra network surface.
+    """
+    raw = os.environ.get("PAS_RSS_SOURCES", "").strip()
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise PASError(
+            ErrorCode.INVALID_CONFIG,
+            "PAS_RSS_SOURCES must be a JSON array of source specs",
+            scope="release_app",
+        ) from None
+    if not isinstance(value, list):
+        raise PASError(
+            ErrorCode.INVALID_CONFIG,
+            "PAS_RSS_SOURCES must be a JSON array of source specs",
+            scope="release_app",
+        )
+    specs: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"PAS_RSS_SOURCES[{index}] must be an object",
+                scope="release_app",
+            )
+        missing = [name for name in ("source_id", "url", "allowed_hosts") if not entry.get(name)]
+        if missing:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"PAS_RSS_SOURCES[{index}] is missing {missing}",
+                scope="release_app",
+            )
+        specs.append(entry)
+    return specs
 
 
 def _json_argv(name: str) -> tuple[str, ...] | None:

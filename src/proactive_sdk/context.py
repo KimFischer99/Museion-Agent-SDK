@@ -107,13 +107,20 @@ class SQLiteMemoryPort:
 @dataclass(frozen=True)
 class SourceEntry:
     """One registered source binding: implementation + account + the
-    capability that grants reading it."""
+    capability that grants reading it.
+
+    ``description`` is whatever the connector's optional ``describe()``
+    returned at registration (v2 W4): a machine-readable summary for docs
+    and the ledger, never content or secrets. Empty when the connector
+    predates the convention.
+    """
 
     source_id: str
     account_ref: str
     source: Any  # contracts.Source
     scope: dict[str, Any]
     required_capability: str
+    description: dict[str, Any] | None = None
 
 
 class SourceRegistry:
@@ -139,6 +146,17 @@ class SourceRegistry:
             raise PASError(ErrorCode.INVALID_CONFIG, "required_capability must be a non-empty string")
         if scope is not None and not isinstance(scope, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "scope must be an object")
+        description: dict[str, Any] | None = None
+        describe = getattr(source, "describe", None)
+        if callable(describe):
+            described = describe()
+            if not isinstance(described, dict):
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "source.describe() must return an object",
+                    scope="sources",
+                )
+            description = dict(described)
         key = (source_id, account_ref)
         if key in self._entries:
             raise PASError(ErrorCode.CONFLICT, f"source {source_id!r}/{account_ref!r} already registered")
@@ -148,6 +166,7 @@ class SourceRegistry:
             source=source,
             scope=scope or {},
             required_capability=required_capability,
+            description=description,
         )
 
     def entries(self) -> tuple[SourceEntry, ...]:

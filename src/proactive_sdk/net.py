@@ -32,7 +32,13 @@ __all__ = ["EgressBroker", "EgressBlocked"]
 
 _MAX_REDIRECTS = 0  # always refused
 _DEFAULT_MAX_BYTES = 1024 * 1024
-_ALLOWED_TYPES_PREFIX = ("text/", "application/json", "application/atom+xml", "application/xml")
+_ALLOWED_TYPES_PREFIX = (
+    "text/",
+    "application/json",
+    "application/atom+xml",
+    "application/rss+xml",
+    "application/xml",
+)
 
 
 class EgressBlocked(PASError):

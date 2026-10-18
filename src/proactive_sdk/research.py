@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import math
-import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from html.parser import HTMLParser
 from typing import Callable
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit
 
 from .contracts import ErrorCode, PASError, SourceBatch, SourceItem, SourceRequest
 from .net import EgressBroker
@@ -27,62 +24,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _rfc3339(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].casefold()
-
-
-def _child_text(element: ET.Element, *names: str) -> str:
-    wanted = {name.casefold() for name in names}
-    for child in element:
-        if _local_name(child.tag) in wanted:
-            if _local_name(child.tag) == "link" and child.get("href"):
-                return child.get("href", "").strip()
-            return "".join(child.itertext()).strip()
-    return ""
-
-
-class _TextOnly(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self.parts.append(data)
-
-
-def _plain_text(value: str) -> str:
-    parser = _TextOnly()
-    parser.feed(value)
-    parser.close()
-    return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()[:1000]
-
-
-def _canonical_url(value: str) -> str | None:
-    try:
-        parts = urlsplit(value.strip())
-        if (
-            parts.scheme.casefold() not in ("http", "https")
-            or not parts.hostname
-            or parts.username is not None
-            or parts.password is not None
-            or any(char.isspace() for char in parts.netloc)
-        ):
-            return None
-        port = parts.port
-    except ValueError:
-        return None
-    scheme = parts.scheme.casefold()
-    host = parts.hostname.casefold()
-    netloc = host if port is None or (scheme, port) in (("http", 80), ("https", 443)) else f"{host}:{port}"
-    return urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
-
-
-def _sha256(value: bytes, size: int = 64) -> str:
-    return hashlib.sha256(value).hexdigest()[:size]
+# The RSS/Atom parsing helpers live in ``sources/feed.py`` now: the
+# generic RssSource and this news search must not drift apart.
+from .sources.feed import (  # noqa: E402  (kept as aliases for readability)
+    canonical_url as _canonical_url,
+    child_text as _child_text,
+    local_name as _local_name,
+    plain_text as _plain_text,
+    rfc3339 as _rfc3339,
+    sha256_hex as _sha256,
+)
 
 
 class NewsSearchSource:
@@ -149,6 +100,18 @@ class NewsSearchSource:
         self.max_results = max_results
         self.fresh_ttl_s = fresh_ttl_s
         self.max_age_hours = float(max_age_hours)
+
+    def describe(self) -> dict:
+        """Machine-readable binding summary (registration/ledger/docs)."""
+        return {
+            "kind": "news-search",
+            "source_id": self.source_id,
+            "account_ref": self.account_ref,
+            "required_capability": self.required_capability,
+            "requires_explicit_selection": self.requires_explicit_selection,
+            "max_results": self.max_results,
+            "max_age_hours": self.max_age_hours,
+        }
 
     async def fetch_delta(self, request: SourceRequest) -> SourceBatch:
         if request.source_id != self.source_id or request.account_ref != self.account_ref:
