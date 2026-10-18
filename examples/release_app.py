@@ -67,7 +67,7 @@ from proactive_sdk.policy import PolicyConfig
 from proactive_sdk.pi_worker import PiWorkerConfig, PiWorkerExecutor
 from proactive_sdk.proactive import ProactiveController
 from proactive_sdk.research import NewsSearchSource
-from proactive_sdk.sources import RssSource
+from proactive_sdk.sources import RssSource, SitemapDiffSource
 
 _MODEL_ENV = ("PAS_MODEL_BASE_URL", "PAS_MODEL_API_KEY", "PAS_MODEL_NAME")
 
@@ -209,6 +209,19 @@ def build_agent(config=None) -> ProactiveAgent:
                 required_capability=spec.get("required_capability", "public.read"),
             ),
         )
+    for spec in _sitemap_source_specs():
+        agent.registry.register(
+            source_id=spec["source_id"],
+            account_ref=spec.get("account_ref", "account:public"),
+            required_capability=spec.get("required_capability", "public.read"),
+            source=SitemapDiffSource(
+                url=spec["url"],
+                source_id=spec["source_id"],
+                account_ref=spec.get("account_ref", "account:public"),
+                allowed_hosts=tuple(spec.get("allowed_hosts") or ()),
+                required_capability=spec.get("required_capability", "public.read"),
+            ),
+        )
     if gws_command is not None:
         mail = GmailMailSource(
             adapter=GwsAdapter(connector=SubprocessGwsConnector(gws_command)),
@@ -224,13 +237,17 @@ def build_agent(config=None) -> ProactiveAgent:
 
 
 def _rss_source_specs() -> list[dict[str, Any]]:
-    """Parse ``PAS_RSS_SOURCES`` (JSON array) into validated source specs.
+    """Parse ``PAS_RSS_SOURCES`` (JSON array); unset means no surface."""
+    return _source_specs("PAS_RSS_SOURCES")
 
-    Each entry needs ``source_id`` + ``url`` + a non-empty
-    ``allowed_hosts`` list; nothing is registered when the variable is
-    unset, so the default deployment has no extra network surface.
-    """
-    raw = os.environ.get("PAS_RSS_SOURCES", "").strip()
+
+def _sitemap_source_specs() -> list[dict[str, Any]]:
+    """Parse ``PAS_SITEMAP_SOURCES`` (JSON array); unset means no surface."""
+    return _source_specs("PAS_SITEMAP_SOURCES")
+
+
+def _source_specs(env_name: str) -> list[dict[str, Any]]:
+    raw = os.environ.get(env_name, "").strip()
     if not raw:
         return []
     try:
@@ -238,13 +255,13 @@ def _rss_source_specs() -> list[dict[str, Any]]:
     except ValueError:
         raise PASError(
             ErrorCode.INVALID_CONFIG,
-            "PAS_RSS_SOURCES must be a JSON array of source specs",
+            f"{env_name} must be a JSON array of source specs",
             scope="release_app",
         ) from None
     if not isinstance(value, list):
         raise PASError(
             ErrorCode.INVALID_CONFIG,
-            "PAS_RSS_SOURCES must be a JSON array of source specs",
+            f"{env_name} must be a JSON array of source specs",
             scope="release_app",
         )
     specs: list[dict[str, Any]] = []
@@ -252,14 +269,14 @@ def _rss_source_specs() -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             raise PASError(
                 ErrorCode.INVALID_CONFIG,
-                f"PAS_RSS_SOURCES[{index}] must be an object",
+                f"{env_name}[{index}] must be an object",
                 scope="release_app",
             )
         missing = [name for name in ("source_id", "url", "allowed_hosts") if not entry.get(name)]
         if missing:
             raise PASError(
                 ErrorCode.INVALID_CONFIG,
-                f"PAS_RSS_SOURCES[{index}] is missing {missing}",
+                f"{env_name}[{index}] is missing {missing}",
                 scope="release_app",
             )
         specs.append(entry)

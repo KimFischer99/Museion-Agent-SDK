@@ -22,7 +22,7 @@ if __package__ in (None, ""):  # direct-script import support
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from proactive_sdk import OpenAICompatibleModel, ProactiveAgent  # noqa: E402
-from proactive_sdk.sources import RssSource  # noqa: E402
+from proactive_sdk.sources import RssSource, SitemapDiffSource  # noqa: E402
 
 #: Edit this list (or build it from your own trusted configuration) to add
 #: feeds. ``allowed_hosts`` is mandatory and covers exactly the hosts the
@@ -31,6 +31,18 @@ SOURCES: list[dict[str, Any]] = [
     {
         "source_id": "example-news",
         "url": "https://example.org/feed.xml",
+        "account_ref": "account:public",
+        "allowed_hosts": ["example.org"],
+        "required_capability": "public.read",
+    }
+]
+
+#: Sitemap sources diff only new/changed entries; the first fetch is a
+#: baseline (zero items) and nothing is fetched until a job targets them.
+SITEMAP_SOURCES: list[dict[str, Any]] = [
+    {
+        "source_id": "example-sitemap",
+        "url": "https://example.org/sitemap.xml",
         "account_ref": "account:public",
         "allowed_hosts": ["example.org"],
         "required_capability": "public.read",
@@ -46,6 +58,23 @@ def register_public_sources(agent: ProactiveAgent, specs: list[dict[str, Any]]) 
             account_ref=spec.get("account_ref", "account:public"),
             required_capability=spec.get("required_capability", "public.read"),
             source=RssSource(
+                url=spec["url"],
+                source_id=spec["source_id"],
+                account_ref=spec.get("account_ref", "account:public"),
+                allowed_hosts=tuple(spec["allowed_hosts"]),
+                required_capability=spec.get("required_capability", "public.read"),
+            ),
+        )
+
+
+def register_sitemap_sources(agent: ProactiveAgent, specs: list[dict[str, Any]]) -> None:
+    """Register sitemap-diff sources on an existing agent."""
+    for spec in specs:
+        agent.registry.register(
+            source_id=spec["source_id"],
+            account_ref=spec.get("account_ref", "account:public"),
+            required_capability=spec.get("required_capability", "public.read"),
+            source=SitemapDiffSource(
                 url=spec["url"],
                 source_id=spec["source_id"],
                 account_ref=spec.get("account_ref", "account:public"),
@@ -74,4 +103,5 @@ def build_agent(config: Any = None) -> ProactiveAgent:
         locale=config.locale,
     )
     register_public_sources(agent, SOURCES)
+    register_sitemap_sources(agent, SITEMAP_SOURCES)
     return agent

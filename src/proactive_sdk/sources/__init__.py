@@ -9,5 +9,6 @@ creates a network surface (``EgressBroker`` is built inside it).
 from __future__ import annotations
 
 from .rss import RssSource
+from .sitemap_diff import SitemapDiffSource
 
-__all__ = ["RssSource"]
+__all__ = ["RssSource", "SitemapDiffSource"]

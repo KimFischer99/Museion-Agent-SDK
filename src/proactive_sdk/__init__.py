@@ -97,7 +97,7 @@ from .decision_contract import (
     agent_system_prompt,
     decision_contract,
 )
-from .sources import RssSource
+from .sources import RssSource, SitemapDiffSource
 from .host_forms import CallableHostDriver, SubprocessHostDriver, extract_envelope
 from .host_drivers import HermesHostDriver, PiHostDriver
 from .host_bridge import (
@@ -331,6 +331,7 @@ __all__ = [
     "ActivityProbe",
     "StoreUserActivityProbe",
     "RssSource",
+    "SitemapDiffSource",
     "CoordinatorConfig",
     "ProactiveCoordinator",
     "RunReport",

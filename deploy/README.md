@@ -92,6 +92,11 @@ HTTPS only, explicit host allowlist, private/loopback addresses refused, bounded
 response size (2 MiB) and timeouts, redirects refused, fixed User-Agent. The
 `public.read` capability must be granted through the normal trusted-consent path.
 
+Sitemap sources follow the same shape with `SitemapDiffSource` (first fetch is a
+baseline, later fetches report only new/changed entries; no model call). The release
+app reads `PAS_SITEMAP_SOURCES` (same JSON array shape) for deployments that do not
+want a custom app module.
+
 New network sources are **default-off for untargeted heartbeats**
 (`requires_explicit_selection = True`): a job opts in with
 `task.refresh_source_ids: ["museum-news"]`. Example references:
