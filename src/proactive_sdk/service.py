@@ -170,6 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     activity.add_argument("--limit", type=int, default=50)
 
+    stats = add(
+        "stats",
+        help_text="delivery feedback report: acceptance per decision reason and per source",
+    )
+    stats.add_argument(
+        "--since",
+        default="7d",
+        help="window: 7d/24h/30m or an ISO timestamp (default 7d)",
+    )
+
     runs = add("runs", help_text="run operations: list|show|cancel|events")
     runs.add_argument("action", choices=["list", "show", "cancel", "events"])
     runs.add_argument("run_id", nargs="?")
@@ -664,6 +674,51 @@ def _cmd_activity(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_stats_table(report: dict[str, Any]) -> str:
+    totals = report["totals"]
+    lines = [
+        f"window: {report['since']} ({report['since_ms']} .. {report['now_ms']} ms)",
+        (
+            f"sent={totals['sent']} accepted={totals['accepted']}"
+            f" negative={totals['negative']} weak_ignored={totals['weak_ignored']}"
+            f" pending={totals['pending']}"
+            f" acceptance_rate={totals['acceptance_rate']:.4f}"
+        ),
+    ]
+
+    def table(title: str, rows: list[dict[str, Any]], key: str) -> None:
+        lines.append("")
+        lines.append(title)
+        lines.append(
+            f"{key:<24} {'sent':>5} {'accepted':>9} {'negative':>9}"
+            f" {'ignored':>8} {'pending':>8} {'rate':>8}"
+        )
+        for row in rows:
+            lines.append(
+                f"{str(row[key])[:24]:<24} {row['sent']:>5} {row['accepted']:>9}"
+                f" {row['negative']:>9} {row['weak_ignored']:>8}"
+                f" {row['pending']:>8} {row['acceptance_rate']:>8.4f}"
+            )
+
+    table("by reason", report["by_reason"], "reason")
+    table("by source", report["by_source"], "source_id")
+    return "\n".join(lines)
+
+
+def _cmd_stats(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    agent = _open_agent(args, config)
+    try:
+        report = agent.delivery_stats(since=args.since)
+        if _json_flag(args):
+            _print(report, True)
+        else:
+            print(_render_stats_table(report))
+    finally:
+        agent.store.close()
+    return 0
+
+
 def _cmd_runs(args: argparse.Namespace) -> int:
     config = _load_config(args)
     agent = _open_agent(args, config)
@@ -972,6 +1027,7 @@ _COMMANDS = {
     "runs": _cmd_runs,
     "approvals": _cmd_approvals,
     "notifications": _cmd_notifications,
+    "stats": _cmd_stats,
     "skills": _cmd_skills,
     "hooks": _cmd_hooks,
     "backup": _cmd_backup,

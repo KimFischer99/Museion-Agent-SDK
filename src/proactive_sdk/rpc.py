@@ -84,6 +84,7 @@ PROACTIVE_RPC_METHODS = (
     "approvals.resolve",
     "notifications.list",
     "notifications.feedback",
+    "feedback.record",
 )
 
 

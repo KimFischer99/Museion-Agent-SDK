@@ -888,6 +888,44 @@ class ProactiveAgent:
     def inbox_mark_read(self, inbox_id: str) -> bool:
         return self.store.mark_inbox_read(inbox_id, now_ms=self.store.clock.wall_now_ms())
 
+    def delivery_feedback_record(
+        self, *, message_id: str, signal: str, actor: str
+    ) -> dict[str, Any]:
+        """Trusted-UI report of what happened after one delivered message.
+
+        Separate from ``notifications_feedback`` (preference feedback): this
+        records delivery outcomes (replied/dismissed/complained). The
+        ``ignored_24h`` verdict is host-side only and never comes from here.
+        """
+        return self.store.record_delivery_feedback(
+            message_id=message_id,
+            signal=signal,
+            actor=actor,
+            source="user",
+            now_ms=self.store.clock.wall_now_ms(),
+        )
+
+    def delivery_stats(self, *, since: str | None = None) -> dict[str, Any]:
+        """W6 report: acceptance per decision reason and per source.
+
+        ``since`` accepts ``7d`` / ``24h`` / ``30m`` or an ISO timestamp
+        (default 7d). Thresholds are never adjusted automatically.
+        """
+        from .stats import DEFAULT_SINCE, aggregate_delivery_stats, parse_since
+
+        now = self.store.clock.wall_now_ms()
+        try:
+            since_ms = parse_since(since or DEFAULT_SINCE, now_ms=now)
+        except ValueError as exc:
+            raise PASError(ErrorCode.INVALID_CONFIG, str(exc), scope="stats") from None
+        messages = self.store.sent_messages_since(since_ms=since_ms, now_ms=now)
+        feedback = self.store.delivery_feedback_since(since_ms=since_ms)
+        report = aggregate_delivery_stats(messages, feedback)
+        report["since"] = since or DEFAULT_SINCE
+        report["since_ms"] = since_ms
+        report["now_ms"] = now
+        return report
+
     def notifications_feedback(
         self, *, kind: str, actor: str, message_id: str | None = None, scope: dict[str, Any] | None = None
     ) -> dict[str, Any]:

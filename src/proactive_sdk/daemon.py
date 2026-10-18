@@ -355,6 +355,15 @@ class PasDaemon:
         await self._pump_runs()
         await self._pump_delivery(now)
 
+        policy = agent.config.policy if agent.config is not None else None
+        if policy is not None and policy.feedback_ignored_backfill:
+            try:
+                marked = agent.store.backfill_ignored_24h(now_ms=now)
+                if marked:
+                    self.logger.info("ignored_24h_backfilled", count=marked)
+            except PASError as exc:  # noqa: PERF203 - derived data, never fatal
+                self.logger.error("ignored_24h_backfill_failed", reason=exc.safe_message)
+
         health = agent.write_health_file(
             scheduler_age_ms=(now - self._last_admit_ms) if self._last_admit_ms else None,
             db_ok=True,

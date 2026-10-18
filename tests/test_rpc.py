@@ -137,9 +137,10 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         # against the same tuple in test_client_ts.py.
         # v0.1.1 adds jobs.stop and jobs.activity (SPEC §21.1 step 7);
         # v0.1.2 adds input.note (step 6) and the suggestions pair (step 7).
-        self.assertEqual(len(PROACTIVE_RPC_METHODS), 25)
+        # v2 adds feedback.record (W6 delivery outcomes).
+        self.assertEqual(len(PROACTIVE_RPC_METHODS), 26)
         for extra in ("jobs.stop", "jobs.activity", "input.note",
-                      "suggestions.list", "suggestions.resolve"):
+                      "suggestions.list", "suggestions.resolve", "feedback.record"):
             self.assertIn(extra, PROACTIVE_RPC_METHODS)
 
 

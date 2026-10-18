@@ -2948,6 +2948,7 @@ class Store:
         now_ms: int,
         candidates_count: int = 0,
         truncated_count: int = 0,
+        proposal_sources: dict[str, str] | None = None,
     ) -> str:
         """Commit one finished analysis in a single transaction (§13.2:
         决策完成 = 校验 run fence + 保存审计 + 建 proposals + 更新 run state).
@@ -3041,11 +3042,21 @@ class Store:
                     # interrupting proposal is recorded, but honestly says
                     # that no reason was supplied.
                     reason = SILENCE_UNSPECIFIED
+                source_id = (proposal_sources or {}).get(fact_id)
+                if source_id is not None and (
+                    not isinstance(source_id, str) or not 1 <= len(source_id) <= 128
+                ):
+                    raise PASError(
+                        ErrorCode.INVALID_CONFIG,
+                        "proposal source_id must be 1..128 chars",
+                        scope="runs",
+                    )
                 self.db.execute(
                     """INSERT INTO run_proposals(
                            proposal_id, run_id, seq, kind, fact_id, revision, body,
-                           arguments_json, evidence_refs_json, expires_at_ms, reason, created_at_ms)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           arguments_json, evidence_refs_json, expires_at_ms, reason,
+                           source_id, created_at_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         f"prop{content_hash({'run': lease.run_id, 'seq': index, 'fact': fact_id, 'kind': kind})[:28]}",
                         lease.run_id,
@@ -3058,6 +3069,7 @@ class Store:
                         canonical_json(proposal.get("evidence_refs") or []),
                         self._deadline_to_ms(proposal.get("expires_at")),
                         reason,
+                        source_id,
                         now_ms,
                     ),
                 )
@@ -3092,7 +3104,7 @@ class Store:
         rows = self.db.execute(
             """SELECT proposal_id, seq, kind, fact_id, revision, body,
                       arguments_json, evidence_refs_json, expires_at_ms, reason,
-                      policy_json, created_at_ms
+                      source_id, policy_json, created_at_ms
                FROM run_proposals WHERE run_id=? ORDER BY seq""",
             (run_id,),
         ).fetchall()
@@ -3108,6 +3120,7 @@ class Store:
                 "evidence_refs": canonical_loads(row["evidence_refs_json"]),
                 "expires_at_ms": row["expires_at_ms"],
                 "reason": row["reason"],
+                "source_id": row["source_id"],
                 "policy": canonical_loads(row["policy_json"]) if row["policy_json"] else None,
                 "created_at_ms": row["created_at_ms"],
             }
@@ -3173,6 +3186,10 @@ class Store:
     _FEEDBACK_KINDS = frozenset(
         {"handled", "not_useful", "mute_topic", "unmute_topic", "wrong_target"}
     )
+    #: W6 delivery-outcome signals. ``ignored_24h`` is host-backfill only and
+    #: is deliberately weaker than the explicit user signals.
+    _DELIVERY_SIGNALS = frozenset({"replied", "ignored_24h", "dismissed", "complained"})
+    _DELIVERY_USER_SIGNALS = frozenset({"replied", "dismissed", "complained"})
     _ACTION_ACTIVE_STATES = ("planned", "approved", "queued")
     _OUTBOX_SENDABLE_STATES = ("pending", "deferred", "sending")
     _OUTBOX_DELIVERED_STATES = ("provider_accepted", "stored_in_inbox", "reconciled_delivered")
@@ -4349,6 +4366,161 @@ class Store:
         ).fetchone()
         return row is not None
 
+    # -- W6 delivery feedback (separate from preference feedback) ---------- #
+
+    def record_delivery_feedback(
+        self,
+        *,
+        message_id: str,
+        signal: str,
+        actor: str,
+        source: str = "user",
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """Record one delivery-outcome signal for one delivered message.
+
+        ``source='user'`` is the trusted UI's report; ``source='host'`` is the
+        host-side backfill. Only ``replied``/``dismissed``/``complained`` may
+        come from a user; ``ignored_24h`` is a system verdict, never authored
+        by the model. Repeating the same (message, signal) is an idempotent
+        no-op, not an error.
+        """
+        if not isinstance(signal, str) or signal not in self._DELIVERY_SIGNALS:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"signal {signal!r} not in {sorted(self._DELIVERY_SIGNALS)}",
+                scope="feedback",
+            )
+        if source not in ("user", "host"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "source must be user|host", scope="feedback")
+        if signal == "ignored_24h" and source != "host":
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "ignored_24h is a host-side verdict and cannot be user-reported",
+                scope="feedback",
+            )
+        if not isinstance(actor, str) or not actor.strip():
+            raise PASError(ErrorCode.AUTH_REQUIRED, "delivery feedback needs an actor", scope="feedback")
+        if not isinstance(message_id, str) or not 1 <= len(message_id) <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "message_id must be 1..256 chars", scope="feedback")
+        with self.transaction():
+            row = self.db.execute(
+                "SELECT 1 FROM outbox WHERE message_id=?", (message_id,)
+            ).fetchone()
+            if row is None:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"unknown message {message_id!r}", scope="feedback"
+                )
+            feedback_id = (
+                "dfb"
+                + content_hash(
+                    {"m": message_id, "s": signal, "a": actor, "t": now_ms}
+                )[:28]
+            )
+            cursor = self.db.execute(
+                """INSERT OR IGNORE INTO delivery_feedback(
+                       feedback_id, message_id, signal, source, authenticated_actor, created_at_ms)
+                   VALUES (?,?,?,?,?,?)""",
+                (feedback_id, message_id, signal, source, actor, now_ms),
+            )
+            duplicate = cursor.rowcount == 0
+            stored = self.db.execute(
+                "SELECT feedback_id, source FROM delivery_feedback WHERE message_id=? AND signal=?",
+                (message_id, signal),
+            ).fetchone()
+            return {
+                "feedback_id": stored["feedback_id"] if stored is not None else feedback_id,
+                "message_id": message_id,
+                "signal": signal,
+                "source": stored["source"] if stored is not None else source,
+                "duplicate": duplicate,
+            }
+
+    def backfill_ignored_24h(self, *, now_ms: int, older_than_ms: int = 24 * 3600 * 1000) -> int:
+        """Mark delivered inbox messages older than the window as ignored.
+
+        Only "no signal at all" is classified: a message the user answered,
+        dismissed or complained about never gets a weak signal on top. The
+        cutoff is exclusive; repeated calls are idempotent.
+        """
+        if not isinstance(older_than_ms, int) or older_than_ms <= 0:
+            raise PASError(ErrorCode.INVALID_CONFIG, "older_than_ms must be positive", scope="feedback")
+        cutoff = now_ms - older_than_ms
+        inserted = 0
+        with self.transaction():
+            rows = self.db.execute(
+                """SELECT i.message_id FROM inbox i
+                   WHERE i.delivered_at_ms <= ?
+                     AND NOT EXISTS (
+                       SELECT 1 FROM delivery_feedback f
+                       WHERE f.message_id = i.message_id
+                         AND f.signal IN ('replied','dismissed','complained')
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM delivery_feedback f2
+                       WHERE f2.message_id = i.message_id AND f2.signal='ignored_24h'
+                     )""",
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                feedback_id = (
+                    "dfb"
+                    + content_hash(
+                        {"m": row["message_id"], "s": "ignored_24h", "a": "pas:backfill", "t": now_ms}
+                    )[:28]
+                )
+                cursor = self.db.execute(
+                    """INSERT OR IGNORE INTO delivery_feedback(
+                           feedback_id, message_id, signal, source, authenticated_actor, created_at_ms)
+                       VALUES (?,?,'ignored_24h','host','pas:backfill',?)""",
+                    (feedback_id, row["message_id"], now_ms),
+                )
+                inserted += cursor.rowcount
+        return inserted
+
+    def delivery_feedback_since(self, *, since_ms: int) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """SELECT feedback_id, message_id, signal, source, authenticated_actor, created_at_ms
+               FROM delivery_feedback WHERE created_at_ms >= ? ORDER BY created_at_ms""",
+            (int(since_ms),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delivery_feedback_for(self, message_id: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """SELECT feedback_id, message_id, signal, source, authenticated_actor, created_at_ms
+               FROM delivery_feedback WHERE message_id=? ORDER BY created_at_ms""",
+            (message_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def sent_messages_since(
+        self, *, since_ms: int, now_ms: int, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        """Delivered notifications in a window with their reason and source.
+
+        ``reason`` comes from the proposal that produced the message
+        (decision contract 1.1); ``source_id`` from the proposal's candidate
+        attribution (NULL when the proposal did not cite a selected source).
+        """
+        rows = self.db.execute(
+            """SELECT i.inbox_id, i.message_id, i.run_id, i.fact_id, i.revision,
+                      i.delivered_at_ms,
+                      (SELECT p.reason FROM run_proposals p
+                        WHERE p.run_id = i.run_id AND p.fact_id = i.fact_id
+                          AND (p.revision = i.revision OR i.revision IS NULL)
+                        ORDER BY p.seq LIMIT 1) AS reason,
+                      (SELECT p.source_id FROM run_proposals p
+                        WHERE p.run_id = i.run_id AND p.fact_id = i.fact_id
+                          AND (p.revision = i.revision OR i.revision IS NULL)
+                        ORDER BY p.seq LIMIT 1) AS source_id
+               FROM inbox i
+               WHERE i.delivered_at_ms >= ? AND i.delivered_at_ms <= ?
+               ORDER BY i.delivered_at_ms LIMIT ?""",
+            (int(since_ms), int(now_ms), int(limit)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_feedback(self, *, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.db.execute(
             """SELECT feedback_id, message_id, kind, scope_json, authenticated_actor, created_at_ms
@@ -4735,6 +4907,8 @@ class Store:
             # and delete must not silently skip them.
             "job_occurrences", "job_activity",
             "context_packs", "memory_entries", "proactive_preferences",
+            # v2 W6: delivery-outcome feedback is profile data too.
+            "delivery_feedback",
         )
         dump: dict[str, Any] = {}
         for table in tables:
@@ -4762,6 +4936,7 @@ class Store:
             "delivery_attempts",  # -> outbox
             "inbox",              # -> outbox, runs
             "feedback",           # -> outbox
+            "delivery_feedback",  # -> outbox (v2 W6)
             "outbox",             # -> actions
             "actions",            # -> runs, grants, approvals
             "approvals",          # -> grants

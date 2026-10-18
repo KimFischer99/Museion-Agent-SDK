@@ -56,7 +56,7 @@ _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "external_writes", "lockscreen_content", "allow_untrusted_shell_skills",
                 "cadence", "cadence_min_gap_seconds", "cadence_max_per_day",
                 "require_reason", "idle_gate", "idle_min_minutes",
-                "max_candidates")
+                "max_candidates", "feedback_ignored_backfill")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -258,6 +258,10 @@ class PolicySection:
     idle_min_minutes: int = 60
     #: W5 candidate cap: how many changed source items may enter one run.
     max_candidates: int = 10
+    #: W6 host-side weak-signal backfill: mark delivered messages with no
+    #: reaction after 24h as ``ignored_24h``. Off by default — "no reply"
+    #: is a weak signal and the deployer opts in explicitly.
+    feedback_ignored_backfill: bool = False
 
     @property
     def cadence_configured(self) -> bool:
@@ -486,6 +490,9 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         policy_raw.get("max_candidates", 10),
         "max_candidates",
     )
+    feedback_ignored_backfill = policy_raw.get("feedback_ignored_backfill", False)
+    if not isinstance(feedback_ignored_backfill, bool):
+        raise ConfigError("policy.feedback_ignored_backfill must be a boolean")
     policy = PolicySection(
         cadence=cadence,
         cadence_min_gap_seconds=(
@@ -514,6 +521,7 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         idle_gate=idle_gate,
         idle_min_minutes=idle_min_minutes,
         max_candidates=max_candidates,
+        feedback_ignored_backfill=feedback_ignored_backfill,
     )
 
     skills_raw = raw.get("skills", {})

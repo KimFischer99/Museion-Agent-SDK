@@ -436,6 +436,18 @@ class ControlPlaneServer:
                 scope=dict(p.get("scope") or {}),
             )
 
+        async def feedback_record(params, session):
+            p = await params_of(params)
+            actor = session.principal
+            if actor in ("unauthenticated", "anonymous"):
+                raise PASError(ErrorCode.AUTH_REQUIRED, "no authenticated principal", scope="feedback")
+            return agent.delivery_feedback_record(
+                message_id=str(require(p, "message_id")),
+                signal=str(require(p, "signal")),
+                actor=actor,
+            )
+
+        d.register("feedback.record", feedback_record)
         d.register("jobs.create", jobs_create)
         d.register("jobs.update", jobs_update)
         d.register("jobs.list", jobs_list)

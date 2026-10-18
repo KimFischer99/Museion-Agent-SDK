@@ -518,6 +518,11 @@ class ProactiveCoordinator:
         )
         for record in outcome.events:
             self.store.append_run_event(lease, kind=record.kind, safe_summary=record.safe_summary, now_ms=now_ms)
+        # Which source produced each candidate fact: the W6 per-source
+        # report is only honest if the ledger records this at decision time.
+        proposal_sources = {
+            item.fact_id: entry.source_id for _rank, entry, _batch, item in candidates
+        }
         context_ref = self.store.record_run_decision(
             lease,
             context_pack=pack.to_dict(),
@@ -527,6 +532,7 @@ class ProactiveCoordinator:
             now_ms=now_ms,
             candidates_count=candidates_count,
             truncated_count=truncated_count,
+            proposal_sources=proposal_sources,
         )
         report = RunReport(
             run_id=lease.run_id,
