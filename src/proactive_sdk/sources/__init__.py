@@ -8,7 +8,8 @@ creates a network surface (``EgressBroker`` is built inside it).
 
 from __future__ import annotations
 
+from .page_hash import PageHashSource
 from .rss import RssSource
 from .sitemap_diff import SitemapDiffSource
 
-__all__ = ["RssSource", "SitemapDiffSource"]
+__all__ = ["PageHashSource", "RssSource", "SitemapDiffSource"]

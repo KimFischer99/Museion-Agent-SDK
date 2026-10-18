@@ -97,6 +97,11 @@ baseline, later fetches report only new/changed entries; no model call). The rel
 app reads `PAS_SITEMAP_SOURCES` (same JSON array shape) for deployments that do not
 want a custom app module.
 
+`PageHashSource` follows the same shape: it extracts the readable page text
+(scripts/nav/header/footer removed), shingles it and reports a change only above a
+Hamming threshold — ad rotation stays silent. The release app reads
+`PAS_PAGE_SOURCES`.
+
 New network sources are **default-off for untargeted heartbeats**
 (`requires_explicit_selection = True`): a job opts in with
 `task.refresh_source_ids: ["museum-news"]`. Example references:

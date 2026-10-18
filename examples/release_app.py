@@ -67,7 +67,7 @@ from proactive_sdk.policy import PolicyConfig
 from proactive_sdk.pi_worker import PiWorkerConfig, PiWorkerExecutor
 from proactive_sdk.proactive import ProactiveController
 from proactive_sdk.research import NewsSearchSource
-from proactive_sdk.sources import RssSource, SitemapDiffSource
+from proactive_sdk.sources import PageHashSource, RssSource, SitemapDiffSource
 
 _MODEL_ENV = ("PAS_MODEL_BASE_URL", "PAS_MODEL_API_KEY", "PAS_MODEL_NAME")
 
@@ -222,6 +222,19 @@ def build_agent(config=None) -> ProactiveAgent:
                 required_capability=spec.get("required_capability", "public.read"),
             ),
         )
+    for spec in _page_source_specs():
+        agent.registry.register(
+            source_id=spec["source_id"],
+            account_ref=spec.get("account_ref", "account:public"),
+            required_capability=spec.get("required_capability", "public.read"),
+            source=PageHashSource(
+                url=spec["url"],
+                source_id=spec["source_id"],
+                account_ref=spec.get("account_ref", "account:public"),
+                allowed_hosts=tuple(spec.get("allowed_hosts") or ()),
+                required_capability=spec.get("required_capability", "public.read"),
+            ),
+        )
     if gws_command is not None:
         mail = GmailMailSource(
             adapter=GwsAdapter(connector=SubprocessGwsConnector(gws_command)),
@@ -239,6 +252,11 @@ def build_agent(config=None) -> ProactiveAgent:
 def _rss_source_specs() -> list[dict[str, Any]]:
     """Parse ``PAS_RSS_SOURCES`` (JSON array); unset means no surface."""
     return _source_specs("PAS_RSS_SOURCES")
+
+
+def _page_source_specs() -> list[dict[str, Any]]:
+    """Parse ``PAS_PAGE_SOURCES`` (JSON array); unset means no surface."""
+    return _source_specs("PAS_PAGE_SOURCES")
 
 
 def _sitemap_source_specs() -> list[dict[str, Any]]:
