@@ -10,7 +10,7 @@ must re-verify compatibility.
 |---|---|---|
 | profile | single profile | one state directory, one DB, one owner destination (not a multi-tenant product) |
 | host | single host | the control plane defaults to a Unix socket; remote TLS HTTP is not implemented and is left to the deployer's own approach |
-| Python | >= 3.11 | measured on 3.14.4 (macOS); the 3.11/3.12 matrix has not been run, recorded as such |
+| Python | >= 3.11 | 3.14.4 (macOS): full suite 966 tests, only environment-class errors (hook sandbox unavailable in the recording shell); 3.12.3 (Linux test host): full suite 966 tests, 20 environment errors (no bubblewrap) + 9 skips + 1 environment-sensitive performance guard on a slow shared host; 3.11.16: targeted 259 tests + wheel install smoke. A fully green matrix on all three runtimes is not claimed. |
 | runtime dependencies | standard library only | optional extra: `jsonschema` (for conformance tooling, does not affect runtime) |
 
 ## External hosts (verified versions)
@@ -23,6 +23,15 @@ must re-verify compatibility.
 Host upgrade rule: after an upgrade, re-run the probe set listed above and update the verified
 versions in this document only once it passes. On a protocol major-version mismatch the control
 plane refuses immediately at `system.hello` (fail closed).
+
+v2 real-host gate (2026-10-18, isolated Linux test host, Python 3.12.3, real model replies with
+`pricing_basis=measured`): Hermes Runs gateway 8/8 probes passed — config, capabilities, bridge
+envelope, contract injection, and **cancel-while-running** (the run was observed in `running`
+before the cancel; the host confirmed it and the run settled `cancelled`, not completed); Pi
+1.0.4 3/3 probes passed — initialize, bridge envelope (v2 `silence_reason` accepted with the real
+response shape), and in-flight cancel (request level `requested`, settled `errored/conflict`,
+honestly reported rather than claimed confirmed). The host-side activity probe and the W7 host
+executor remain unverified (see below).
 
 ## Connectors and notification channels
 
@@ -81,6 +90,7 @@ on the strength of mocks.
 | Generic source connectors: RSS/Atom, sitemap diff, page hash | Unit + pinned loopback TLS fixture site; real internet ❌ (manual only) | ✅ offline |
 | Host-provided activity probe | Protocol + fake probe only; host adapter implementation is deployment-side | ❌ unverified |
 | Delivery feedback (`feedback.record`, `delivery_feedback`, `pas stats --since`) | Unit + aggregation tests; real reply channel is host-side | ✅ offline |
+| Host bridge real-service e2e (Hermes Runs gateway + Pi 1.0.4) | 8/8 probes on an isolated host with real model replies; cancel-while-running proven for Hermes | ✅ offline |
 | Host executor replacing the built-in loop (W7) | Gated: requires 7 days of ledger data and host-side measurements first | ❌ not started |
 
 Operational notes for v2:
