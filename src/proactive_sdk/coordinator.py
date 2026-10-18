@@ -87,6 +87,10 @@ class RunReport:
     run_id: str
     outcome: str  # proposed | suppressed | failed
     reason: str | None = None
+    #: Closed v2 enum explaining *why* the run produced no message; None
+    #: when the raw machine verdict has no honest mapping (the raw string
+    #: stays in ``reason``/run events).
+    silence_reason: str | None = None
     error_code: str | None = None
     model_turns: int = 0
     proposals: int = 0
@@ -95,6 +99,19 @@ class RunReport:
     queued: int = 0
     approval_pending: int = 0
     suppressed_by_policy: int = 0
+
+
+#: Raw L0 verdicts (kept verbatim in run events for backward compatibility)
+#: mapped onto the closed v2 silence vocabulary. Verdicts without an honest
+#: mapping are deliberately absent: the ledger records ``None`` rather than
+#: inventing a bucket.
+_SILENCE_BY_RAW_REASON = {
+    "l0_no_source_change": "no_source_change",
+}
+
+
+def _silence_reason_for(raw_reason: str) -> str | None:
+    return _SILENCE_BY_RAW_REASON.get(raw_reason)
 
 
 def _ms_to_rfc3339(ms: int) -> str:
@@ -162,7 +179,10 @@ class ProactiveCoordinator:
             if job is None:
                 return
             state = report.outcome if report.outcome in ("proposed", "suppressed", "failed") else "skipped"
-            reason = report.reason or report.error_code
+            # The semantic (v2) reason is what the ledger view answers "why
+            # was it quiet" with; the raw machine verdict stays in the run
+            # events for debugging.
+            reason = report.silence_reason or report.reason or report.error_code
             self.store.record_job_activity(
                 job_id=job.job_id,
                 job_revision=job.revision,
@@ -352,6 +372,7 @@ class ProactiveCoordinator:
             run_id=lease.run_id,
             outcome="proposed",
             reason=outcome.decision.summary,
+            silence_reason=outcome.decision.silence_reason,
             model_turns=outcome.model_turns,
             proposals=len(outcome.decision.proposals),
             context_ref=context_ref,
@@ -381,6 +402,7 @@ class ProactiveCoordinator:
                 run_id=report.run_id,
                 outcome=report.outcome,
                 reason=report.reason,
+                silence_reason=report.silence_reason,
                 error_code=report.error_code,
                 model_turns=report.model_turns,
                 proposals=report.proposals,
@@ -391,6 +413,7 @@ class ProactiveCoordinator:
             run_id=report.run_id,
             outcome=report.outcome,
             reason=report.reason,
+            silence_reason=report.silence_reason,
             error_code=report.error_code,
             model_turns=report.model_turns,
             proposals=report.proposals,
@@ -507,8 +530,17 @@ class ProactiveCoordinator:
         )
 
     def _suppress(self, lease: RunLease, reason: str, now_ms: int) -> RunReport:
-        self.store.record_run_suppressed(lease, reason=reason, now_ms=now_ms)
-        return RunReport(run_id=lease.run_id, outcome="suppressed", reason=reason, model_turns=0)
+        silence_reason = _silence_reason_for(reason)
+        self.store.record_run_suppressed(
+            lease, reason=reason, now_ms=now_ms, silence_reason=silence_reason
+        )
+        return RunReport(
+            run_id=lease.run_id,
+            outcome="suppressed",
+            reason=reason,
+            silence_reason=silence_reason,
+            model_turns=0,
+        )
 
     def _fail(self, lease: RunLease, *, error_class: str, now_ms: int) -> None:
         try:

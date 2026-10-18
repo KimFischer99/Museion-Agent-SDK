@@ -19,9 +19,11 @@ Strictness is deliberate:
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from .contracts import (
+    MODEL_SILENCE_REASONS,
+    SILENCE_UNSPECIFIED,
     ActionProposal,
     Decision,
     ErrorCode,
@@ -31,9 +33,18 @@ from .contracts import (
 
 __all__ = ["PROPOSAL_KEYS", "DECISION_KEYS", "strict_json", "parse_decision_text"]
 
-DECISION_KEYS = frozenset({"decision", "summary", "proposals"})
+DECISION_KEYS = frozenset({"decision", "summary", "proposals", "silence_reason"})
 PROPOSAL_KEYS = frozenset(
-    {"kind", "fact_id", "revision", "body", "arguments", "evidence_refs", "expires_at"}
+    {
+        "kind",
+        "fact_id",
+        "revision",
+        "body",
+        "arguments",
+        "evidence_refs",
+        "expires_at",
+        "reason",
+    }
 )
 PROPOSAL_KINDS: tuple[str, ...] = (
     "notify_self",
@@ -70,12 +81,21 @@ def parse_decision_text(
     *,
     evidence: frozenset[str],
     max_proposals: int,
+    require_reason: bool = True,
+    on_unknown_silence_reason: Callable[[str], None] | None = None,
 ) -> Decision:
     """Turn a producer's final text into a validated :class:`Decision`.
 
     Raises ``PASError`` for anything that does not meet the contract. The
     caller decides whether to spend its single bounded repair attempt; this
     function never guesses an action out of mixed text (§8.1).
+
+    ``require_reason`` is the gray-release switch for decision contract 1.1
+    (missing reason accepted → ``unspecified``); an illegal reason is always
+    rejected. ``on_unknown_silence_reason`` receives the raw unknown
+    ``silence_reason`` value: unlike every other field, an unknown silence
+    reason is *normalised* rather than fatal (W3), but the caller must still
+    record the warning.
     """
     if content is None or not content.strip():
         raise PASError(ErrorCode.INVALID_CONFIG, "final turn had no content")
@@ -120,14 +140,35 @@ def parse_decision_text(
                 arguments=raw_proposal.get("arguments"),
                 evidence_refs=tuple(raw_proposal.get("evidence_refs") or []),
                 expires_at=raw_proposal.get("expires_at"),
+                reason=raw_proposal.get("reason"),
             )
         )
+    decision_kind = raw.get("decision")
+    silence_reason = raw.get("silence_reason")
+    if decision_kind != "silent" and silence_reason is not None:
+        # Strict JSON: a field that does not belong to this decision shape is
+        # an invalid decision, not something to silently drop.
+        raise PASError(
+            ErrorCode.INVALID_CONFIG,
+            "only decision=silent may carry 'silence_reason'",
+        )
+    if decision_kind == "silent":
+        allowed = MODEL_SILENCE_REASONS + (SILENCE_UNSPECIFIED,)
+        if silence_reason is None:
+            silence_reason = SILENCE_UNSPECIFIED
+        elif silence_reason not in allowed:
+            if on_unknown_silence_reason is not None:
+                on_unknown_silence_reason(str(silence_reason)[:200])
+            silence_reason = SILENCE_UNSPECIFIED
     decision = Decision(
-        decision=raw.get("decision"),
+        decision=decision_kind,
         summary=raw.get("summary"),
         proposals=tuple(proposals),
+        silence_reason=silence_reason if decision_kind == "silent" else None,
     )
-    problems = validate_decision(decision.to_wire_dict())
+    problems = validate_decision(
+        decision.to_wire_dict(), require_reason=require_reason
+    )
     if problems:
         raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
     for proposal in decision.proposals:

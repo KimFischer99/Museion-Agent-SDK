@@ -46,7 +46,8 @@ def main() -> int:
             "decision": "propose",
             "summary": "one item worth noting",
             "proposals": [{"kind": "draft", "fact_id": "fact-1",
-                           "revision": "1", "body": "local note"}],
+                           "revision": "1", "body": "local note",
+                           "reason": "changed"}],
         }))
         return 0
 

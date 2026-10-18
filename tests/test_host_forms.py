@@ -269,6 +269,7 @@ class HostFormsThroughTheFacadeTests(unittest.TestCase):
                     "body": "只通知本人",
                     "evidence_refs": [MEMORY_ID],
                     "expires_at": "2030-01-01T00:00:00Z",
+                    "reason": "changed",
                 }
             ],
         }

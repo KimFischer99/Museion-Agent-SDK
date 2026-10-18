@@ -74,13 +74,15 @@ export type Sourcesnapshot = {
     "sensitivity": "public" | "private" | "sensitive";
   };
 
-// decision.json: SPEC §4.1 / §8.1 Decision with ActionProposal definitions. Unknown fields, oversized bodies and unsupported kinds are rejected. Cross-field rules (silent=>no proposals, propose=>>=1 proposal, notify_self needs evidence_refs+expires_at) are enforced by contracts.validate_decision.
+// decision.json: SPEC §4.1 / §8.1 Decision with ActionProposal definitions. Unknown fields, oversized bodies and unsupported kinds are rejected. Cross-field rules (silent=>no proposals, propose=>>=1 proposal, notify_self needs evidence_refs+expires_at, notify_self/draft need a reason in decision contract 1.1, silence_reason only on silent) are enforced by contracts.validate_decision.
 // Closed object: additionalProperties is false on the wire.
 export interface Decision {
   "protocol_version": Protocolversion;
   "decision": "propose" | "silent";
   "summary": string;
   "proposals": ReadonlyArray<Actionproposal>;
+  /** Model-side reason for a silent decision (decision contract 1.1). Unknown values are normalised to 'unspecified' by the parser; this schema only fixes the vocabu */
+  "silence_reason"?: "moot" | "already_handled" | "unconfirmed" | "not_useful_now" | "reason_none" | "unspecified";
 }
 
 // action_proposal
@@ -92,6 +94,8 @@ export type Actionproposal = {
     "arguments"?: Record<string, unknown>;
     "evidence_refs"?: ReadonlyArray<string>;
     "expires_at"?: string;
+        /** Why this proposal is worth interrupting the owner (decision contract 1.1). Required for notify_self/draft by contracts.validate_decision. */
+"reason"?: "time_sensitive" | "changed" | "requested" | "ready_for_decision" | "new_opportunity";
   };
 
 // delivery_attempt.json: SPEC §4.1 DeliveryAttempt with the §10.2 outbox state machine. delivery_unknown is never auto-retried; late receipts are reconciled, not discarded.

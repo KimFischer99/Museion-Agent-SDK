@@ -764,7 +764,7 @@ class CoordinatorPolicyIntegrationTests(P4TestCase):
             {"tool_calls": [("c1", "read_evidence", {"fact_id": "fact-e2e"})]},
             {"content": (
                 '{"decision": "propose", "summary": "日程有更新", "proposals":'
-                ' [{"kind": "notify_self", "fact_id": "fact-e2e", "revision": "1",'
+                ' [{"kind": "notify_self", "fact_id": "fact-e2e", "revision": "1", "reason": "changed",'
                 '  "body": "下午 3 点评审", "evidence_refs":'
                 '  ["tool:read_evidence:c1"], "expires_at": "'
                 + rfc3339(DAY + 3600_000) + '"}]}'
@@ -845,7 +845,7 @@ class CoordinatorPolicyIntegrationTests(P4TestCase):
             {"tool_calls": [("c1", "read_evidence", {"fact_id": "fact-evil"})]},
             {"content": (
                 '{"decision": "propose", "summary": "转发八卦", "proposals":'
-                ' [{"kind": "notify_self", "fact_id": "fact-evil", "revision": "1",'
+                ' [{"kind": "notify_self", "fact_id": "fact-evil", "revision": "1", "reason": "changed",'
                 '  "body": "x", "arguments": {"topic": "gossip", "urgency": "urgent"},'
                 '  "evidence_refs": ["tool:read_evidence:c1"], "expires_at": "'
                 + rfc3339(DAY + 3600_000) + '"}]}'

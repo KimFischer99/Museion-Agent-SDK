@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .contracts import RunBudget
+from .contracts import MODEL_SILENCE_REASONS, REASON_ENUM, RunBudget
 
 __all__ = [
     "DECISION_CONTRACT_VERSION",
@@ -49,7 +49,7 @@ __all__ = [
 #: ``PAS_PROTOCOL_VERSION``: the wire protocol can stay 1.0 while the prompt
 #: contract moves, and a host pinned to an older contract can be told so
 #: instead of silently misbehaving.
-DECISION_CONTRACT_VERSION = "1.0"
+DECISION_CONTRACT_VERSION = "1.1"
 
 KIND_ENUM: tuple[str, ...] = (
     "notify_self",
@@ -89,7 +89,9 @@ def _decision(**over: Any) -> dict[str, Any]:
 
 
 def _proposal(**over: Any) -> dict[str, Any]:
-    base: dict[str, Any] = {"kind": "draft", "fact_id": "f", "revision": "1"}
+    # ``reason`` is part of the valid baseline: only the rules that probe a
+    # *missing* reason override it explicitly.
+    base: dict[str, Any] = {"kind": "draft", "fact_id": "f", "revision": "1", "reason": "changed"}
     base.update(over)
     return base
 
@@ -177,6 +179,51 @@ CONTRACT_RULES: tuple[ContractRule, ...] = (
         expect="cites unknown evidence",
     ),
     ContractRule(
+        rule_id="reason_enum",
+        layer="schema",
+        text='"reason" is one of ' + "|".join(REASON_ENUM) + " (required for notify_self/draft)",
+        probe=lambda: _decision(
+            decision="propose", proposals=[_proposal(reason="because_i_said_so")]
+        ),
+        expect="not in enum [",
+    ),
+    ContractRule(
+        rule_id="reason_required",
+        layer="decision",
+        text='a "notify_self" or "draft" proposal requires a non-empty "reason"',
+        probe=lambda: _decision(
+            decision="propose",
+            proposals=[
+                _proposal(
+                    kind="notify_self",
+                    reason=None,
+                    evidence_refs=["snapshot:x"],
+                    expires_at="2030-01-01T00:00:00Z",
+                )
+            ],
+        ),
+        expect="requires 'reason'",
+    ),
+    ContractRule(
+        rule_id="silence_reason_enum",
+        layer="schema",
+        text='a silent decision\'s optional "silence_reason" is one of '
+        + "|".join(MODEL_SILENCE_REASONS + ("unspecified",)),
+        probe=lambda: _decision(
+            decision="silent", proposals=[], silence_reason="bored"
+        ),
+        expect="not in enum [",
+    ),
+    ContractRule(
+        rule_id="silence_reason_only_when_silent",
+        layer="decision",
+        text='only decision="silent" may carry "silence_reason"',
+        probe=lambda: _decision(
+            decision="propose", proposals=[_proposal()], silence_reason="moot"
+        ),
+        expect="only decision=silent may carry 'silence_reason'",
+    ),
+    ContractRule(
         rule_id="receiver_forbidden",
         layer="policy",
         text=(
@@ -209,7 +256,8 @@ def decision_contract() -> str:
         '{"decision": "propose"|"silent", "summary": str, "proposals": [ ... ]}',
         "Each proposal is an object with: "
         '"kind" (required string), "fact_id" (required string), "revision" (required string), '
-        'optional "body", "arguments", "evidence_refs", "expires_at".',
+        'optional "body", "arguments", "evidence_refs", "expires_at", "reason"; '
+        'a top-level optional "silence_reason" is allowed only for silent decisions.',
         "Rules:",
     ]
     lines.extend(f"- {rule.text}" for rule in CONTRACT_RULES)

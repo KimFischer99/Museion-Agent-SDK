@@ -54,7 +54,8 @@ _RUNTIME_KEYS = ("max_concurrent_agent_runs", "shutdown_grace_seconds",
 _HEARTBEAT_KEYS = ("enabled", "every_seconds", "misfire", "checklist")
 _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "external_writes", "lockscreen_content", "allow_untrusted_shell_skills",
-                "cadence", "cadence_min_gap_seconds", "cadence_max_per_day")
+                "cadence", "cadence_min_gap_seconds", "cadence_max_per_day",
+                "require_reason")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -245,6 +246,11 @@ class PolicySection:
     cadence: str = "balanced"
     cadence_min_gap_seconds: int | None = None
     cadence_max_per_day: int | None = None
+    #: Decision contract 1.1 gray-release switch (W1): True = every
+    #: interrupting proposal must carry a ``reason``; False = a missing
+    #: reason is accepted and recorded as ``unspecified``. Illegal values
+    #: are rejected either way.
+    require_reason: bool = True
 
     @property
     def cadence_configured(self) -> bool:
@@ -457,6 +463,9 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
     cadence = policy_raw.get("cadence", "balanced")
     if cadence not in _CADENCES:
         raise ConfigError(f"policy.cadence must be one of {sorted(_CADENCES)}")
+    require_reason = policy_raw.get("require_reason", True)
+    if not isinstance(require_reason, bool):
+        raise ConfigError("policy.require_reason must be a boolean")
     policy = PolicySection(
         cadence=cadence,
         cadence_min_gap_seconds=(
@@ -481,6 +490,7 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         external_writes=external_writes,
         lockscreen_content=lockscreen,
         allow_untrusted_shell_skills=bool(policy_raw.get("allow_untrusted_shell_skills", False)),
+        require_reason=require_reason,
     )
 
     skills_raw = raw.get("skills", {})

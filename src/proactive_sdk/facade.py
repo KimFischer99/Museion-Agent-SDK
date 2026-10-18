@@ -787,6 +787,10 @@ class ProactiveAgent:
             "SELECT cancel_requested, cancel_requested_ms FROM runs WHERE run_id=?", (run_id,)
         ).fetchone()
         run["cancel_requested"] = bool(cancel["cancel_requested"]) if cancel is not None else False
+        # The proposals are the run's decision body; the ledger read path
+        # exposes them (with ``reason``) so "what was proposed and why" is
+        # answerable without opening the database.
+        run["proposals"] = self.store.run_proposals(run_id)
         return run
 
     def runs_list(self, *, state: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -1119,7 +1123,7 @@ class ProactiveAgent:
         would explain why.
         """
         from .builtin_tools import builtin_tools
-        from .executor import ToolLoopExecutor
+        from .executor import ExecutorConfig, ToolLoopExecutor
         from .toolkit import register_tools
         from .tools import LocalToolBroker
 
@@ -1133,7 +1137,13 @@ class ProactiveAgent:
             available = list(builtin_tools(self)) + available
         register_tools(broker, available)
         self.tool_names = broker.tool_names()
-        return ToolLoopExecutor(model=model, broker=broker, clock=self.store.clock)
+        require_reason = self.config.policy.require_reason if self.config is not None else True
+        return ToolLoopExecutor(
+            model=model,
+            broker=broker,
+            config=ExecutorConfig(require_reason=require_reason),
+            clock=self.store.clock,
+        )
 
     def _attach_sink(self, sink_spec: Any) -> None:
         if isinstance(sink_spec, ChannelSink):

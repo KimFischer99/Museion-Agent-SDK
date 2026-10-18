@@ -130,6 +130,7 @@ class HostBridge:
         host_timeout_s: float = _DEFAULT_HOST_TIMEOUT_S,
         usage_translator: Any | None = None,
         external_tool_broker: bool = False,
+        require_reason: bool = True,
     ) -> None:
         if not isinstance(driver, HostDriver):
             raise PASError(
@@ -139,6 +140,8 @@ class HostBridge:
             )
         if not isinstance(host_timeout_s, (int, float)) or host_timeout_s <= 0:
             raise PASError(ErrorCode.INVALID_CONFIG, "host_timeout_s must be positive")
+        if not isinstance(require_reason, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "require_reason must be a boolean")
         self.driver = driver
         self._capabilities = capabilities if callable(capabilities) else frozenset(capabilities)
         self._tool_names = tuple(tool_names)
@@ -150,6 +153,9 @@ class HostBridge:
         # without the host actually routing its tool calls through PAS's
         # broker would put a false statement in the run ledger.
         self.external_tool_broker = bool(external_tool_broker)
+        #: Decision contract 1.1 gray-release switch, same semantics as the
+        #: built-in executor's ``ExecutorConfig.require_reason``.
+        self.require_reason = require_reason
 
     # ------------------------------------------------------------------ #
     # executor.RunExecutor
@@ -217,6 +223,13 @@ class HostBridge:
             reply.text,
             evidence=evidence_universe(pack, []),
             max_proposals=request.budget.max_proposals,
+            require_reason=self.require_reason,
+            on_unknown_silence_reason=lambda raw: events.append(
+                RunEventRecord(
+                    "silence_reason_unknown",
+                    f"host reported an unknown silence_reason {raw!r}; recorded as unspecified",
+                )
+            ),
         )
         events.append(
             RunEventRecord(

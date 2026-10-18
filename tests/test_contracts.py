@@ -173,6 +173,7 @@ class DecisionSemanticsTests(unittest.TestCase):
                     "revision": "rev-2",
                     "evidence_refs": ["snapshot:item-123:rev-2"],
                     "expires_at": "2026-10-07T00:00:00Z",
+                    "reason": "changed",
                 }
             ],
         }

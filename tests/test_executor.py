@@ -45,6 +45,7 @@ PROPOSE = {
             "body": "发现一条与你跟踪目标相关的新内容。",
             "evidence_refs": ["snapshot:calendar:snap1"],
             "expires_at": rfc3339(T0 + 3_600_000),
+            "reason": "changed",
         }
     ],
 }
@@ -131,6 +132,7 @@ class DecisionValidationTests(P3TestCase):
                 "revision": "rev-2",
                 "evidence_refs": ["snapshot:calendar:INVENTED"],
                 "expires_at": rfc3339(T0 + 3_600_000),
+                "reason": "changed",
             }
         ]
         model = ScriptedModel([turn(malicious), turn(malicious)])

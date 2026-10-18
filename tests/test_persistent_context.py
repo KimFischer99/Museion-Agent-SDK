@@ -31,7 +31,9 @@ class PersistentContextTests(unittest.TestCase):
         )
 
     def test_memory_and_preferences_survive_reopen_and_upsert_by_id(self):
-        self.assertEqual(self.store.schema_version(), 11)
+        from proactive_sdk.store import MIGRATIONS
+
+        self.assertEqual(self.store.schema_version(), len(MIGRATIONS))
         first = MemoryEntry("m1", "old", "user", evidence_refs=("ref:1",))
         self.store.remember_memory(first, now_ms=T0)
         self.store.remember_memory(

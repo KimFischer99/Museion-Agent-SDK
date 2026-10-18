@@ -33,7 +33,12 @@ from typing import Any, Iterator
 
 from .clock import Clock, SystemClock
 from .contracts import (
+    HOST_SILENCE_REASONS,
+    MODEL_SILENCE_REASONS,
     NOTIFY_SELF_CAPABILITY,
+    REASON_ENUM,
+    REASON_REQUIRED_KINDS,
+    SILENCE_UNSPECIFIED,
     TOOL_AUTHORITIES,
     validate_schedule,
     OBLIGATION_DUE,
@@ -2882,11 +2887,31 @@ class Store:
         )
         return seq
 
-    def record_run_suppressed(self, lease: RunLease, *, reason: str, now_ms: int) -> None:
+    def record_run_suppressed(
+        self,
+        lease: RunLease,
+        *,
+        reason: str,
+        now_ms: int,
+        silence_reason: str | None = None,
+    ) -> None:
         """End a run before any model call with its machine reason (§5.3
-        L0: 空清单、无变化、未授权等直接结束，记录机器原因但不通知)."""
+        L0: 空清单、无变化、未授权等直接结束，记录机器原因但不通知).
+
+        ``reason`` is the human-readable machine verdict kept in the run
+        events (existing L0 strings are unchanged); ``silence_reason`` is
+        the closed v2 enum that the ledger/stats can aggregate. A raw
+        verdict with no enum mapping passes ``None`` rather than being
+        forced into a wrong bucket.
+        """
         if not reason or len(reason) > 500:
             raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="runs")
+        if silence_reason is not None and silence_reason not in HOST_SILENCE_REASONS:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                f"silence_reason {silence_reason!r} not in {list(HOST_SILENCE_REASONS)}",
+                scope="runs",
+            )
         with self.transaction():
             self._require_active_claim(lease, now_ms)
             seq = self.db.execute(
@@ -2898,8 +2923,9 @@ class Store:
                 (lease.run_id, seq, reason, now_ms),
             )
             self.db.execute(
-                "UPDATE runs SET state='suppressed', lease_until_ms=0, updated_at_ms=? WHERE run_id=?",
-                (now_ms, lease.run_id),
+                """UPDATE runs SET state='suppressed', lease_until_ms=0,
+                       silence_reason=?, updated_at_ms=? WHERE run_id=?""",
+                (silence_reason, now_ms, lease.run_id),
             )
 
     def record_run_decision(
@@ -2927,6 +2953,17 @@ class Store:
         summary = decision.get("summary")
         if not isinstance(summary, str) or not 1 <= len(summary) <= 500:
             raise PASError(ErrorCode.INVALID_CONFIG, "decision.summary must be 1..500 chars", scope="runs")
+        silence_reason: str | None = None
+        if decision.get("decision") == "silent":
+            allowed_silence = MODEL_SILENCE_REASONS + (SILENCE_UNSPECIFIED,)
+            raw_silence = decision.get("silence_reason")
+            silence_reason = SILENCE_UNSPECIFIED if raw_silence is None else raw_silence
+            if silence_reason not in allowed_silence:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    f"decision.silence_reason {silence_reason!r} not in {list(allowed_silence)}",
+                    scope="runs",
+                )
         context_ref = f"ctx:{lease.run_id}"
         pack_json = canonical_json(context_pack)
         pack_hash = _sha256_text(pack_json)
@@ -2981,11 +3018,23 @@ class Store:
                 body = proposal.get("body")
                 if body is not None and (not isinstance(body, str) or len(body) > 20000):
                     raise PASError(ErrorCode.INVALID_CONFIG, "proposal body must be at most 20000 chars", scope="runs")
+                reason = proposal.get("reason")
+                if reason is not None and reason not in REASON_ENUM:
+                    raise PASError(
+                        ErrorCode.INVALID_CONFIG,
+                        f"proposal reason {reason!r} not in {list(REASON_ENUM)}",
+                        scope="runs",
+                    )
+                if reason is None and kind in REASON_REQUIRED_KINDS:
+                    # Only reachable with the gray-release switch off: the
+                    # interrupting proposal is recorded, but honestly says
+                    # that no reason was supplied.
+                    reason = SILENCE_UNSPECIFIED
                 self.db.execute(
                     """INSERT INTO run_proposals(
                            proposal_id, run_id, seq, kind, fact_id, revision, body,
-                           arguments_json, evidence_refs_json, expires_at_ms, created_at_ms)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                           arguments_json, evidence_refs_json, expires_at_ms, reason, created_at_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         f"prop{content_hash({'run': lease.run_id, 'seq': index, 'fact': fact_id, 'kind': kind})[:28]}",
                         lease.run_id,
@@ -2997,14 +3046,23 @@ class Store:
                         canonical_json(proposal["arguments"]) if proposal.get("arguments") is not None else None,
                         canonical_json(proposal.get("evidence_refs") or []),
                         self._deadline_to_ms(proposal.get("expires_at")),
+                        reason,
                         now_ms,
                     ),
                 )
             self.db.execute(
                 """UPDATE runs SET state='proposed', lease_until_ms=0,
-                       decision_summary=?, proposal_count=?, usage_json=?, updated_at_ms=?
+                       decision_summary=?, proposal_count=?, usage_json=?,
+                       silence_reason=?, updated_at_ms=?
                    WHERE run_id=?""",
-                (summary, len(proposals), canonical_json(usage) if usage is not None else None, now_ms, lease.run_id),
+                (
+                    summary,
+                    len(proposals),
+                    canonical_json(usage) if usage is not None else None,
+                    silence_reason,
+                    now_ms,
+                    lease.run_id,
+                ),
             )
             return context_ref
 
@@ -3019,8 +3077,8 @@ class Store:
     def run_proposals(self, run_id: str) -> list[dict[str, Any]]:
         rows = self.db.execute(
             """SELECT proposal_id, seq, kind, fact_id, revision, body,
-                      arguments_json, evidence_refs_json, expires_at_ms, policy_json,
-                      created_at_ms
+                      arguments_json, evidence_refs_json, expires_at_ms, reason,
+                      policy_json, created_at_ms
                FROM run_proposals WHERE run_id=? ORDER BY seq""",
             (run_id,),
         ).fetchall()
@@ -3035,6 +3093,7 @@ class Store:
                 "arguments": canonical_loads(row["arguments_json"]) if row["arguments_json"] else None,
                 "evidence_refs": canonical_loads(row["evidence_refs_json"]),
                 "expires_at_ms": row["expires_at_ms"],
+                "reason": row["reason"],
                 "policy": canonical_loads(row["policy_json"]) if row["policy_json"] else None,
                 "created_at_ms": row["created_at_ms"],
             }
@@ -3056,7 +3115,7 @@ class Store:
             rows = self.db.execute(
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
                           decision_summary, proposal_count, context_ref, deadline_ms,
-                          tool_authority, tool_authority_reason
+                          silence_reason, tool_authority, tool_authority_reason
                    FROM runs WHERE state=? ORDER BY rowid LIMIT ?""",
                 (state, int(limit)),
             ).fetchall()
@@ -3064,7 +3123,7 @@ class Store:
             rows = self.db.execute(
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
                           decision_summary, proposal_count, context_ref, deadline_ms,
-                          tool_authority, tool_authority_reason
+                          silence_reason, tool_authority, tool_authority_reason
                    FROM runs ORDER BY rowid LIMIT ?""",
                 (int(limit),),
             ).fetchall()
@@ -3074,7 +3133,7 @@ class Store:
         row = self.db.execute(
             """SELECT run_id, event_id, state, attempt, fence, lease_until_ms, deadline_ms,
                       error_class, decision_summary, proposal_count, usage_json, context_ref,
-                      tool_authority, tool_authority_reason
+                      silence_reason, tool_authority, tool_authority_reason
                FROM runs WHERE run_id=?""",
             (run_id,),
         ).fetchone()
@@ -4290,11 +4349,24 @@ class Store:
     # -- local inbox (§10.2 reliable once-inbox) --------------------------- #
 
     def list_inbox(self, *, unread_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
-        sql = """SELECT inbox_id, message_id, title, body, fact_id, revision, run_id,
-                        delivered_at_ms, read_at_ms FROM inbox"""
+        # ``reason`` joins the proposal that produced the notification so the
+        # sent/inbox view can answer "why was I told this" (decision contract
+        # 1.1). Correlated subquery, not a JOIN: one inbox row stays one row
+        # even if a run carried several proposals for the same fact.
+        sql = """SELECT inbox.inbox_id, inbox.message_id, inbox.title, inbox.body,
+                        inbox.fact_id, inbox.revision, inbox.run_id,
+                        inbox.delivered_at_ms, inbox.read_at_ms,
+                        (SELECT p.reason FROM run_proposals p
+                          WHERE p.run_id = inbox.run_id
+                            AND p.fact_id = inbox.fact_id
+                            AND (p.revision = inbox.revision OR inbox.revision IS NULL)
+                          ORDER BY p.seq LIMIT 1) AS reason
+                   FROM inbox"""
         if unread_only:
-            sql += " WHERE read_at_ms IS NULL"
-        rows = self.db.execute(sql + " ORDER BY delivered_at_ms DESC, inbox_id LIMIT ?", (int(limit),)).fetchall()
+            sql += " WHERE inbox.read_at_ms IS NULL"
+        rows = self.db.execute(
+            sql + " ORDER BY inbox.delivered_at_ms DESC, inbox.inbox_id LIMIT ?", (int(limit),)
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def mark_inbox_read(self, inbox_id: str, *, now_ms: int) -> bool:

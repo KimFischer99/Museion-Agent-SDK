@@ -161,6 +161,7 @@ class HeartbeatClosedLoopTests(P3TestCase):
                     "body": "有新内容",
                     "evidence_refs": ["snapshot:calendar:"],
                     "expires_at": rfc3339(T0 + 3_600_000),
+                    "reason": "changed",
                 }
             ],
         }
@@ -180,6 +181,8 @@ class HeartbeatClosedLoopTests(P3TestCase):
                                     "body": "有新内容",
                                     "evidence_refs": ["tool:read_evidence:c1"],
                                     "expires_at": rfc3339(T0 + 3_600_000),
+                                "reason": "changed",
+                    "reason": "changed",
                                 }
                             ],
                         },
@@ -354,6 +357,8 @@ class MaliciousSourceTests(P3TestCase):
                                     "revision": "rev-1",
                                     "evidence_refs": ["snapshot:calendar:FAKE"],
                                     "expires_at": rfc3339(T0 + 3_600_000),
+                                "reason": "changed",
+                    "reason": "changed",
                                 }
                             ],
                         },
@@ -372,6 +377,8 @@ class MaliciousSourceTests(P3TestCase):
                                     "revision": "rev-1",
                                     "evidence_refs": ["snapshot:calendar:ALSO-FAKE"],
                                     "expires_at": rfc3339(T0 + 3_600_000),
+                                "reason": "changed",
+                    "reason": "changed",
                                 }
                             ],
                         },

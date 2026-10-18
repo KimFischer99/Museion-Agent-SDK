@@ -106,6 +106,7 @@ VALID_FIXTURES = {
                 "body": "发现一条与你的跟踪目标相关的新内容。",
                 "evidence_refs": ["snapshot:item-123:rev-2"],
                 "expires_at": "2026-10-07T00:00:00Z",
+                "reason": "changed",
             }
         ],
     },

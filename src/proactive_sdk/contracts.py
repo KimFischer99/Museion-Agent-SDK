@@ -30,6 +30,11 @@ __all__ = [
     "require_utc_timestamp",
     "validate_schedule",
     "validate_decision",
+    "REASON_ENUM",
+    "REASON_REQUIRED_KINDS",
+    "HOST_SILENCE_REASONS",
+    "MODEL_SILENCE_REASONS",
+    "SILENCE_UNSPECIFIED",
     "validate_context_pack",
     "validate_reminder",
     "REMINDER_KEYS",
@@ -249,6 +254,43 @@ def validate_schedule(schedule: dict[str, Any]) -> list[str]:
 
 _NOTIFY_SELF_REQUIRED = ("evidence_refs", "expires_at")
 
+# --- v2 decision reasons (decision contract 1.1) -------------------------- #
+#
+# A notification that interrupts the user must say *why* it is worth the
+# interruption. The enum is closed; the missing/illegal case is handled like
+# any other invalid decision (one bounded repair, then fail closed) — never
+# defaulted to a plausible-looking value.
+REASON_ENUM: tuple[str, ...] = (
+    "time_sensitive",
+    "changed",
+    "requested",
+    "ready_for_decision",
+    "new_opportunity",
+)
+#: Only these kinds interrupt the owner; the rest are records, not noise.
+REASON_REQUIRED_KINDS: tuple[str, ...] = ("notify_self", "draft")
+
+# --- v2 silence reasons (why a run/message stayed quiet) ------------------ #
+#
+# Host side: machine verdicts the coordinator records itself.
+HOST_SILENCE_REASONS: tuple[str, ...] = (
+    "no_source_change",
+    "user_active",
+    "quota_exhausted",
+    "quiet_window",
+    "gate_error",
+)
+#: Model side: optional self-report attached to a silent decision.
+MODEL_SILENCE_REASONS: tuple[str, ...] = (
+    "moot",
+    "already_handled",
+    "unconfirmed",
+    "not_useful_now",
+    "reason_none",
+)
+#: The one normalised value for "we do not know why" (old rows, gray mode).
+SILENCE_UNSPECIFIED = "unspecified"
+
 
 # --- direct reminders (SPEC §21.1 step 2) ---------------------------------- #
 #
@@ -426,8 +468,14 @@ def validate_reminder(reminder: Any, *, schedule: dict[str, Any] | None = None) 
     return errors
 
 
-def validate_decision(decision: dict[str, Any]) -> list[str]:
-    """Cross-field rules for Decision (SPEC §8.1)."""
+def validate_decision(decision: dict[str, Any], *, require_reason: bool = True) -> list[str]:
+    """Cross-field rules for Decision (SPEC §8.1).
+
+    ``require_reason`` is the gray-release switch for decision contract 1.1:
+    with it off, a missing reason is accepted (and normalised to
+    ``unspecified`` by the parser); an *illegal* reason is always rejected —
+    the switch relaxes absence, never correctness.
+    """
     errors: list[str] = []
     kind = decision.get("decision")
     proposals = decision.get("proposals")
@@ -438,13 +486,37 @@ def validate_decision(decision: dict[str, Any]) -> list[str]:
             errors.append("decision=propose requires at least one proposal")
         else:
             for idx, proposal in enumerate(proposals):
-                if proposal.get("kind") == "notify_self":
+                if not isinstance(proposal, dict):
+                    errors.append(f"proposals[{idx}] must be an object")
+                    continue
+                proposal_kind = proposal.get("kind")
+                if proposal_kind == "notify_self":
                     for field_name in _NOTIFY_SELF_REQUIRED:
                         if not proposal.get(field_name):
                             errors.append(
                                 f"proposals[{idx}]: notify_self requires {field_name!r}"
                                 " (SPEC §8.1)"
                             )
+                reason = proposal.get("reason")
+                if reason is not None and reason not in REASON_ENUM:
+                    errors.append(
+                        f"proposals[{idx}]: reason {reason!r} not in enum"
+                        f" {list(REASON_ENUM)}"
+                    )
+                if proposal_kind in REASON_REQUIRED_KINDS and require_reason and not reason:
+                    errors.append(
+                        f"proposals[{idx}]: {proposal_kind} requires 'reason'"
+                        " (SPEC §8.1 v2)"
+                    )
+    silence_reason = decision.get("silence_reason")
+    if silence_reason is not None:
+        allowed = MODEL_SILENCE_REASONS + (SILENCE_UNSPECIFIED,)
+        if kind != "silent":
+            errors.append("only decision=silent may carry 'silence_reason'")
+        elif silence_reason not in allowed:
+            errors.append(
+                f"silence_reason {silence_reason!r} not in enum {list(allowed)}"
+            )
     return errors
 
 
@@ -1335,6 +1407,10 @@ class ActionProposal:
     arguments: dict[str, Any] | None = None
     evidence_refs: tuple[str, ...] = ()
     expires_at: str | None = None
+    #: Why this proposal is worth the owner's attention (decision contract
+    #: 1.1). Required for the kinds that interrupt, checked by
+    #: ``validate_decision`` so the gray-release switch has one home.
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _PROPOSAL_KINDS:
@@ -1359,6 +1435,12 @@ class ActionProposal:
                 require_utc_timestamp(self.expires_at)
             except ValueError as exc:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"expires_at: {exc}") from None
+        if self.reason is not None:
+            if not isinstance(self.reason, str) or self.reason not in REASON_ENUM:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    f"proposal reason {self.reason!r} not in enum {list(REASON_ENUM)}",
+                )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -1373,6 +1455,8 @@ class ActionProposal:
             out["arguments"] = self.arguments
         if self.expires_at is not None:
             out["expires_at"] = self.expires_at
+        if self.reason is not None:
+            out["reason"] = self.reason
         return out
 
 
@@ -1384,6 +1468,11 @@ class Decision:
     decision: str
     summary: str
     proposals: tuple[ActionProposal, ...] = ()
+    #: Why a silent decision stayed silent (model side, decision contract
+    #: 1.1). ``None`` only for decisions built without going through the
+    #: parser; the parser normalises a missing/unintelligible value to
+    #: ``unspecified``.
+    silence_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.decision not in ("propose", "silent"):
@@ -1394,11 +1483,26 @@ class Decision:
             raise PASError(ErrorCode.INVALID_CONFIG, "silent requires empty proposals")
         if self.decision == "propose" and not self.proposals:
             raise PASError(ErrorCode.INVALID_CONFIG, "propose requires at least one proposal")
+        if self.silence_reason is not None:
+            allowed = MODEL_SILENCE_REASONS + (SILENCE_UNSPECIFIED,)
+            if self.decision != "silent":
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    "only decision=silent may carry 'silence_reason'",
+                )
+            if not isinstance(self.silence_reason, str) or self.silence_reason not in allowed:
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG,
+                    f"silence_reason {self.silence_reason!r} not in enum {list(allowed)}",
+                )
 
     def to_wire_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "protocol_version": PAS_PROTOCOL_VERSION,
             "decision": self.decision,
             "summary": self.summary,
             "proposals": [proposal.to_dict() for proposal in self.proposals],
         }
+        if self.silence_reason is not None:
+            out["silence_reason"] = self.silence_reason
+        return out

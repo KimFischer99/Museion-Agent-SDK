@@ -20,7 +20,7 @@ import threading
 
 SILENT = {"decision": "silent", "summary": "No change", "proposals": []}
 PROPOSE = {"decision": "propose", "summary": "One item", "proposals": [
-    {"kind": "draft", "fact_id": "fact-1", "revision": "r1", "body": "text"}]}
+    {"kind": "draft", "fact_id": "fact-1", "revision": "r1", "body": "text", "reason": "changed"}]}
 
 lock = threading.Lock()
 runs = {}  # run_id -> {"event": Event, "stuck": bool, "seconds": float}

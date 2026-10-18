@@ -31,7 +31,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .contracts import (
     TOOL_AUTHORITY_HOST,
@@ -78,6 +78,10 @@ class ExecutorConfig:
     budget: RunBudget = field(default_factory=RunBudget)
     tool_call_timeout_s: float = 10.0
     repair_attempts: int = 1
+    #: Decision contract 1.1 gray-release switch: when False a missing
+    #: ``reason`` on notify_self/draft is accepted (recorded as
+    #: ``unspecified``); an illegal reason is still rejected.
+    require_reason: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.budget, RunBudget):
@@ -86,6 +90,8 @@ class ExecutorConfig:
             raise PASError(ErrorCode.INVALID_CONFIG, "tool_call_timeout_s must be positive")
         if not isinstance(self.repair_attempts, int) or not 0 <= self.repair_attempts <= 3:
             raise PASError(ErrorCode.INVALID_CONFIG, "repair_attempts must be 0..3")
+        if not isinstance(self.require_reason, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "require_reason must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -400,6 +406,12 @@ class ToolLoopExecutor:
                     response.content,
                     evidence=evidence_universe(pack, tool_evidence),
                     max_proposals=min(budget.max_proposals, 8),
+                    on_unknown_silence_reason=lambda raw: events.append(
+                        RunEventRecord(
+                            "silence_reason_unknown",
+                            f"model reported an unknown silence_reason {raw!r}; recorded as unspecified",
+                        )
+                    ),
                 )
             except PASError as exc:
                 if repairs_left > 0:
@@ -479,12 +491,21 @@ class ToolLoopExecutor:
     # ------------------------------------------------------------------ #
 
     def _parse_decision(
-        self, content: str | None, *, evidence: frozenset[str], max_proposals: int
+        self,
+        content: str | None,
+        *,
+        evidence: frozenset[str],
+        max_proposals: int,
+        on_unknown_silence_reason: Callable[[str], None] | None = None,
     ) -> Decision:
         """Shared with every other producer of a decision (see
         ``decision_parse.parse_decision_text``)."""
         return parse_decision_text(
-            content, evidence=evidence, max_proposals=max_proposals
+            content,
+            evidence=evidence,
+            max_proposals=max_proposals,
+            require_reason=self.config.require_reason,
+            on_unknown_silence_reason=on_unknown_silence_reason,
         )
 
     # ------------------------------------------------------------------ #

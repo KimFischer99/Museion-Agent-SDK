@@ -103,6 +103,7 @@ def _envelope(**over) -> dict:
                 "body": "只通知本人",
                 "evidence_refs": [MEMORY_ID],
                 "expires_at": "2030-01-01T00:00:00Z",
+                "reason": "changed",
             }
         ],
     }
@@ -264,6 +265,7 @@ class BridgeContractTests(unittest.TestCase):
                         "revision": "1",
                         "evidence_refs": ["snapshot:never-observed"],
                         "expires_at": "2030-01-01T00:00:00Z",
+                        "reason": "changed",
                     }
                 ]
             )

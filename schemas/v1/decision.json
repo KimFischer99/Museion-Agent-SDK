@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://proactive-agent-sdk.invalid/schemas/v1/decision.json",
   "title": "Decision",
-  "description": "SPEC §4.1 / §8.1 Decision with ActionProposal definitions. Unknown fields, oversized bodies and unsupported kinds are rejected. Cross-field rules (silent=>no proposals, propose=>>=1 proposal, notify_self needs evidence_refs+expires_at) are enforced by contracts.validate_decision.",
+  "description": "SPEC §4.1 / §8.1 Decision with ActionProposal definitions. Unknown fields, oversized bodies and unsupported kinds are rejected. Cross-field rules (silent=>no proposals, propose=>>=1 proposal, notify_self needs evidence_refs+expires_at, notify_self/draft need a reason in decision contract 1.1, silence_reason only on silent) are enforced by contracts.validate_decision.",
   "type": "object",
   "additionalProperties": false,
   "required": ["protocol_version", "decision", "summary", "proposals"],
@@ -14,6 +14,10 @@
       "type": "array",
       "maxItems": 8,
       "items": { "$ref": "#/$defs/action_proposal" }
+    },
+    "silence_reason": {
+      "description": "Model-side reason for a silent decision (decision contract 1.1). Unknown values are normalised to 'unspecified' by the parser; this schema only fixes the vocabulary.",
+      "enum": ["moot", "already_handled", "unconfirmed", "not_useful_now", "reason_none", "unspecified"]
     }
   },
   "$defs": {
@@ -36,7 +40,11 @@
           "maxItems": 32,
           "items": { "type": "string", "minLength": 1, "maxLength": 256 }
         },
-        "expires_at": { "type": "string", "format": "date-time" }
+        "expires_at": { "type": "string", "format": "date-time" },
+        "reason": {
+          "description": "Why this proposal is worth interrupting the owner (decision contract 1.1). Required for notify_self/draft by contracts.validate_decision.",
+          "enum": ["time_sensitive", "changed", "requested", "ready_for_decision", "new_opportunity"]
+        }
       }
     }
   }
