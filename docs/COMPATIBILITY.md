@@ -64,3 +64,31 @@ and does not pretend an integration has been run.
   client-ts clients - a failed hello negotiation stops the connection.
 - After this document or an external document changes, run the tests before updating the matrix
   (SPEC §17.3.6).
+
+## Proactive layer v2 additions (branch `feat/pas-v2`, unreleased)
+
+Verified by unit/integration tests on the Python 3.14.4 development machine (the 3.11/3.12
+matrix remains unrun, as stated above). Items that need a real external service stay ❌ until
+someone runs them against their own authorized environment — this document never upgrades a row
+on the strength of mocks.
+
+| Capability | Verification | Status |
+|---|---|---|
+| Decision contract 1.1 (structured `reason`; `policy.require_reason` gray release) | Unit + contract-drift tests; schema/TS regenerated together | ✅ offline |
+| Semantic silence reasons (`silence_reason`, host + model vocabularies) | Unit + migration tests (012) | ✅ offline |
+| User-presence idle gate (`policy.idle_gate`; reminder/manual exempt; fail open) | Unit + fake-clock/real-clock reminder regression | ✅ offline |
+| Two-stage path: probe → candidates → run (`policy.max_candidates`, `task.always_run`) | Unit + 24-tick cost simulation | ✅ offline |
+| Generic source connectors: RSS/Atom, sitemap diff, page hash | Unit + pinned loopback TLS fixture site; real internet ❌ (manual only) | ✅ offline |
+| Host-provided activity probe | Protocol + fake probe only; host adapter implementation is deployment-side | ❌ unverified |
+| Delivery feedback (`feedback.record`, `delivery_feedback`, `pas stats --since`) | Unit + aggregation tests; real reply channel is host-side | ✅ offline |
+| Host executor replacing the built-in loop (W7) | Gated: requires 7 days of ledger data and host-side measurements first | ❌ not started |
+
+Operational notes for v2:
+
+- migrations 012–014 are additive (reason/silence columns, candidate counters, delivery_feedback,
+  proposal source attribution); an old binary still refuses a newer database and backups reject a
+  newer `schema_version`, so rollback is "restore a backup", not "downgrade in place".
+- `task.always_run: true` restores the pre-v2 "run every slot" semantics for a job; without it a
+  job-driven task is silent when no source candidate changed.
+- new network sources are registered programmatically and are default-off for untargeted
+  heartbeats; a job opts in with `task.refresh_source_ids`.

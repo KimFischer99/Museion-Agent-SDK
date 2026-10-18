@@ -56,6 +56,7 @@ export const PROACTIVE_RPC_METHODS = [
   "approvals.resolve",
   "notifications.list",
   "notifications.feedback",
+  "feedback.record",
 ] as const;
 
 export type ProactiveRpcMethod = (typeof PROACTIVE_RPC_METHODS)[number];
@@ -242,6 +243,13 @@ export class PasRpcClient {
   }
   listNotifications(): Promise<unknown> {
     return this.call("notifications.list", {});
+  }
+  /**
+   * Trusted-UI delivery outcome for one sent notification (W6):
+   * replied / dismissed / complained. `ignored_24h` is host-side only.
+   */
+  recordDeliveryFeedback(messageId: string, signal: string): Promise<unknown> {
+    return this.call("feedback.record", { message_id: messageId, signal });
   }
 }
 
