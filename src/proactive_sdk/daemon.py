@@ -196,11 +196,26 @@ class PasDaemon:
             except (NotImplementedError, RuntimeError):  # pragma: no cover — non-main loop
                 pass
 
-        await self.start()
+        stop_waiter = None
         try:
-            await self._stop_event.wait()
-            await self._shutdown(drain=not self._force_event.is_set())
+            await self.start()
+            stop_waiter = asyncio.create_task(self._stop_event.wait())
+            try:
+                await asyncio.wait(
+                    (stop_waiter, self._loop_task), return_when=asyncio.FIRST_COMPLETED
+                )
+                if self._loop_task.done():
+                    self._loop_task.result()  # Propagate a fatal cycle error to the supervisor.
+            finally:
+                await self._shutdown(drain=not self._force_event.is_set())
+                self._loop_task.cancel()
+                await asyncio.gather(self._loop_task, return_exceptions=True)
+                self._loop_task = None
+                self._started = False
         finally:
+            if stop_waiter is not None:
+                stop_waiter.cancel()
+                await asyncio.gather(stop_waiter, return_exceptions=True)
             for sig in installed:
                 try:
                     loop.remove_signal_handler(sig)
@@ -282,6 +297,7 @@ class PasDaemon:
     def _recover(self) -> None:
         now = self.agent.store.clock.wall_now_ms()
         resolved = self.agent.store.resolve_cancel_requested(now_ms=now)
+        self.agent.store.recover_expired_outbox_leases(now_ms=now)
         expired = self.agent.store.expire_due_messages(now_ms=now)
         promoted = self.agent.store.promote_deferred(now_ms=now)
         staging_cleaned = self._clean_hook_staging()
@@ -346,6 +362,7 @@ class PasDaemon:
 
         if not self._disk_stopped:
             admission = agent.scheduler.admit_due(now_ms=now)
+            self._last_admit_ms = now
             if admission.admitted:
                 self.metrics.inc("wake", len(admission.admitted))
                 self.logger.info("jobs_admitted", count=len(admission.admitted))

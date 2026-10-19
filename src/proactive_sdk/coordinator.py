@@ -390,13 +390,14 @@ class ProactiveCoordinator:
                 else:
                     source_errors.append(f"{entry.source_id}:{exc.code.value}")
                 continue
-            self.store.set_source_state(
-                entry.source_id,
-                entry.account_ref,
-                cursor_ref=batch.cursor_ref,
-                watermark=self._watermark(batch),
-                now_ms=now_ms,
-            )
+            if not batch.items:
+                self.store.set_source_state(
+                    entry.source_id,
+                    entry.account_ref,
+                    cursor_ref=batch.cursor_ref,
+                    watermark=self._watermark(batch),
+                    now_ms=now_ms,
+                )
             fetched.append((entry, batch))
 
         always_run = bool(job.task.get("always_run")) if job is not None else False
@@ -465,7 +466,7 @@ class ProactiveCoordinator:
 
         # ---- L1 preparation: snapshots + immutable ContextPack ----
         # Only the candidates that made the cut become snapshots; the full
-        # batch was already accounted for in ``source_state`` above.
+        # batch cursor is confirmed atomically with the decision below.
         materializer = SnapshotMaterializer(self.store)
         source_records: list[dict[str, Any]] = []
         for entry, batch, items in self._candidate_batches(candidates):
@@ -533,6 +534,11 @@ class ProactiveCoordinator:
             candidates_count=candidates_count,
             truncated_count=truncated_count,
             proposal_sources=proposal_sources,
+            source_states=tuple(
+                dict(source_id=entry.source_id, account_ref=entry.account_ref,
+                     cursor_ref=batch.cursor_ref, watermark=self._watermark(batch))
+                for entry, batch in fetched if batch.items
+            ),
         )
         report = RunReport(
             run_id=lease.run_id,

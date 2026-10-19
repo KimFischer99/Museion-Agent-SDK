@@ -320,6 +320,7 @@ class OutboxDispatcher:
         limit. One message at a time; each message's network call happens
         between transactions."""
         now = self.store.clock.wall_now_ms() if now_ms is None else now_ms
+        self.store.recover_expired_outbox_leases(now_ms=now)
         self.store.expire_due_messages(now_ms=now)
         self.store.promote_deferred(now_ms=now)
         reports: list[DispatchReport] = []
@@ -453,6 +454,12 @@ class OutboxDispatcher:
             )
             self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
             return DispatchReport(lease.message_id, final, refresh_reason)
+        # Source refresh may cross into a quiet window; check at the effect boundary.
+        now_ms = max(now_ms, self.store.clock.wall_now_ms())
+        quiet_state = self.store.defer_outbox_in_quiet_hours(lease, now_ms=now_ms)
+        if quiet_state is not None:
+            self._project_delivery(lease.message_id, state=quiet_state, now_ms=now_ms)
+            return DispatchReport(lease.message_id, quiet_state, "quiet_hours")
         if lease.channel_kind == "local_inbox":
             final = self.store.finish_outbox_attempt(
                 lease,

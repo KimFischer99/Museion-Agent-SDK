@@ -2620,37 +2620,45 @@ class Store:
         """Persist the fetch cursor after a delta was consumed. The row
         version increases on every write; the detection watermark is what
         L0 compares against on the next tick."""
+        with self.transaction():
+            return self._set_source_state_tx(
+                source_id, account_ref, cursor_ref=cursor_ref, watermark=watermark, now_ms=now_ms
+            )
+
+    def _set_source_state_tx(
+        self, source_id: str, account_ref: str, *, cursor_ref: str | None,
+        watermark: str | None, now_ms: int,
+    ) -> SourceStateRecord:
         if cursor_ref is not None and (
             not isinstance(cursor_ref, str) or not 1 <= len(cursor_ref) <= 256
         ):
             raise PASError(ErrorCode.INVALID_CONFIG, "cursor_ref must be 1..256 chars or None", scope="sources")
         if watermark is not None and (not isinstance(watermark, str) or not 1 <= len(watermark) <= 256):
             raise PASError(ErrorCode.INVALID_CONFIG, "watermark must be 1..256 chars or None", scope="sources")
-        with self.transaction():
-            self.db.execute(
-                """INSERT INTO source_state(source_id, account_ref, cursor_ref,
-                                            detected_watermark, version, updated_at_ms)
-                   VALUES (?,?,?,?,1,?)
-                   ON CONFLICT(source_id, account_ref) DO UPDATE SET
-                     cursor_ref=excluded.cursor_ref,
-                     detected_watermark=excluded.detected_watermark,
-                     version=version+1,
-                     updated_at_ms=excluded.updated_at_ms""",
-                (source_id, account_ref, cursor_ref, watermark, now_ms),
-            )
-            row = self.db.execute(
-                """SELECT cursor_ref, detected_watermark, version, updated_at_ms
-                   FROM source_state WHERE source_id=? AND account_ref=?""",
-                (source_id, account_ref),
-            ).fetchone()
-            return SourceStateRecord(
-                source_id=source_id,
-                account_ref=account_ref,
-                cursor_ref=row["cursor_ref"],
-                detected_watermark=row["detected_watermark"],
-                version=row["version"],
-                updated_at_ms=row["updated_at_ms"],
-            )
+        self.db.execute(
+            """INSERT INTO source_state(source_id, account_ref, cursor_ref,
+                                        detected_watermark, version, updated_at_ms)
+               VALUES (?,?,?,?,1,?)
+               ON CONFLICT(source_id, account_ref) DO UPDATE SET
+                 cursor_ref=excluded.cursor_ref,
+                 detected_watermark=excluded.detected_watermark,
+                 version=version+1,
+                 updated_at_ms=excluded.updated_at_ms""",
+            (source_id, account_ref, cursor_ref, watermark, now_ms),
+        )
+        row = self.db.execute(
+            """SELECT cursor_ref, detected_watermark, version, updated_at_ms
+               FROM source_state WHERE source_id=? AND account_ref=?""",
+            (source_id, account_ref),
+        ).fetchone()
+        return SourceStateRecord(
+            source_id=source_id,
+            account_ref=account_ref,
+            cursor_ref=row["cursor_ref"],
+            detected_watermark=row["detected_watermark"],
+            version=row["version"],
+            updated_at_ms=row["updated_at_ms"],
+        )
 
     def put_snapshot(
         self,
@@ -2949,6 +2957,7 @@ class Store:
         candidates_count: int = 0,
         truncated_count: int = 0,
         proposal_sources: dict[str, str] | None = None,
+        source_states: tuple[dict[str, Any], ...] = (),
     ) -> str:
         """Commit one finished analysis in a single transaction (§13.2:
         决策完成 = 校验 run fence + 保存审计 + 建 proposals + 更新 run state).
@@ -3090,6 +3099,8 @@ class Store:
                     lease.run_id,
                 ),
             )
+            for state in source_states:
+                self._set_source_state_tx(**state, now_ms=now_ms)
             return context_ref
 
     def run_events(self, run_id: str) -> list[dict[str, Any]]:
@@ -3866,6 +3877,51 @@ class Store:
         return out
 
     # -- outbox dispatch (SEND-01) -------------------------------------- #
+
+    def recover_expired_outbox_leases(self, *, now_ms: int) -> int:
+        """Local inbox writes are atomic; interrupted external effects need reconciliation."""
+        with self.transaction():
+            cursor = self.db.execute(
+                """UPDATE outbox SET
+                     state=CASE WHEN destination_ref IN
+                       (SELECT channel_ref FROM owner_channels WHERE kind='local_inbox')
+                       THEN 'pending' ELSE 'delivery_unknown' END,
+                     reason='sending_lease_expired', lease_until_ms=0, fence=fence+1
+                   WHERE state='sending' AND lease_until_ms<=?""",
+                (now_ms,),
+            )
+            return cursor.rowcount
+
+    def defer_outbox_in_quiet_hours(self, lease: OutboxLease, *, now_ms: int) -> str | None:
+        """Recheck the trusted policy immediately before delivery, without spending retries."""
+        with self.transaction():
+            message = self.get_outbox_message(lease.message_id)
+            if message is None or message['state'] != 'sending' or message['fence'] != lease.fence:
+                return 'aborted'
+            action = self.action_delivery_context(lease.action_id)
+            if action is None:
+                return None
+            if action['source'] == 'reminder':
+                job = self.get_job(action['request']['job_id'])
+                policy = job.delivery_policy if job else {}
+            else:
+                run = self.get_run(action['run_id'])
+                event = self.get_event(run['event_id']) if run else None
+                job = self.get_job(event.job_id) if event and event.job_id else None
+                policy = job.delivery_policy if job else (
+                    (event.authorization or {}).get('delivery_policy', {}) if event else {}
+                )
+            end = quiet_end_ms(policy, now_ms)
+            if end is None:
+                return None
+            state = 'expired' if message['expires_at_ms'] <= end else 'deferred'
+            self.db.execute(
+                """UPDATE outbox SET state=?, not_before_ms=?, lease_until_ms=0, reason=?
+                   WHERE message_id=?""",
+                (state, end, 'expired_in_quiet_hours' if state == 'expired' else 'quiet_hours',
+                 lease.message_id),
+            )
+            return state
 
     def claim_outbox_message(self, *, now_ms: int, ttl_ms: int) -> OutboxLease | None:
         """Claim one due message: fence+1 and state='sending' in one
