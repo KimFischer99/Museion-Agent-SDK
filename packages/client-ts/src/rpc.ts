@@ -37,6 +37,10 @@ export const PROACTIVE_RPC_METHODS = [
   "jobs.create",
   "jobs.update",
   "jobs.list",
+  "memory.list",
+  "memory.candidates",
+  "goals.list",
+  "goals.get",
   "jobs.pause",
   "jobs.resume",
   "jobs.stop",
@@ -234,6 +238,18 @@ export class PasRpcClient {
       phase: options.phase,
       limit: options.limit,
     });
+  }
+  listMemory(limit = 50): Promise<unknown> {
+    return this.call("memory.list", { limit });
+  }
+  listMemoryCandidates(limit = 50): Promise<unknown> {
+    return this.call("memory.candidates", { limit });
+  }
+  listGoals(limit = 50): Promise<unknown> {
+    return this.call("goals.list", { limit });
+  }
+  getGoal(goalId: string): Promise<unknown> {
+    return this.call("goals.get", { goal_id: goalId });
   }
   getRun(runId: string): Promise<unknown> {
     return this.call("runs.get", { run_id: runId });

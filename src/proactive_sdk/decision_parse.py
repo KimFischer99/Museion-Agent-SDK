@@ -44,6 +44,7 @@ PROPOSAL_KEYS = frozenset(
         "evidence_refs",
         "expires_at",
         "reason",
+        "memory_candidates",
     }
 )
 PROPOSAL_KINDS: tuple[str, ...] = (
@@ -141,6 +142,7 @@ def parse_decision_text(
                 evidence_refs=tuple(raw_proposal.get("evidence_refs") or []),
                 expires_at=raw_proposal.get("expires_at"),
                 reason=raw_proposal.get("reason"),
+                memory_candidates=raw_proposal.get("memory_candidates", ()),
             )
         )
     decision_kind = raw.get("decision")
@@ -172,7 +174,9 @@ def parse_decision_text(
     if problems:
         raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
     for proposal in decision.proposals:
-        fabricated = [ref for ref in proposal.evidence_refs if ref not in evidence]
+        refs = list(proposal.evidence_refs) + [ref for candidate in proposal.memory_candidates
+                                              for ref in candidate["evidence_refs"]]
+        fabricated = [ref for ref in refs if ref not in evidence]
         if fabricated:
             raise PASError(
                 ErrorCode.INVALID_CONFIG,

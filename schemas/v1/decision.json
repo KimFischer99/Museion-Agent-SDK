@@ -21,6 +21,31 @@
     }
   },
   "$defs": {
+    "memory_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "evidence_refs"
+      ],
+      "properties": {
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "minItems": 1
+        }
+      }
+    },
     "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
     "action_proposal": {
       "type": "object",
@@ -41,6 +66,7 @@
           "items": { "type": "string", "minLength": 1, "maxLength": 256 }
         },
         "expires_at": { "type": "string", "format": "date-time" },
+        "memory_candidates": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/memory_candidate"}},
         "reason": {
           "description": "Why this proposal is worth interrupting the owner (decision contract 1.1). Required for notify_self/draft by contracts.validate_decision.",
           "enum": ["time_sensitive", "changed", "requested", "ready_for_decision", "new_opportunity"]

@@ -138,9 +138,11 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         # v0.1.1 adds jobs.stop and jobs.activity (SPEC §21.1 step 7);
         # v0.1.2 adds input.note (step 6) and the suggestions pair (step 7).
         # v2 adds feedback.record (W6 delivery outcomes).
-        self.assertEqual(len(PROACTIVE_RPC_METHODS), 26)
+        # v3 adds the trusted memory and goal read surfaces (W2/W3).
+        self.assertEqual(len(PROACTIVE_RPC_METHODS), 30)
         for extra in ("jobs.stop", "jobs.activity", "input.note",
-                      "suggestions.list", "suggestions.resolve", "feedback.record"):
+                      "suggestions.list", "suggestions.resolve", "feedback.record",
+                      "memory.list", "memory.candidates", "goals.list", "goals.get"):
             self.assertIn(extra, PROACTIVE_RPC_METHODS)
 
 

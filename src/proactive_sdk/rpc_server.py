@@ -265,6 +265,8 @@ class ControlPlaneServer:
                     ),
                     obligation=job.get("obligation"),
                     always_run=job.get("always_run", False),
+                    goal_id=job.get("goal_id"),
+                    handoff=job.get("handoff", False),
                 ),
                 idempotency_key=str(require(p, "idempotency_key")),
             )
@@ -279,7 +281,17 @@ class ControlPlaneServer:
             if "enabled" in p:
                 record = agent.jobs_resume(job_id) if p["enabled"] else agent.jobs_pause(job_id)
                 return {"job_id": job_id, "revision": record.revision, "enabled": bool(p["enabled"])}
-            if "instruction" in p:
+            if any(key in p for key in ("instruction", "goal_id", "handoff")):
+                task = dict(existing.task)
+                if "instruction" in p:
+                    task["instruction"] = require(p, "instruction")
+                if "goal_id" in p:
+                    if p["goal_id"] is None:
+                        task.pop("goal_id", None)
+                    else:
+                        task["goal_id"] = p["goal_id"]
+                if "handoff" in p:
+                    task["handoff"] = p["handoff"]
                 # Instruction edits are a new revision of the same job id.
                 from .contracts import JobSpec
 
@@ -288,18 +300,11 @@ class ControlPlaneServer:
                         job_id=job_id,
                         mode=existing.mode,
                         schedule=dict(existing.schedule),
-                        task={
-                            "instruction": str(require(p, "instruction")),
-                            **(
-                                {"always_run": True}
-                                if existing.task.get("always_run")
-                                else {}
-                            ),
-                        },
+                        task=task,
                         grant_refs=tuple(existing.grant_refs),
                         delivery_policy=dict(existing.delivery_policy),
                         misfire_policy=existing.misfire_policy,
-                        deadline=existing.deadline,
+                        deadline=agent.store._ms_to_rfc3339(existing.deadline_ms) if existing.deadline_ms is not None else None,
                         enabled=bool(existing.enabled),
                         revision=existing.revision + 1,
                     ),
@@ -307,8 +312,24 @@ class ControlPlaneServer:
                 )
                 return {"job_id": job_id, "revision": record.revision}
             raise PASError(
-                ErrorCode.INVALID_CONFIG, "jobs.update needs 'enabled' or 'instruction'", scope="rpc"
+                ErrorCode.INVALID_CONFIG, "jobs.update needs enabled, instruction, goal_id or handoff", scope="rpc"
             )
+
+        async def memory_list(params, session):
+            p = await params_of(params)
+            return {"memory": agent.memory_list(limit=p.get("limit", 50))}
+
+        async def memory_candidates(params, session):
+            p = await params_of(params)
+            return {"candidates": agent.memory_candidates(limit=p.get("limit", 50))}
+
+        async def goals_list(params, session):
+            p = await params_of(params)
+            return {"goals": agent.goals_list(limit=p.get("limit", 50))}
+
+        async def goals_get(params, session):
+            p = await params_of(params)
+            return {"goal": agent.goals_get(require(p, "goal_id"))}
 
         async def jobs_list(params, session):
             p = await params_of(params)
@@ -319,6 +340,8 @@ class ControlPlaneServer:
                     {
                         "job_id": r.job_id,
                         "mode": r.mode,
+                        "goal_id": r.task.get("goal_id"),
+                        "handoff": bool(r.task.get("handoff")),
                         "revision": r.revision,
                         "enabled": r.enabled,
                         "next_due_ms": r.next_due_ms,
@@ -451,6 +474,10 @@ class ControlPlaneServer:
         d.register("jobs.create", jobs_create)
         d.register("jobs.update", jobs_update)
         d.register("jobs.list", jobs_list)
+        d.register("memory.list", memory_list)
+        d.register("memory.candidates", memory_candidates)
+        d.register("goals.list", goals_list)
+        d.register("goals.get", goals_get)
         d.register("jobs.pause", jobs_pause)
         d.register("jobs.resume", jobs_resume)
         async def input_note(params, session):

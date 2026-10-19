@@ -297,6 +297,7 @@ class PasDaemon:
     def _recover(self) -> None:
         now = self.agent.store.clock.wall_now_ms()
         resolved = self.agent.store.resolve_cancel_requested(now_ms=now)
+        self.agent.store.expire_memory_candidates(now_ms=now)
         self.agent.store.recover_expired_outbox_leases(now_ms=now)
         expired = self.agent.store.expire_due_messages(now_ms=now)
         promoted = self.agent.store.promote_deferred(now_ms=now)
@@ -500,6 +501,7 @@ class PasDaemon:
                     "delivery_reconciled", extra_action=report.message_id, phase=report.state
                 )
             agent.store.promote_deferred(now_ms=now)
+            agent.store.expire_memory_candidates(now_ms=now)
             agent.store.expire_due_messages(now_ms=now)
             counts = agent.store.outbox_state_counts()
             self.metrics.set_gauge(

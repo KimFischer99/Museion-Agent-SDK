@@ -1,0 +1,115 @@
+{
+  "runtime_context": {
+    "schema_version": "1.0",
+    "task": {
+      "goal_id": "demo-job",
+      "scope": "job:task"
+    },
+    "locale": "en",
+    "timezone": "UTC",
+    "preferences_ref": "preferences:default",
+    "sources": [],
+    "pending_refs": [],
+    "sent_fact_refs": [],
+    "memory_refs": [],
+    "untrusted_content_policy": "data_only",
+    "conversation_turns": [
+      {
+        "turn_id": "demo-turn-1",
+        "role": "user",
+        "at_ms": 1792368000000,
+        "text": "Example preference: concise updates.",
+        "channel_ref": "channel:demo"
+      }
+    ],
+    "pending_notifications": [
+      {
+        "fact_digest": "0123456789abcdef",
+        "topic": "Example update",
+        "state": "delivery_unknown",
+        "at_ms": 1792368000000
+      }
+    ],
+    "goal_summary": {
+      "goal_id": "demo-goal",
+      "status": "active",
+      "summary": "Example goal",
+      "progress": "First draft exists.",
+      "momentum": "on_track"
+    }
+  },
+  "persistent_context": {
+    "schema_version": "1.0",
+    "task": {
+      "goal_id": "demo-job",
+      "scope": "job:task"
+    },
+    "locale": "en",
+    "timezone": "UTC",
+    "preferences_ref": "preferences:default",
+    "sources": [],
+    "pending_refs": [],
+    "sent_fact_refs": [],
+    "memory_refs": [],
+    "untrusted_content_policy": "data_only",
+    "pending_notifications": [
+      {
+        "fact_digest": "0123456789abcdef",
+        "topic": "Example update",
+        "state": "delivery_unknown",
+        "at_ms": 1792368000000
+      }
+    ],
+    "goal_summary": {
+      "goal_id": "demo-goal",
+      "status": "active",
+      "summary": "Example goal",
+      "progress": "First draft exists.",
+      "momentum": "on_track"
+    },
+    "conversation_projection": [
+      {
+        "turn_id": "demo-turn-1",
+        "text_sha256": "4793614a10727700"
+      }
+    ]
+  },
+  "decision": {
+    "decision": "propose",
+    "summary": "Record a candidate without authorizing an action.",
+    "proposals": [
+      {
+        "kind": "internal_record",
+        "fact_id": "demo-fact",
+        "revision": "1",
+        "evidence_refs": [
+          "conversation:demo-turn-1"
+        ],
+        "memory_candidates": [
+          {
+            "content": "Prefers concise updates.",
+            "evidence_refs": [
+              "conversation:demo-turn-1"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "run_request": {
+    "protocol_version": "1.0",
+    "run_id": "demo-run-0001",
+    "attempt": 1,
+    "fence": 1,
+    "context_ref": "ctx:demo-run-0001",
+    "stage": "analyze",
+    "budget": {
+      "max_model_turns": 4,
+      "max_tool_calls": 6,
+      "wall_time_s": 120,
+      "max_proposals": 8
+    },
+    "deadline": "2026-10-19T00:05:00Z",
+    "policy_version": "1"
+  }
+}

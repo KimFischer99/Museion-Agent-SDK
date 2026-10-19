@@ -62,6 +62,8 @@ __all__ = [
     "RunBudget",
     "RunRequest",
     "ContextPack",
+    "ConversationTurn",
+    "ConversationPort",
     "ContextSource",
     "RecentNotification",
     "SourceRequest",
@@ -491,6 +493,7 @@ def validate_decision(decision: dict[str, Any], *, require_reason: bool = True) 
                     errors.append(f"proposals[{idx}] must be an object")
                     continue
                 proposal_kind = proposal.get("kind")
+                errors.extend(validate_memory_candidates(proposal.get("memory_candidates", ()), proposal_kind))
                 if proposal_kind == "notify_self":
                     for field_name in _NOTIFY_SELF_REQUIRED:
                         if not proposal.get(field_name):
@@ -519,6 +522,21 @@ def validate_decision(decision: dict[str, Any], *, require_reason: bool = True) 
                 f"silence_reason {silence_reason!r} not in enum {list(allowed)}"
             )
     return errors
+
+
+def validate_memory_candidates(values: Any, kind: str) -> list[str]:
+    if not isinstance(values, (list, tuple)) or len(values) > 8:
+        return ["memory_candidates must contain at most 8 entries"]
+    if values and kind != "internal_record":
+        return ["only internal_record may propose memory_candidates"]
+    for entry in values:
+        if (not isinstance(entry, dict) or set(entry) != {"content", "evidence_refs"}
+                or not isinstance(entry["content"], str) or not 1 <= len(entry["content"]) <= 2000
+                or not isinstance(entry["evidence_refs"], (list, tuple))
+                or not 1 <= len(entry["evidence_refs"]) <= 32
+                or any(not isinstance(r, str) or not 1 <= len(r) <= 256 for r in entry["evidence_refs"])):
+            return ["invalid memory candidate"]
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -636,6 +654,11 @@ class JobSpec:
         if not isinstance(self.task, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "task must be an object")
         always_run = self.task.get("always_run")
+        if "handoff" in self.task and type(self.task["handoff"]) is not bool:
+            raise PASError(ErrorCode.INVALID_CONFIG, "task.handoff must be boolean")
+        if "goal_id" in self.task and (not isinstance(self.task["goal_id"], str)
+                or not 1 <= len(self.task["goal_id"]) <= 128):
+            raise PASError(ErrorCode.INVALID_CONFIG, "task.goal_id must be 1..128 chars")
         if always_run is not None and not isinstance(always_run, bool):
             raise PASError(ErrorCode.INVALID_CONFIG, "task.always_run must be a boolean")
         instruction = self.task.get("instruction")
@@ -922,8 +945,11 @@ class RunRequest:
     policy_version: str = "1"
     skill_refs: tuple[str, ...] = ()
     tool_allowlist: tuple[str, ...] = ()
+    stage: str = "legacy"
 
     def __post_init__(self) -> None:
+        if self.stage not in ("legacy", "analyze", "compose"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "stage must be legacy|analyze|compose")
         if not isinstance(self.run_id, str) or not 8 <= len(self.run_id) <= 128:
             raise PASError(ErrorCode.INVALID_CONFIG, "run_id must be 8..128 chars")
         if not isinstance(self.attempt, int) or isinstance(self.attempt, bool) or self.attempt < 1:
@@ -957,6 +983,7 @@ class RunRequest:
             "budget": self.budget.to_dict(),
             "deadline": self.deadline,
             "policy_version": self.policy_version,
+            "stage": self.stage,
         }
 
 
@@ -966,6 +993,38 @@ class RunRequest:
 
 
 _SENSITIVITIES = frozenset({"public", "private", "sensitive"})
+
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    turn_id: str
+    role: str
+    at_ms: int
+    text: str
+    channel_ref: str
+
+    def __post_init__(self) -> None:
+        for name in ("turn_id", "channel_ref"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not 1 <= len(value) <= 128:
+                raise PASError(ErrorCode.INVALID_CONFIG, "conversation ids must be 1..128 chars")
+        if self.role not in ("user", "assistant") or type(self.at_ms) is not int:
+            raise PASError(ErrorCode.INVALID_CONFIG, "invalid conversation role or timestamp")
+        if not isinstance(self.text, str) or len(self.text) > 100_000:
+            raise PASError(ErrorCode.INVALID_CONFIG, "conversation text exceeds 100000 chars")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"turn_id": self.turn_id, "role": self.role, "at_ms": self.at_ms,
+                "text": self.text, "channel_ref": self.channel_ref}
+
+
+@runtime_checkable
+class ConversationPort(Protocol):
+    """Host binds this read-only port to the current profile and allowed task scope.
+
+    channel_ref locates a turn; it never grants access to another conversation.
+    """
+    async def recent_turns(self, since_ms: int, limit: int) -> tuple[ConversationTurn, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -1091,8 +1150,19 @@ class ContextPack:
     untrusted_content_policy: str = "data_only"
     recent_notifications: tuple["RecentNotification", ...] = ()
     memory_entries: tuple["MemoryEntry", ...] = ()
+    conversation_turns: tuple[ConversationTurn, ...] = ()
+    pending_notifications: tuple[dict[str, Any], ...] = ()
+    goal_summary: dict[str, Any] | None = None
+    worker_report: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        problems = validate_v3_context({
+            "conversation_turns": [t.to_dict() for t in self.conversation_turns],
+            "pending_notifications": list(self.pending_notifications),
+            "goal_summary": self.goal_summary, "worker_report": self.worker_report,
+        })
+        if problems:
+            raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
         if not isinstance(self.task_goal_id, str) or not 1 <= len(self.task_goal_id) <= 128:
             raise PASError(ErrorCode.INVALID_CONFIG, "task.goal_id must be 1..128 chars")
         if not isinstance(self.task_scope, str) or not 1 <= len(self.task_scope) <= 128:
@@ -1149,6 +1219,7 @@ class ContextPack:
         memory refs. Tool-result evidence joins at executor level."""
         return frozenset(
             {source.snapshot_ref for source in self.sources} | set(self.memory_refs)
+            | {f"conversation:{turn.turn_id}" for turn in self.conversation_turns}
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1177,14 +1248,112 @@ class ContextPack:
         }
         if self.memory_entries:
             out["memory_entries"] = [entry.to_dict() for entry in self.memory_entries]
+        if self.conversation_turns:
+            out["conversation_turns"] = [turn.to_dict() for turn in self.conversation_turns]
+        if self.pending_notifications:
+            out["pending_notifications"] = list(self.pending_notifications)
+        if self.goal_summary is not None:
+            out["goal_summary"] = self.goal_summary
+        if self.worker_report is not None:
+            out["worker_report"] = self.worker_report
         return out
+
+    def persistent_dict(self) -> dict[str, Any]:
+        out = self.to_dict()
+        turns = out.pop("conversation_turns", [])
+        if turns:
+            out["conversation_projection"] = [
+                {"turn_id": t["turn_id"], "text_sha256": hashlib.sha256(
+                    t["text"].encode("utf-8")).hexdigest()[:16]} for t in turns
+            ]
+        # Reports are model output; their persisted home is the stage checkpoint.
+        out.pop("worker_report", None)
+        return out
+
+
+def validate_v3_context(pack: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    turns = pack.get("conversation_turns", [])
+    projections = pack.get("conversation_projection", [])
+    try:
+        if not isinstance(turns, (list, tuple)) or len(turns) > 128:
+            raise ValueError()
+        parsed = [ConversationTurn(**t) for t in turns]
+        if len({t.turn_id for t in parsed}) != len(parsed):
+            raise ValueError()
+        if sum(len(t.text) for t in parsed) > 32_000:
+            raise ValueError()
+        if not isinstance(projections, (list, tuple)) or len(projections) > 128 or (turns and projections):
+            raise ValueError()
+        ids: set[str] = set()
+        for entry in projections:
+            if (not isinstance(entry, dict) or set(entry) != {"turn_id", "text_sha256"}
+                    or not isinstance(entry["turn_id"], str) or not 1 <= len(entry["turn_id"]) <= 128
+                    or entry["turn_id"] in ids
+                    or not isinstance(entry["text_sha256"], str)
+                    or not re.fullmatch(r"[0-9a-f]{16}", entry["text_sha256"])):
+                raise ValueError()
+            ids.add(entry["turn_id"])
+    except (TypeError, ValueError, PASError):
+        errors.append("invalid conversation context or projection")
+    pending = pack.get("pending_notifications", [])
+    if not isinstance(pending, (list, tuple)) or len(pending) > 20:
+        errors.append("pending_notifications allows at most 20 entries")
+    else:
+        for entry in pending:
+            if (not isinstance(entry, dict) or set(entry) != {"fact_digest", "topic", "state", "at_ms"}
+                    or not isinstance(entry["fact_digest"], str) or not re.fullmatch(r"[0-9a-f]{16}", entry["fact_digest"])
+                    or not isinstance(entry["topic"], str) or len(entry["topic"]) > 120
+                    or entry["state"] not in ("pending", "sending", "deferred", "delivery_unknown")
+                    or type(entry["at_ms"]) is not int):
+                errors.append("invalid pending notification")
+    goal = pack.get("goal_summary")
+    if goal is not None:
+        if (not isinstance(goal, dict) or set(goal) != {"goal_id", "status", "summary", "progress", "momentum"}
+                or not isinstance(goal["goal_id"], str) or not 1 <= len(goal["goal_id"]) <= 128
+                or goal["status"] not in ("active", "completed", "archived", "goal_missing")
+                or not isinstance(goal["summary"], str) or len(goal["summary"]) > 400
+                or not isinstance(goal["progress"], str) or len(goal["progress"]) > 200
+                or goal["momentum"] not in ("on_track", "stale")):
+            errors.append("invalid goal summary")
+    report = pack.get("worker_report")
+    if report is not None:
+        try:
+            if (not isinstance(report, dict) or set(report) != {"summary", "records", "evidence_bindings"}
+                    or not isinstance(report["summary"], str) or not 1 <= len(report["summary"]) <= 500
+                    or not isinstance(report["records"], (list, tuple)) or len(report["records"]) > 8
+                    or len(canonical_json(report)) > 32_000):
+                raise ValueError()
+            for record in report["records"]:
+                proposal = ActionProposal(**record)
+                if proposal.kind != "internal_record":
+                    raise ValueError()
+            validate_worker_bindings(report["evidence_bindings"])
+        except (TypeError, ValueError, PASError):
+            errors.append("invalid worker report")
+    return errors
+
+
+def validate_worker_bindings(bindings: Any) -> None:
+    if not isinstance(bindings, (list, tuple)) or len(bindings) > 256:
+        raise PASError(ErrorCode.INVALID_CONFIG, "invalid worker evidence bindings")
+    seen: set[str] = set()
+    for binding in bindings:
+        if (not isinstance(binding, dict) or set(binding) != {"ref", "source", "summary_hash"}
+                or not isinstance(binding["source"], str) or not 1 <= len(binding["source"]) <= 128
+                or not isinstance(binding["ref"], str) or len(binding["ref"]) > 256
+                or not binding["ref"].startswith(f"tool:{binding['source']}:") or binding["ref"] in seen
+                or not isinstance(binding["summary_hash"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", binding["summary_hash"])):
+            raise PASError(ErrorCode.INVALID_CONFIG, "invalid worker evidence provenance")
+        seen.add(binding["ref"])
 
 
 def validate_context_pack(pack: dict[str, Any]) -> list[str]:
     """Cross-field checks for ContextPack documents beyond the JSON Schema
     (mirrors ``schemas/v1/context_pack.json`` bounds so typed and wire
     validation agree)."""
-    errors: list[str] = []
+    errors: list[str] = validate_v3_context(pack)
     if pack.get("schema_version") != "1.0":
         errors.append("schema_version must be '1.0'")
     if pack.get("untrusted_content_policy") != "data_only":
@@ -1372,9 +1541,11 @@ class MemoryEntry:
         if self.confidence is not None and self.confidence not in (
             "inferred",
             "user_confirmed",
+            "user_stated",
+            "confirmed_twice",
         ):
             raise PASError(
-                ErrorCode.INVALID_CONFIG, "confidence must be 'inferred' or 'user_confirmed'"
+                ErrorCode.INVALID_CONFIG, "confidence must be inferred|user_confirmed|user_stated|confirmed_twice"
             )
         for name in ("last_confirmed_at", "expires_at"):
             value = getattr(self, name)
@@ -1433,8 +1604,12 @@ class ActionProposal:
     #: 1.1). Required for the kinds that interrupt, checked by
     #: ``validate_decision`` so the gray-release switch has one home.
     reason: str | None = None
+    memory_candidates: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
+        problems = validate_memory_candidates(self.memory_candidates, self.kind)
+        if problems:
+            raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
         if self.kind not in _PROPOSAL_KINDS:
             raise PASError(
                 ErrorCode.INVALID_CONFIG,
@@ -1479,6 +1654,8 @@ class ActionProposal:
             out["expires_at"] = self.expires_at
         if self.reason is not None:
             out["reason"] = self.reason
+        if self.memory_candidates:
+            out["memory_candidates"] = list(self.memory_candidates)
         return out
 
 

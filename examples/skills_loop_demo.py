@@ -175,6 +175,7 @@ async def scenario_mail(store: Store) -> dict:
                                         "覆盖 gmail skill 的固定英文输出假设）。",
                                 "evidence_refs": ["tool:read_evidence:c1"],
                                 "expires_at": rfc3339(T0 + 3_600_000),
+                                "reason": "changed",
                             }
                         ],
                     }

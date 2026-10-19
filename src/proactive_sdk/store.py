@@ -425,22 +425,28 @@ class Store:
         if type(max_entries) is not int or not 1 <= max_entries <= 256:
             raise PASError(ErrorCode.INVALID_CONFIG, "max_entries must be 1..256")
         timestamp = self._memory_now_ms(now_ms)
-        payload = canonical_json(asdict(entry))
         with self.transaction():
-            self.db.execute(
-                """INSERT INTO memory_entries(memory_id, entry_json, updated_at_ms)
-                   VALUES (?, ?, ?) ON CONFLICT(memory_id) DO UPDATE SET
-                   entry_json=excluded.entry_json, updated_at_ms=excluded.updated_at_ms""",
-                (entry.memory_id, payload, timestamp),
-            )
-            self.db.execute(
-                """DELETE FROM memory_entries WHERE memory_id IN (
-                     SELECT memory_id FROM memory_entries
-                     ORDER BY updated_at_ms, memory_id LIMIT MAX(0,
-                       (SELECT COUNT(*) FROM memory_entries) - ?)
-                   )""",
-                (max_entries,),
-            )
+            # Only this trusted write path may unblock explicitly forgotten content.
+            self.db.execute("DELETE FROM memory_forget_blocks WHERE content_hash=?",
+                            (content_hash(entry.content),))
+            self._remember_memory_tx(entry, timestamp, max_entries)
+
+    def _remember_memory_tx(self, entry: MemoryEntry, timestamp: int, max_entries: int = 256) -> None:
+        payload = canonical_json(asdict(entry))
+        self.db.execute(
+            """INSERT INTO memory_entries(memory_id, entry_json, updated_at_ms)
+               VALUES (?, ?, ?) ON CONFLICT(memory_id) DO UPDATE SET
+               entry_json=excluded.entry_json, updated_at_ms=excluded.updated_at_ms""",
+            (entry.memory_id, payload, timestamp),
+        )
+        self.db.execute(
+            """DELETE FROM memory_entries WHERE memory_id IN (
+                 SELECT memory_id FROM memory_entries
+                 ORDER BY updated_at_ms, memory_id LIMIT MAX(0,
+                   (SELECT COUNT(*) FROM memory_entries) - ?)
+               )""",
+            (max_entries,),
+        )
 
     def recall_memory(
         self, *, limit: int = 16, now_ms: int | None = None
@@ -475,8 +481,212 @@ class Store:
         if not isinstance(memory_id, str) or not 1 <= len(memory_id) <= 128:
             raise PASError(ErrorCode.INVALID_CONFIG, "memory_id must be 1..128 chars")
         with self.transaction():
+            row = self.db.execute("SELECT entry_json FROM memory_entries WHERE memory_id=?", (memory_id,)).fetchone()
+            digest = content_hash(canonical_loads(row["entry_json"])["content"]) if row is not None else None
+            if digest is None:
+                candidate = self.db.execute(
+                    "SELECT content_hash FROM memory_candidates WHERE candidate_id=? OR 'auto:' || substr(content_hash,1,32)=? LIMIT 1",
+                    (memory_id, memory_id)).fetchone()
+                digest = candidate[0] if candidate is not None else None
+            if digest is not None:
+                self.db.execute("INSERT OR REPLACE INTO memory_forget_blocks VALUES (?,?)", (digest, self.clock.wall_now_ms()))
+                self.db.execute("UPDATE memory_candidates SET state='forgotten' WHERE content_hash=?", (digest,))
+                self.db.execute("DELETE FROM memory_entries WHERE memory_id=?", ("auto:" + digest[:32],))
             cur = self.db.execute("DELETE FROM memory_entries WHERE memory_id=?", (memory_id,))
-            return cur.rowcount > 0
+            return cur.rowcount > 0 or digest is not None
+
+    @staticmethod
+    def _ms_to_rfc3339(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    def memory_candidates(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be 1..256")
+        rows = self.db.execute("SELECT * FROM memory_candidates ORDER BY created_at_ms DESC, candidate_id LIMIT ?", (limit,)).fetchall()
+        now = self.clock.wall_now_ms()
+        return [{**dict(row), "content": row["content"] if row["expires_at_ms"] > now else None,
+                 "state": "expired" if row["state"] == "pending" and row["expires_at_ms"] <= now else row["state"],
+                 "evidence_refs": canonical_loads(row["evidence_refs_json"])} for row in rows]
+
+    def _collect_memory_candidates_tx(self, run_id: str, proposals: list[dict[str, Any]], now_ms: int, ttl_ms: int) -> None:
+        from .contracts import validate_memory_candidates
+        for seq, proposal in enumerate(proposals, 1):
+            values = proposal.get("memory_candidates", ())
+            problems = validate_memory_candidates(values, proposal.get("kind"))
+            if problems:
+                raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems))
+            grouped: dict[str, dict[str, Any]] = {}
+            for candidate in values:
+                digest = content_hash(candidate["content"])
+                group = grouped.setdefault(digest, {"content": candidate["content"], "refs": set()})
+                group["refs"].update(candidate["evidence_refs"])
+            for digest, candidate in grouped.items():
+                blocked = self.db.execute("SELECT 1 FROM memory_forget_blocks WHERE content_hash=?", (digest,)).fetchone()
+                self.db.execute(
+                    """INSERT OR IGNORE INTO memory_candidates
+                       (candidate_id,run_id,proposal_seq,content,content_hash,evidence_refs_json,state,created_at_ms,expires_at_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    ("mc:" + content_hash([run_id, seq, digest])[:32], run_id, seq, candidate["content"], digest,
+                     canonical_json(sorted(candidate["refs"])), "forgotten" if blocked else "pending", now_ms, now_ms + ttl_ms),
+                )
+
+    def expire_memory_candidates(self, *, now_ms: int) -> None:
+        with self.transaction():
+            self._expire_memory_candidates_tx(now_ms)
+
+    def _expire_memory_candidates_tx(self, now_ms: int) -> None:
+        # Keep provenance hashes/refs, but not candidate bodies beyond their validity.
+        self.db.execute("""UPDATE memory_candidates SET content=NULL,
+                           state=CASE WHEN state='pending' THEN 'expired' ELSE state END
+                           WHERE expires_at_ms<=? AND content IS NOT NULL""", (now_ms,))
+
+    def consolidate_memory(self, *, now_ms: int | None = None) -> int:
+        now = self._memory_now_ms(now_ms)
+        promoted = 0
+        with self.transaction():
+            self._expire_memory_candidates_tx(now)
+            # Expired auto entries cannot be reconstructed from older candidates.
+            for row in self.db.execute("SELECT memory_id,entry_json FROM memory_entries").fetchall():
+                entry = canonical_loads(row["entry_json"])
+                if entry.get("expires_at") and self._memory_expiry_ms(entry["expires_at"]) <= now:
+                    self.db.execute("DELETE FROM memory_entries WHERE memory_id=?", (row["memory_id"],))
+            rows = self.db.execute(
+                """SELECT * FROM memory_candidates c WHERE state='pending' AND expires_at_ms>?
+                   AND NOT EXISTS (SELECT 1 FROM memory_forget_blocks b WHERE b.content_hash=c.content_hash)
+                   ORDER BY created_at_ms,candidate_id""", (now,)).fetchall()
+            grouped: dict[str, list[Any]] = {}
+            for row in rows:
+                grouped.setdefault(row["content_hash"], []).append(row)
+            for digest, candidates in grouped.items():
+                refs = sorted({ref for row in candidates for ref in canonical_loads(row["evidence_refs_json"])})
+                if len(refs) < 2:
+                    continue
+                memory_id = "auto:" + digest[:32]
+                existing = self.db.execute("SELECT 1 FROM memory_entries WHERE memory_id=?", (memory_id,)).fetchone()
+                if not existing:
+                    entry = MemoryEntry(memory_id=memory_id, content=candidates[0]["content"],
+                                        source="memory_consolidation", evidence_refs=tuple(refs[:64]),
+                                        confidence="confirmed_twice", last_confirmed_at=self._ms_to_rfc3339(now),
+                                        expires_at=self._ms_to_rfc3339(min(row["expires_at_ms"] for row in candidates)))
+                    self._remember_memory_tx(entry, now)
+                    promoted += 1
+                self.db.executemany("UPDATE memory_candidates SET state='promoted' WHERE candidate_id=?",
+                                    [(row["candidate_id"],) for row in candidates])
+        return promoted
+
+    @staticmethod
+    def _goal_text(value: Any, name: str, maximum: int, *, empty: bool = False) -> str:
+        if not isinstance(value, str) or not (0 if empty else 1) <= len(value) <= maximum:
+            raise PASError(ErrorCode.INVALID_CONFIG, f"{name} has invalid length")
+        return value
+
+    def create_goal(self, goal_id: str, *, title: str, description: str = "", now_ms: int | None = None) -> dict[str, Any]:
+        self._goal_text(goal_id, "goal_id", 128)
+        self._goal_text(title, "title", 200)
+        self._goal_text(description, "description", 2000, empty=True)
+        now = self._memory_now_ms(now_ms)
+        with self.transaction():
+            if self.db.execute("SELECT 1 FROM goals WHERE goal_id=?", (goal_id,)).fetchone():
+                raise PASError(ErrorCode.CONFLICT, "goal already exists")
+            self.db.execute("INSERT INTO goals VALUES (?,?,?,'active',?,?)", (goal_id, title, description, now, now))
+            self._goal_entry_tx(goal_id, "created", title, (), now)
+        return self.get_goal(goal_id, now_ms=now)  # type: ignore[return-value]
+
+    def _goal_entry_tx(self, goal_id: str, kind: str, text: str, refs: tuple[str, ...], now_ms: int) -> None:
+        import uuid
+        self.db.execute("INSERT INTO goal_entries VALUES (?,?,?,?,?,?)",
+                        ("ge:" + uuid.uuid4().hex, goal_id, kind, text, canonical_json(refs), now_ms))
+
+    def update_goal(self, goal_id: str, *, title: str | None = None, description: str | None = None,
+                    status: str | None = None, now_ms: int | None = None) -> dict[str, Any]:
+        if title is not None:
+            self._goal_text(title, "title", 200)
+        if description is not None:
+            self._goal_text(description, "description", 2000, empty=True)
+        if status is not None and status not in ("active", "completed", "archived"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "invalid goal status")
+        now = self._memory_now_ms(now_ms)
+        with self.transaction():
+            old = self.db.execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+            if old is None:
+                raise PASError(ErrorCode.INVALID_CONFIG, "unknown goal")
+            self.db.execute("UPDATE goals SET title=?,description=?,status=?,updated_at_ms=? WHERE goal_id=?",
+                            (title if title is not None else old["title"], description if description is not None else old["description"],
+                             status or old["status"], now, goal_id))
+            for kind, text in (("updated", title), ("updated", description), ("status", status)):
+                if text is not None:
+                    self._goal_entry_tx(goal_id, kind, text, (), now)
+        return self.get_goal(goal_id, now_ms=now)  # type: ignore[return-value]
+
+    def progress_goal(self, goal_id: str, text: str, *, evidence_refs: tuple[str, ...] = (), now_ms: int | None = None) -> dict[str, Any]:
+        self._goal_text(text, "progress", 2000)
+        if (not isinstance(evidence_refs, (tuple, list)) or len(evidence_refs) > 32
+                or any(not isinstance(r, str) or not 1 <= len(r) <= 256 for r in evidence_refs)):
+            raise PASError(ErrorCode.INVALID_CONFIG, "invalid progress evidence_refs")
+        now = self._memory_now_ms(now_ms)
+        with self.transaction():
+            if not self.db.execute("SELECT 1 FROM goals WHERE goal_id=?", (goal_id,)).fetchone():
+                raise PASError(ErrorCode.INVALID_CONFIG, "unknown goal")
+            self._goal_entry_tx(goal_id, "progress", text, evidence_refs, now)
+            self.db.execute("UPDATE goals SET updated_at_ms=? WHERE goal_id=?", (now, goal_id))
+        return self.get_goal(goal_id, now_ms=now)  # type: ignore[return-value]
+
+    def get_goal(self, goal_id: str, *, now_ms: int | None = None, stale_days: int = 14) -> dict[str, Any] | None:
+        self._goal_text(goal_id, "goal_id", 128)
+        if type(stale_days) is not int or stale_days < 1:
+            raise PASError(ErrorCode.INVALID_CONFIG, "stale_days must be positive")
+        row = self.db.execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+        if row is None:
+            return None
+        entries = self.db.execute("SELECT * FROM goal_entries WHERE goal_id=? ORDER BY at_ms,rowid", (goal_id,)).fetchall()
+        progress = [e for e in entries if e["kind"] == "progress"]
+        last = progress[-1]["at_ms"] if progress else None
+        days = max(0, (self._memory_now_ms(now_ms) - (last if last is not None else row["created_at_ms"])) // 86_400_000)
+        return {**dict(row), "last_progress_at_ms": last, "days_since_progress": days,
+                "momentum": "stale" if days >= stale_days else "on_track",
+                "entries": [{**dict(e), "evidence_refs": canonical_loads(e["evidence_refs_json"])} for e in entries]}
+
+    def list_goals(self, *, limit: int = 50, now_ms: int | None = None, stale_days: int = 14) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be 1..256")
+        return [self.get_goal(row[0], now_ms=now_ms, stale_days=stale_days) for row in self.db.execute(
+            "SELECT goal_id FROM goals ORDER BY created_at_ms,goal_id LIMIT ?", (limit,)).fetchall()]
+
+    def pending_notification_summary(self, *, now_ms: int) -> tuple[dict[str, Any], ...]:
+        rows = self.db.execute("""SELECT payload_json,state,created_at_ms FROM outbox
+            WHERE state IN ('pending','sending','deferred','delivery_unknown') AND created_at_ms<=?
+            ORDER BY created_at_ms DESC,rowid DESC LIMIT 20""", (now_ms,)).fetchall()
+        result = []
+        for row in rows:
+            payload = canonical_loads(row["payload_json"])
+            result.append({"fact_digest": content_hash(payload.get("fact_id", ""))[:16],
+                           "topic": str(payload.get("topic") or payload.get("title") or "")[:120],
+                           "state": row["state"], "at_ms": row["created_at_ms"]})
+        return tuple(result)
+
+    def save_run_checkpoint(self, lease: RunLease, *, stage: str, input_hash: str,
+                            checkpoint: dict[str, Any], now_ms: int) -> None:
+        if stage not in ("probed", "analyzed", "composed"):
+            raise PASError(ErrorCode.INVALID_CONFIG, "invalid completed stage")
+        payload = canonical_json(checkpoint)
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            self.db.execute("UPDATE runs SET stage=?,checkpoint_json=?,checkpoint_hash=?,input_hash=? WHERE run_id=?",
+                            (stage, payload, content_hash(checkpoint), input_hash, lease.run_id))
+
+    def load_run_checkpoint(self, lease: RunLease, *, now_ms: int, max_resumes: int) -> dict[str, Any] | None:
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            row = self.db.execute("SELECT stage,checkpoint_json,checkpoint_hash,input_hash,resume_count FROM runs WHERE run_id=?", (lease.run_id,)).fetchone()
+            if row["checkpoint_json"] is None:
+                return None
+            if row["resume_count"] >= max_resumes:
+                raise PASError(ErrorCode.BUDGET_EXCEEDED, "run resume limit exceeded")
+            self.db.execute("UPDATE runs SET resume_count=resume_count+1 WHERE run_id=?", (lease.run_id,))
+            checkpoint = canonical_loads(row["checkpoint_json"])
+            if content_hash(checkpoint) != row["checkpoint_hash"]:
+                raise PASError(ErrorCode.CONFLICT, "checkpoint hash mismatch")
+            return {"stage": row["stage"], "input_hash": row["input_hash"], "data": checkpoint}
 
     def get_proactive_preferences(self) -> dict[str, Any]:
         row = self.db.execute(
@@ -2958,6 +3168,8 @@ class Store:
         truncated_count: int = 0,
         proposal_sources: dict[str, str] | None = None,
         source_states: tuple[dict[str, Any], ...] = (),
+        memory_candidate_ttl_ms: int | None = None,
+        staged: bool = False,
     ) -> str:
         """Commit one finished analysis in a single transaction (§13.2:
         决策完成 = 校验 run fence + 保存审计 + 建 proposals + 更新 run state).
@@ -2968,6 +3180,8 @@ class Store:
         stay P4. Same-fence idempotency is NOT provided here: a committed
         decision finalizes the claim; a retried writer holds a stale fence
         and is rejected by ``_require_active_claim``."""
+        if "conversation_turns" in context_pack:
+            raise PASError(ErrorCode.INVALID_CONFIG, "persistent context requires conversation_projection", scope="runs")
         problems = validate_context_pack(context_pack)
         if problems:
             raise PASError(ErrorCode.INVALID_CONFIG, "; ".join(problems), scope="runs")
@@ -3099,6 +3313,10 @@ class Store:
                     lease.run_id,
                 ),
             )
+            if memory_candidate_ttl_ms is not None:
+                self._collect_memory_candidates_tx(lease.run_id, proposals, now_ms, memory_candidate_ttl_ms)
+            if staged:
+                self.db.execute("UPDATE runs SET stage='proposed',input_hash=checkpoint_hash WHERE run_id=?", (lease.run_id,))
             for state in source_states:
                 self._set_source_state_tx(**state, now_ms=now_ms)
             return context_ref
@@ -3174,7 +3392,7 @@ class Store:
             """SELECT run_id, event_id, state, attempt, fence, lease_until_ms, deadline_ms,
                       error_class, decision_summary, proposal_count, usage_json, context_ref,
                       silence_reason, candidates_count, truncated_count,
-                      tool_authority, tool_authority_reason
+                      tool_authority, tool_authority_reason, stage, input_hash, resume_count
                FROM runs WHERE run_id=?""",
             (run_id,),
         ).fetchone()
@@ -4964,7 +5182,7 @@ class Store:
             "job_occurrences", "job_activity",
             "context_packs", "memory_entries", "proactive_preferences",
             # v2 W6: delivery-outcome feedback is profile data too.
-            "delivery_feedback",
+            "delivery_feedback", "memory_candidates", "memory_forget_blocks", "goals", "goal_entries",
         )
         dump: dict[str, Any] = {}
         for table in tables:
@@ -4985,6 +5203,7 @@ class Store:
         # told everything was gone — so the order is derived from the FK
         # graph and the result is verified with foreign_key_check.
         tables = (
+            "goal_entries", "goals", "memory_candidates", "memory_forget_blocks",
             "job_activity",       # -> jobs, outbox, runs
             "context_packs",      # -> runs; packs can contain copied memory text
             "memory_entries",

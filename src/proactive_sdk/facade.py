@@ -104,13 +104,21 @@ class Job:
     #: type could not express an edit at all -- callers had to drop to
     #: JobSpec to change one line of an instruction (SPEC §22.1 item 9).
     revision: int = 1
+    goal_id: str | None = None
+    handoff: bool = False
 
     def to_spec(self) -> JobSpec:
+        if type(self.handoff) is not bool:
+            raise PASError(ErrorCode.INVALID_CONFIG, "handoff must be boolean")
         delivery_policy = dict(self.delivery_policy)
         delivery_policy.setdefault("notification_profile", self.notification_profile)
         task: dict[str, Any] = {}
         if self.mode != "reminder":
             task["instruction"] = self.instruction
+            if self.goal_id is not None:
+                task["goal_id"] = self.goal_id
+            if self.handoff:
+                task["handoff"] = True
             if self.always_run:
                 task["always_run"] = True
         return JobSpec(
@@ -156,6 +164,7 @@ class ProactiveAgent:
         include_builtin_tools: bool = True,
         sources: tuple[Any, ...] = (),
         memory: MemoryPort | None = None,
+        conversation: Any | None = None,
         sinks: tuple[Any, ...] | list[Any] = (),
         timezone: str = "UTC",
         locale: str = "en",
@@ -288,6 +297,8 @@ class ProactiveAgent:
             tool_allowlist=tool_allowlist,
             policy_engine=self.policy,
             activity_probe=activity_probe,
+            conversation=conversation,
+            artifact_root=self.state_dir / "artifacts",
         )
         self.scheduler = Scheduler(
             self.store,
@@ -383,6 +394,7 @@ class ProactiveAgent:
         if self._closed:
             raise PASError(ErrorCode.INVALID_CONFIG, "agent is closed", scope="facade")
         now = self.store.clock.wall_now_ms()
+        self.store.expire_memory_candidates(now_ms=now)
         report: dict[str, Any] = {"admitted": [], "expired": [], "runs": [], "hooks": {}, "dispatched": []}
 
         admission = self.scheduler.admit_due(now_ms=now)
@@ -459,6 +471,12 @@ class ProactiveAgent:
         spec = job.to_spec() if isinstance(job, Job) else job
         spec = self._with_policy_defaults(spec)
         self._validate_trusted_job(spec)
+        if self.coordinator.config.goal_context and spec.task.get("goal_id"):
+            existing = self.store.get_job(spec.job_id)
+            if existing is None or existing.task.get("goal_id") != spec.task["goal_id"]:
+                goal = self.store.get_goal(spec.task["goal_id"])
+                if goal is None or goal["status"] != "active":
+                    raise PASError(ErrorCode.INVALID_CONFIG, "new or changed goal binding requires an active goal")
         if idempotency_key is None:
             idempotency_key = f"job:{content_hash(dataclasses.asdict(spec))[:32]}"
         return self.scheduler.register_job(spec, idempotency_key=idempotency_key)
@@ -857,6 +875,38 @@ class ProactiveAgent:
         """Trusted user-side memory write. Memory never creates tool or notification authority."""
         await self.pack_builder.memory.remember(entry)
 
+    def memory_list(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        return [entry.to_dict() for entry in self.store.recall_memory(limit=limit)]
+
+    def memory_candidates(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        return self.store.memory_candidates(limit=limit)
+
+    def memory_forget(self, memory_id: str) -> bool:
+        return self.store.forget_memory(memory_id)
+
+    def memory_consolidate(self) -> int:
+        if not self.coordinator.config.memory_consolidation:
+            raise PASError(ErrorCode.PERMISSION_DENIED, "memory_consolidation is disabled")
+        return self.store.consolidate_memory()
+
+    def goals_list(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        return self.store.list_goals(limit=limit, stale_days=self.coordinator.config.goal_stale_days)
+
+    def goals_get(self, goal_id: str) -> dict[str, Any] | None:
+        return self.store.get_goal(goal_id, stale_days=self.coordinator.config.goal_stale_days)
+
+    def goals_create(self, goal_id: str, *, title: str, description: str = "") -> dict[str, Any]:
+        return self.store.create_goal(goal_id, title=title, description=description)
+
+    def goals_update(self, goal_id: str, **changes: Any) -> dict[str, Any]:
+        return self.store.update_goal(goal_id, **changes)
+
+    def goals_progress(self, goal_id: str, text: str, *, evidence_refs: tuple[str, ...] = ()) -> dict[str, Any]:
+        return self.store.progress_goal(goal_id, text, evidence_refs=evidence_refs)
+
+    def goals_archive(self, goal_id: str) -> dict[str, Any]:
+        return self.store.update_goal(goal_id, status="archived")
+
     def proactive_preferences(self) -> dict[str, Any]:
         return self.store.get_proactive_preferences()
 
@@ -1170,6 +1220,14 @@ class ProactiveAgent:
             idle_gate=policy.idle_gate,
             idle_min_minutes=policy.idle_min_minutes,
             max_candidates=policy.max_candidates,
+            conversation_context=policy.conversation_context,
+            memory_consolidation=policy.memory_consolidation,
+            goal_context=policy.goal_context,
+            handoff=policy.handoff,
+            run_resume=policy.run_resume,
+            max_resumes=policy.max_resumes,
+            goal_stale_days=policy.goal_stale_days,
+            memory_ttl_days=policy.memory_ttl_days,
         )
 
     def _policy_config_from_agent_config(self) -> PolicyConfig:

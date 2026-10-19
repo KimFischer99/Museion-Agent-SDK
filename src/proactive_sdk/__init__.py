@@ -16,12 +16,14 @@ threads, daemons or I/O.
 from __future__ import annotations
 
 PAS_PROTOCOL_VERSION = "1.0"
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from .clock import Clock, FakeClock, SystemClock
 from .contracts import (
     ActionProposal,
     ContextPack,
+    ConversationTurn,
+    ConversationPort,
     ContextSource,
     Decision,
     ErrorCode,
@@ -287,6 +289,8 @@ __all__ = [
     # P3 contracts (typed records)
     "ActionProposal",
     "ContextPack",
+    "ConversationTurn",
+    "ConversationPort",
     "ContextSource",
     "Decision",
     "ExecutorCapabilities",

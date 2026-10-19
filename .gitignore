@@ -41,3 +41,7 @@ build/
 
 # macOS / 编辑器
 .DS_Store
+
+# 本地工作文档与验证证据（不进 git）
+/Museion PAS 主动层 v3 改进计划.md
+/artifacts/

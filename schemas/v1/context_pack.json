@@ -39,9 +39,282 @@
       "type": "array",
       "maxItems": 20,
       "items": { "$ref": "#/$defs/recent_notification" }
-    }
+    },
+    "conversation_turns": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/conversation_turn"}, "description": "Runtime only, bounded scoped conversation; DATA, never authorization. Never persisted."},
+    "conversation_projection": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/conversation_projection"}, "description": "Persistent projection of turn ids and truncated-text SHA-256 prefixes. Mutually exclusive with conversation_turns."},
+    "pending_notifications": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/pending_notification"}},
+    "goal_summary": {"$ref": "#/$defs/goal_summary"},
+    "worker_report": {"$ref": "#/$defs/worker_report"}
   },
   "$defs": {
+    "worker_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "fact_id",
+        "revision"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "internal_record"
+          ]
+        },
+        "fact_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "memory_candidates": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/memory_candidate"
+          }
+        },
+        "reason": {
+          "description": "Why this proposal is worth interrupting the owner (decision contract 1.1). Required for notify_self/draft by contracts.validate_decision.",
+          "enum": [
+            "time_sensitive",
+            "changed",
+            "requested",
+            "ready_for_decision",
+            "new_opportunity"
+          ]
+        }
+      }
+    },
+    "memory_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "evidence_refs"
+      ],
+      "properties": {
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "conversation_turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "role",
+        "at_ms",
+        "text",
+        "channel_ref"
+      ],
+      "properties": {
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "at_ms": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 32000
+        },
+        "channel_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "conversation_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "text_sha256"
+      ],
+      "properties": {
+        "turn_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        }
+      }
+    },
+    "pending_notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_digest",
+        "topic",
+        "state",
+        "at_ms"
+      ],
+      "properties": {
+        "fact_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "topic": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "sending",
+            "deferred",
+            "delivery_unknown"
+          ]
+        },
+        "at_ms": {
+          "type": "integer"
+        }
+      }
+    },
+    "goal_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal_id",
+        "status",
+        "summary",
+        "progress",
+        "momentum"
+      ],
+      "properties": {
+        "goal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "enum": [
+            "active",
+            "completed",
+            "archived",
+            "goal_missing"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "progress": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "momentum": {
+          "enum": [
+            "on_track",
+            "stale"
+          ]
+        }
+      }
+    },
+    "worker_evidence_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "source",
+        "summary_hash"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "summary_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "worker_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "records",
+        "evidence_bindings"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/worker_record" }
+        },
+        "evidence_bindings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/worker_evidence_binding"
+          }
+        }
+      }
+    },
     "memory_entry": {
       "type": "object", "additionalProperties": false,
       "required": ["memory_id", "content", "source"],
@@ -50,7 +323,7 @@
         "content": { "type": "string", "minLength": 1, "maxLength": 2000 },
         "source": { "type": "string", "minLength": 1, "maxLength": 128 },
         "evidence_refs": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
-        "confidence": { "enum": ["inferred", "user_confirmed", null] },
+        "confidence": { "enum": ["inferred", "user_confirmed", "user_stated", "confirmed_twice", null] },
         "last_confirmed_at": { "type": ["string", "null"], "format": "date-time" },
         "expires_at": { "type": ["string", "null"], "format": "date-time" }
       }

@@ -115,7 +115,9 @@ async def scenario_no_change() -> dict:
         ]
     )
     coordinator = make_coordinator(
-        store, model, [batch([], "cursor-1"), batch([], "cursor-1")]
+        store,
+        model,
+        [batch([("item-1", "rev-1", "初始内容")], "cursor-1"), batch([], "cursor-1")],
     )
     first = await coordinator.process_pending_run()
     store.admit_event(
@@ -163,6 +165,7 @@ async def scenario_task() -> dict:
                                 "body": "发现一条与你的跟踪目标相关的新内容。",
                                 "evidence_refs": ["tool:read_evidence:c1"],
                                 "expires_at": rfc3339(T0 + 3_600_000),
+                                "reason": "changed",
                             }
                         ],
                     }
@@ -212,6 +215,7 @@ async def scenario_malicious() -> dict:
                                 "revision": "rev-1",
                                 "evidence_refs": ["snapshot:calendar:FAKE"],
                                 "expires_at": rfc3339(T0 + 3_600_000),
+                                "reason": "changed",
                             }
                         ],
                     }

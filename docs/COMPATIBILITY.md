@@ -10,7 +10,7 @@ must re-verify compatibility.
 |---|---|---|
 | profile | single profile | one state directory, one DB, one owner destination (not a multi-tenant product) |
 | host | single host | the control plane defaults to a Unix socket; remote TLS HTTP is not implemented and is left to the deployer's own approach |
-| Python | >= 3.11 | 3.14.4 (macOS): full suite 966 tests, only environment-class errors (hook sandbox unavailable in the recording shell); 3.12.3 (Linux test host): full suite 966 tests, 20 environment errors (no bubblewrap) + 9 skips + 1 environment-sensitive performance guard on a slow shared host; 3.11.16: targeted 259 tests + wheel install smoke. A fully green matrix on all three runtimes is not claimed. |
+| Python | >= 3.11 | 3.14.4 (macOS): full suite 966 tests, only environment-class errors (hook sandbox unavailable in the recording shell); 3.12.3 (Linux test host): full suite 966 tests, 20 environment errors (no bubblewrap) + 9 skips + 1 environment-sensitive performance guard on a slow shared host; 3.11.16: targeted 259 tests + wheel install smoke. A fully green matrix on all three runtimes is not claimed. v0.1.4 (v3): 3.12.3 Linux fresh venv, 978 tests — 20 environment errors (no bubblewrap) + 9 skips + 1 slow-host performance guard (`test_thousand_jobs_scan_is_bounded`, 41 s > 30 s), no other failures; macOS 3.14.4 targeted checks and release build/install smoke passed. Python 3.11 has not run the v3 suite. |
 | runtime dependencies | standard library only | optional extra: `jsonschema` (for conformance tooling, does not affect runtime) |
 
 ## External hosts (verified versions)
@@ -32,6 +32,17 @@ before the cancel; the host confirmed it and the run settled `cancelled`, not co
 response shape), and in-flight cancel (request level `requested`, settled `errored/conflict`,
 honestly reported rather than claimed confirmed). The host-side activity probe and the W7 host
 executor remain unverified (see below).
+
+v3 real-host gate (2026-10-19, isolated Linux test host, Python 3.12.3, real model replies with
+`pricing_basis=measured`, fresh schema 17): the two-stage runtime e2e passed 16/16 assertions on
+both Hermes Runs gateway and Pi 1.0.4 — two real model calls per backend, scoped conversation,
+memory, goal context and handoff enabled, policy queued one notification, and the outbox was
+delivered on the following tick (the first tick's `dispatched` stayed empty by design). One
+intermediate Pi attempt was rejected by decision validation because the model cited `atlas-turn`
+instead of `conversation:atlas-turn`; the same script passed on rerun. The v14→v17 upgrade, the
+v3 switches being off by default, and resume-without-identity failing closed are covered by
+`tests/test_migration_v014.py` and `tests/test_v3_switch_off.py`. Cross-process resume-on-success,
+switch-on fault injection and the host-side activity probe remain unverified.
 
 ## Connectors and notification channels
 

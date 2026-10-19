@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from p3_fixtures import P3TestCase, ScriptedSource, T0, make_pack_builder, rfc3339, static_batch
 from proactive_sdk import (
     ContextPackBuilder,
+    ConversationTurn,
     EphemeralMemoryPort,
     ErrorCode,
     MemoryEntry,
@@ -23,6 +24,7 @@ from proactive_sdk import (
     SourceItem,
     SourceRegistry,
     SourceRequest,
+    SQLiteMemoryPort,
     Store,
 )
 from proactive_sdk.context import SnapshotMaterializer, render_context_blocks
@@ -138,6 +140,51 @@ class ContextPackTests(P3TestCase):
 
     def records_from(self, batch):
         return SnapshotMaterializer(self.store).materialize(batch, now_ms=T0)
+
+    def test_relevant_old_memories_survive_recent_window_with_original_evidence(self):
+        chinese = MemoryEntry("zh", "研究图数据库", "user", evidence_refs=("ref:zh",))
+        english = MemoryEntry("en", "Kubernetes deployments", "user", evidence_refs=("ref:en",))
+        self.store.remember_memory(chinese, now_ms=T0)
+        self.store.remember_memory(english, now_ms=T0 + 1)
+        self.store.remember_memory(MemoryEntry(
+            "expired", "Kubernetes 图数据库", "user", expires_at=rfc3339(0),
+        ), now_ms=T0 + 2)
+        self.store.remember_memory(MemoryEntry("forgotten", "Kubernetes 图数据库", "user"), now_ms=T0 + 3)
+        self.store.forget_memory("forgotten")
+        for i in range(40):
+            self.store.remember_memory(MemoryEntry(f"recent{i}", f"unrelated {i}", "user"), now_ms=T0 + 4 + i)
+        builder = ContextPackBuilder(locale="zh-CN", timezone="UTC", memory=SQLiteMemoryPort(self.store))
+        pack = self.run_async(builder.build(
+            goal_id="g", scope="s", source_records=[], now_ms=T0,
+            memory_query="KUBERNETES",
+            conversation_turns=(ConversationTurn("turn1", "user", T0, "查询图数据库", "chat:1"),),
+        ))
+        self.assertEqual(pack.memory_entries[:2], (chinese, english))
+        self.assertEqual(len(pack.memory_entries), 32)
+        self.assertEqual(pack.memory_refs, tuple(entry.memory_id for entry in pack.memory_entries))
+        self.assertNotIn("expired", pack.memory_refs)
+        self.assertNotIn("forgotten", pack.memory_refs)
+
+    def test_rare_query_terms_outrank_common_terms(self):
+        memory = EphemeralMemoryPort()
+        self.run_async(memory.remember(MemoryEntry("rare", "nebula", "user")))
+        for i in range(10):
+            self.run_async(memory.remember(MemoryEntry(f"common{i}", "report", "user")))
+        builder = ContextPackBuilder(locale="en", timezone="UTC", memory=memory)
+        pack = self.run_async(builder.build(
+            goal_id="g", scope="s", source_records=[], now_ms=T0, memory_query="NEBULA report",
+        ))
+        self.assertEqual(pack.memory_refs[:3], ("rare", "common9", "common8"))
+
+    def test_no_memory_match_preserves_recent_selection_and_order(self):
+        memory = EphemeralMemoryPort()
+        for i in range(40):
+            self.run_async(memory.remember(MemoryEntry(f"m{i}", f"entry {i}", "user")))
+        builder = ContextPackBuilder(locale="en", timezone="UTC", memory=memory)
+        pack = self.run_async(builder.build(
+            goal_id="g", scope="s", source_records=[], now_ms=T0, memory_query="unmatched",
+        ))
+        self.assertEqual(pack.memory_refs, tuple(f"m{i}" for i in range(8, 40)))
 
     def test_pack_validates_against_frozen_schema(self):
         records = self.records_from(

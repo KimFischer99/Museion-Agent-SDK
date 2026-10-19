@@ -56,7 +56,9 @@ _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "external_writes", "lockscreen_content", "allow_untrusted_shell_skills",
                 "cadence", "cadence_min_gap_seconds", "cadence_max_per_day",
                 "require_reason", "idle_gate", "idle_min_minutes",
-                "max_candidates", "feedback_ignored_backfill")
+                "max_candidates", "feedback_ignored_backfill",
+                "conversation_context", "memory_consolidation", "goal_context", "handoff",
+                "run_resume", "max_resumes", "goal_stale_days", "memory_ttl_days")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -262,6 +264,15 @@ class PolicySection:
     #: reaction after 24h as ``ignored_24h``. Off by default — "no reply"
     #: is a weak signal and the deployer opts in explicitly.
     feedback_ignored_backfill: bool = False
+
+    conversation_context: bool = False
+    memory_consolidation: bool = False
+    goal_context: bool = False
+    handoff: bool = False
+    run_resume: bool = False
+    max_resumes: int = 2
+    goal_stale_days: int = 14
+    memory_ttl_days: int = 30
 
     @property
     def cadence_configured(self) -> bool:
@@ -493,7 +504,16 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
     feedback_ignored_backfill = policy_raw.get("feedback_ignored_backfill", False)
     if not isinstance(feedback_ignored_backfill, bool):
         raise ConfigError("policy.feedback_ignored_backfill must be a boolean")
+    v3 = {}
+    for name in ("conversation_context", "memory_consolidation", "goal_context", "handoff", "run_resume"):
+        value = policy_raw.get(name, False)
+        if type(value) is not bool:
+            raise ConfigError(f"policy.{name} must be a boolean")
+        v3[name] = value
+    for name, default in (("max_resumes", 2), ("goal_stale_days", 14), ("memory_ttl_days", 30)):
+        v3[name] = _positive_int("policy", policy_raw.get(name, default), name)
     policy = PolicySection(
+        **v3,
         cadence=cadence,
         cadence_min_gap_seconds=(
             _positive_int("policy", policy_raw["cadence_min_gap_seconds"], "cadence_min_gap_seconds")

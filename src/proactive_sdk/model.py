@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from .contracts import ErrorCode, ModelRequest, ModelResponse, ModelToolCall, PASError
+from .contracts import ErrorCode, ModelRequest, ModelResponse, ModelToolCall, PASError, content_hash
 
 __all__ = [
     "HttpTransport",
@@ -140,6 +140,10 @@ class OpenAICompatibleModel:
         self._timeout_s = timeout_s
 
     # ModelPort ---------------------------------------------------------
+
+    @property
+    def checkpoint_identity(self) -> str:
+        return content_hash({"provider": self.provider, "endpoint": self.base_url, "model": self.model_name})
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         body: dict[str, Any] = {

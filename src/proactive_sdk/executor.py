@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -49,6 +49,7 @@ from .contracts import (
     RunBudget,
     RunRequest,
     ContextPack,
+    content_hash,
     validate_decision,
 )
 from .context import evidence_universe, render_context_message
@@ -114,6 +115,7 @@ class ExecutorOutcome:
     repair_used: bool = False
     tool_evidence_refs: tuple[str, ...] = ()
     events: tuple[RunEventRecord, ...] = ()
+    tool_evidence_bindings: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -288,6 +290,14 @@ class ToolLoopExecutor:
     # Entry point
     # ------------------------------------------------------------------ #
 
+    @property
+    def checkpoint_identity(self) -> str | None:
+        identity = getattr(self.model, "checkpoint_identity", None)
+        if not identity:
+            return None
+        return content_hash({"model": identity, "config": asdict(self.config),
+                             "tools": self.broker.tool_schemas(frozenset(self.broker.tool_names()))})
+
     async def context(self) -> ExecutorContext:
         """The coordinator's whole view of this executor."""
         return ExecutorContext(
@@ -323,6 +333,7 @@ class ToolLoopExecutor:
             {"role": "user", "content": self._context_message(pack, source_records)},
         ]
         tool_evidence: list[str] = []
+        tool_bindings: list[dict[str, str]] = []
         turns = 0
         tool_calls = 0
         tool_denied = 0
@@ -383,9 +394,13 @@ class ToolLoopExecutor:
                         ),
                     )
                     tool_calls += 1
+                    if result.ok and result.evidence_ref and request.stage != "legacy":
+                        result = replace(result, evidence_ref=f"tool:{call.name}:{request.stage}:{request.attempt}:{tool_calls}:{result.call_id}")
                     if result.ok:
                         if result.evidence_ref:
                             tool_evidence.append(result.evidence_ref)
+                            tool_bindings.append({"ref": result.evidence_ref, "source": call.name,
+                                                  "summary_hash": content_hash(result.output or "")})
                     else:
                         tool_denied += 1
                         events.append(
@@ -394,7 +409,10 @@ class ToolLoopExecutor:
                                 f"tool {call.name!r} denied: {result.error_code}",
                             )
                         )
-                    messages.append(result.to_message())
+                    message = result.to_message()
+                    if result.evidence_ref and request.stage != "legacy":
+                        message["content"] += f"\nEvidence ref: {result.evidence_ref}"
+                    messages.append(message)
                 events.append(
                     RunEventRecord("tool_calls", f"{len(response.tool_calls)} attempted this turn")
                 )
@@ -445,6 +463,7 @@ class ToolLoopExecutor:
                 tool_denied=tool_denied,
                 repair_used=self.config.repair_attempts - repairs_left > 0,
                 tool_evidence_refs=tuple(tool_evidence),
+                tool_evidence_bindings=tuple(tool_bindings),
                 events=tuple(events),
             )
 

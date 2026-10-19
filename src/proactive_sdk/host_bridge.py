@@ -131,6 +131,7 @@ class HostBridge:
         usage_translator: Any | None = None,
         external_tool_broker: bool = False,
         require_reason: bool = True,
+        checkpoint_identity: str | None = None,
     ) -> None:
         if not isinstance(driver, HostDriver):
             raise PASError(
@@ -142,6 +143,10 @@ class HostBridge:
             raise PASError(ErrorCode.INVALID_CONFIG, "host_timeout_s must be positive")
         if not isinstance(require_reason, bool):
             raise PASError(ErrorCode.INVALID_CONFIG, "require_reason must be a boolean")
+        if checkpoint_identity is not None and (
+            not isinstance(checkpoint_identity, str) or not 1 <= len(checkpoint_identity) <= 256
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "checkpoint_identity must be 1..256 chars")
         self.driver = driver
         self._capabilities = capabilities if callable(capabilities) else frozenset(capabilities)
         self._tool_names = tuple(tool_names)
@@ -156,6 +161,7 @@ class HostBridge:
         #: Decision contract 1.1 gray-release switch, same semantics as the
         #: built-in executor's ``ExecutorConfig.require_reason``.
         self.require_reason = require_reason
+        self.checkpoint_identity = checkpoint_identity
 
     # ------------------------------------------------------------------ #
     # executor.RunExecutor
@@ -183,7 +189,7 @@ class HostBridge:
     ) -> ExecutorOutcome:
         events: list[RunEventRecord] = []
         prompt = HostPrompt(
-            run_key=request.run_id,
+            run_key=request.run_id if request.stage == "legacy" else f"{request.run_id}:{request.stage}:{request.attempt}",
             system=agent_system_prompt(instruction, request.budget),
             user=render_context_message(pack, source_records),
             budget=request.budget,

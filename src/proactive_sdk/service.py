@@ -125,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="task: run every slot even without source changes (pre-v2 semantics)",
     )
+    jobs.add_argument("--goal-id", help="explicit active goal binding")
+    jobs.add_argument("--handoff", action="store_true", help="opt task into worker/compose when policy allows")
     jobs.add_argument("--grant-ref", action="append", default=[], help="grant ref (repeatable)")
     jobs.add_argument("--idempotency-key", help="idempotency key for create")
     jobs.add_argument("--reason", help="reason recorded for stop/delete")
@@ -137,6 +139,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="activity across every job (jobs activity --all)",
     )
     jobs.add_argument("--limit", type=int, default=50, help="activity row limit")
+
+    memory = add("memory", help_text="trusted memory operations: list|candidates|forget|consolidate")
+    memory.add_argument("action", choices=["list", "candidates", "forget", "consolidate"])
+    memory.add_argument("memory_id", nargs="?")
+    memory.add_argument("--limit", type=int, default=50)
+
+    goals = add("goals", help_text="trusted goals: list|show|create|update|progress|archive")
+    goals.add_argument("action", choices=["list", "show", "create", "update", "progress", "archive"])
+    goals.add_argument("goal_id", nargs="?")
+    goals.add_argument("--title")
+    goals.add_argument("--description")
+    goals.add_argument("--status", choices=["active", "completed", "archived"])
+    goals.add_argument("--text", help="factual progress text")
+    goals.add_argument("--evidence-ref", action="append", default=[])
+    goals.add_argument("--limit", type=int, default=50)
 
     input_cmd = add(
         "input",
@@ -495,6 +512,51 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_memory(args: argparse.Namespace) -> int:
+    agent = _open_agent(args, _load_config(args))
+    try:
+        if args.action == "list":
+            result = {"memory": agent.memory_list(limit=args.limit)}
+        elif args.action == "candidates":
+            result = {"candidates": agent.memory_candidates(limit=args.limit)}
+        elif args.action == "consolidate":
+            result = {"promoted": agent.memory_consolidate()}
+        else:
+            if not args.memory_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "memory forget needs memory_id", scope="cli")
+            result = {"forgotten": agent.memory_forget(args.memory_id)}
+        _print(result, _json_flag(args))
+    finally:
+        agent.store.close()
+    return 0
+
+
+def _cmd_goals(args: argparse.Namespace) -> int:
+    agent = _open_agent(args, _load_config(args))
+    try:
+        if args.action == "list":
+            result = {"goals": agent.goals_list(limit=args.limit)}
+        else:
+            if not args.goal_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "goal action needs goal_id", scope="cli")
+            if args.action == "show":
+                result = agent.goals_get(args.goal_id)
+            elif args.action == "create":
+                result = agent.goals_create(args.goal_id, title=args.title, description=args.description or "")
+            elif args.action == "update":
+                if args.title is None and args.description is None and args.status is None:
+                    raise PASError(ErrorCode.INVALID_CONFIG, "goals update needs a changed field", scope="cli")
+                result = agent.goals_update(args.goal_id, title=args.title, description=args.description, status=args.status)
+            elif args.action == "progress":
+                result = agent.goals_progress(args.goal_id, args.text, evidence_refs=tuple(args.evidence_ref))
+            else:
+                result = agent.goals_archive(args.goal_id)
+        _print(result, _json_flag(args))
+    finally:
+        agent.store.close()
+    return 0
+
+
 def _cmd_jobs(args: argparse.Namespace) -> int:
     config = _load_config(args)
     agent = _open_agent(args, config)
@@ -504,6 +566,8 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                 {
                     "job_id": r.job_id,
                     "mode": r.mode,
+                    "goal_id": r.task.get("goal_id"),
+                    "handoff": bool(r.task.get("handoff")),
                     "enabled": r.enabled,
                     "revision": r.revision,
                     "next_due_ms": r.next_due_ms,
@@ -530,6 +594,8 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     "delivery_policy": record.delivery_policy,
                     "next_due_ms": record.next_due_ms,
                     "reminder": record.reminder,
+                    "goal_id": record.task.get("goal_id"),
+                    "handoff": bool(record.task.get("handoff")),
                     "obligation": record.obligation,
                     "stopped_at_ms": record.stopped_at_ms,
                 },
@@ -572,6 +638,8 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     reminder=reminder,
                     obligation=args.obligation,
                     always_run=args.always_run,
+                    goal_id=args.goal_id,
+                    handoff=args.handoff,
                 ),
                 idempotency_key=args.idempotency_key or f"cli-{args.job_id}",
             )
@@ -1021,6 +1089,8 @@ _COMMANDS = {
     "doctor": _cmd_doctor,
     "status": _cmd_status,
     "jobs": _cmd_jobs,
+    "memory": _cmd_memory,
+    "goals": _cmd_goals,
     "input": _cmd_input,
     "suggestions": _cmd_suggestions,
     "activity": _cmd_activity,

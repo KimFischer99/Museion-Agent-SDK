@@ -41,7 +41,80 @@ export interface ContextPack {
   "untrusted_content_policy": "data_only";
   /** Already-sent notifications from the last 24 h, reduced to non-sensitive fields. Hard-dedup stays with the business key; this summary only lets a model compare t */
   "recent_notifications"?: ReadonlyArray<Recentnotification>;
+  /** Runtime only, bounded scoped conversation; DATA, never authorization. Never persisted. */
+  "conversation_turns"?: ReadonlyArray<Conversationturn>;
+  /** Persistent projection of turn ids and truncated-text SHA-256 prefixes. Mutually exclusive with conversation_turns. */
+  "conversation_projection"?: ReadonlyArray<Conversationprojection>;
+  "pending_notifications"?: ReadonlyArray<Pendingnotification>;
+  "goal_summary"?: Goalsummary;
+  "worker_report"?: Workerreport;
 }
+
+// worker_record
+export type Workerrecord = {
+    "kind": "internal_record";
+    "fact_id": string;
+    "revision": string;
+    "body"?: string;
+    "arguments"?: Record<string, unknown>;
+    "evidence_refs"?: ReadonlyArray<string>;
+    "expires_at"?: string;
+    "memory_candidates"?: ReadonlyArray<Memorycandidate>;
+        /** Why this proposal is worth interrupting the owner (decision contract 1.1). Required for notify_self/draft by contracts.validate_decision. */
+"reason"?: "time_sensitive" | "changed" | "requested" | "ready_for_decision" | "new_opportunity";
+  };
+
+// memory_candidate
+export type Memorycandidate = {
+    "content": string;
+    "evidence_refs": ReadonlyArray<string>;
+  };
+
+// conversation_turn
+export type Conversationturn = {
+    "turn_id": string;
+    "role": "user" | "assistant";
+    "at_ms": number;
+    "text": string;
+    "channel_ref": string;
+  };
+
+// conversation_projection
+export type Conversationprojection = {
+    "turn_id": string;
+    "text_sha256": string;
+  };
+
+// pending_notification
+export type Pendingnotification = {
+    "fact_digest": string;
+    "topic": string;
+    "state": "pending" | "sending" | "deferred" | "delivery_unknown";
+    "at_ms": number;
+  };
+
+// goal_summary
+export type Goalsummary = {
+    "goal_id": string;
+    "status": "active" | "completed" | "archived" | "goal_missing";
+    "summary": string;
+    "progress": string;
+    "momentum": "on_track" | "stale";
+  };
+
+// worker_evidence_binding
+export type Workerevidencebinding = {
+    "ref": string;
+    "source": string;
+    "summary_hash": string;
+  };
+
+// worker_report
+export type Workerreport = {
+    "summary": string;
+    "records": ReadonlyArray<Workerrecord>;
+    "evidence_bindings": ReadonlyArray<Workerevidencebinding>;
+  };
 
 // memory_entry
 export type Memoryentry = {
@@ -49,7 +122,7 @@ export type Memoryentry = {
     "content": string;
     "source": string;
     "evidence_refs"?: ReadonlyArray<string>;
-    "confidence"?: "inferred" | "user_confirmed" | null;
+    "confidence"?: "inferred" | "user_confirmed" | "user_stated" | "confirmed_twice" | null;
     "last_confirmed_at"?: string | null;
     "expires_at"?: string | null;
   };
@@ -94,6 +167,7 @@ export type Actionproposal = {
     "arguments"?: Record<string, unknown>;
     "evidence_refs"?: ReadonlyArray<string>;
     "expires_at"?: string;
+    "memory_candidates"?: ReadonlyArray<Memorycandidate>;
         /** Why this proposal is worth interrupting the owner (decision contract 1.1). Required for notify_self/draft by contracts.validate_decision. */
 "reason"?: "time_sensitive" | "changed" | "requested" | "ready_for_decision" | "new_opportunity";
   };
@@ -141,6 +215,7 @@ export interface JobSpec {
     "instruction": string;
     "goal_id"?: string;
     "skill_refs"?: ReadonlyArray<string>;
+    "handoff"?: boolean;
         /** W5 compatibility switch: run the task on every slot even when no source candidate changed (pre-v2 task semantics). Default false: the two-stage path runs only w */
 "always_run"?: boolean;
   };
@@ -216,6 +291,8 @@ export interface RunRequest {
   "tool_allowlist"?: ReadonlyArray<string>;
   "budget": Budget;
   "deadline": string;
+  /** Stage being executed; distinct from completed run checkpoint stage. */
+  "stage"?: "legacy" | "analyze" | "compose";
   "policy_version": string;
 }
 

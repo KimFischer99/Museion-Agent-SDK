@@ -24,6 +24,7 @@
     },
     "budget": { "$ref": "#/$defs/budget" },
     "deadline": { "type": "string", "format": "date-time" },
+    "stage": {"enum": ["legacy", "analyze", "compose"], "default": "legacy", "description": "Stage being executed; distinct from completed run checkpoint stage."},
     "policy_version": { "type": "string", "minLength": 1, "maxLength": 64 }
   },
   "$defs": {
