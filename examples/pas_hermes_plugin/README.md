@@ -16,7 +16,8 @@ JSON-RPC 2.0. The plugin holds no schedules, no grants and no approval state.
 
 Environment variables (profile-scoped, injected through the profile's `.env`):
 
-- `PAS_RPC_URL` — PAS control-plane URL; only HTTPS or a literal loopback HTTP is accepted.
+- `PAS_RPC_URL` — use `unix:///var/lib/pas-demo/pas.sock` for the native daemon.
+  HTTPS or literal loopback HTTP is also accepted for deployments with an HTTP bridge.
 - `PAS_RPC_TOKEN` — bearer token; never handed to the model and never written to session records.
 - `PAS_NOTIFY_GRANT` — comma-separated grant refs of the operator's `notify.self`
   grant (the same ref passed to `pas jobs create --grant-ref`).
@@ -29,6 +30,11 @@ Environment variables (profile-scoped, injected through the profile's `.env`):
 When unconfigured, tool calls return an explicit `ok:false` (fail closed) and plugin loading is
 unaffected.
 
+Unix calls open a fresh connection and authenticate with `system.hello` each time, so a daemon
+restart leaves no stale negotiated session. Interrupted calls fail explicitly without automatic
+replay. The host must have permission to open the daemon's 0600 socket (normally the same UID).
+Set `control_plane.token_file` on the daemon if token authentication is needed.
+
 ## Alignment with SPEC §14.2
 
 `jobs.create` requires two fields that this plugin originally omitted, which made
@@ -38,6 +44,9 @@ unaffected.
   body, so an identical replay is idempotent while a changed body lands as a new
   revision instead of a conflict.
 - the job object's id field is named `id`, not `job_id`.
+- `instruction` is a top-level job field on the wire; the daemon maps it into `task.instruction`.
+- `always_run` is optional and defaults to false. Set it to true for an every-occurrence task
+  that must run even with no changed source candidates; quiet/activity policy still applies.
 
 `mode` accepts only `heartbeat` / `task` (plus `reminder`, created through
 `pas jobs create --mode reminder`). The earlier `watch` value is not in the

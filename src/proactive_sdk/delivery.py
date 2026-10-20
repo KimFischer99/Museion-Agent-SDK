@@ -43,7 +43,7 @@ from typing import Any
 from datetime import datetime, timezone
 
 from .contracts import ErrorCode, PASError, SourceRequest, canonical_json
-from .policy import PolicyEngine
+from .policy import OwnerChannelRegistry, PolicyEngine
 from .store import OutboxLease, Store
 
 __all__ = [
@@ -270,6 +270,9 @@ class OutboxDispatcher:
         self.store = store
         self.config = config if config is not None else DispatchConfig()
         self.policy = policy
+        self._timing_policy = policy if policy is not None else PolicyEngine(
+            store, channels=OwnerChannelRegistry(store),
+        )
         # Optional: when wired, a message whose action declares
         # time-sensitive sources is re-read right before the effect
         # (SPEC §21.1 step 5). Without it, only the frozen message is sent.
@@ -454,12 +457,17 @@ class OutboxDispatcher:
             )
             self._project_delivery(lease.message_id, state=final, now_ms=now_ms)
             return DispatchReport(lease.message_id, final, refresh_reason)
-        # Source refresh may cross into a quiet window; check at the effect boundary.
+        # Source refresh and queued deferrals may change timing eligibility before the effect.
         now_ms = max(now_ms, self.store.clock.wall_now_ms())
-        quiet_state = self.store.defer_outbox_in_quiet_hours(lease, now_ms=now_ms)
-        if quiet_state is not None:
-            self._project_delivery(lease.message_id, state=quiet_state, now_ms=now_ms)
-            return DispatchReport(lease.message_id, quiet_state, "quiet_hours")
+        not_before, reason = self._timing_policy.pre_dispatch_timing(
+            lease, expires_at_ms=message["expires_at_ms"], now_ms=now_ms,
+        )
+        timing_state = self.store.defer_outbox_for_policy(
+            lease, not_before_ms=not_before, reason=reason, now_ms=now_ms,
+        )
+        if timing_state is not None:
+            self._project_delivery(lease.message_id, state=timing_state, now_ms=now_ms)
+            return DispatchReport(lease.message_id, timing_state, reason)
         if lease.channel_kind == "local_inbox":
             final = self.store.finish_outbox_attempt(
                 lease,
@@ -493,6 +501,7 @@ class OutboxDispatcher:
                 payload=lease.payload,
             )
         )
+        now_ms = max(now_ms, self.store.clock.wall_now_ms())
         if result.state == "provider_accepted":
             final = self.store.finish_outbox_attempt(
                 lease,

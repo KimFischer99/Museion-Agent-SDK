@@ -1,0 +1,29 @@
+[Unit]
+Description=PAS deployment example
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=pas
+Group=pas
+WorkingDirectory=/opt/pas/runtime
+EnvironmentFile=/etc/pas-demo/pas.env
+Environment=PYTHONPATH=/opt/pas/runtime
+ExecStart=/opt/pas/runtime/.venv/bin/pas --config /etc/pas-demo/pas.yaml serve --app app:build_agent
+StateDirectory=pas-demo
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pas-demo
+
+[Install]
+WantedBy=multi-user.target

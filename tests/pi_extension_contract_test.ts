@@ -33,7 +33,7 @@ async function main(): Promise<void> {
       requests.push({ method: frame.method, params: frame.params });
       const results: Record<string, unknown> = {
         "system.hello": { protocol_version: "1.0", server: "pas-test", methods: ["jobs.create"] },
-        "jobs.create": { job_id: frame.params?.["job"] ? (frame.params["job"] as Record<string, unknown>).job_id : "?" },
+        "jobs.create": { job_id: frame.params?.["job"] ? (frame.params["job"] as Record<string, unknown>).id : "?" },
         "jobs.list": { jobs: [{ job_id: "daily-agenda" }] },
         "skills.explain": { skill_ref: frame.params?.skill_ref, status: "compatible" },
       };
@@ -76,11 +76,17 @@ async function main(): Promise<void> {
   const reply = JSON.parse((await schedule.execute("t1", {
     job_id: "daily-agenda",
     mode: "task",
+    schedule: { kind: "daily", local_time: "09:00", timezone: "UTC" },
     instruction: "summarize",
   })).output);
   ok(reply.ok === true, "schedule should succeed against scripted PAS");
   ok(reply.job && reply.job.job_id === "daily-agenda", "job id must round-trip");
   ok(requests.some(frame => frame.method === "jobs.create"), "jobs.create must reach PAS");
+  const created = requests.find(frame => frame.method === "jobs.create")?.params;
+  const job = created?.job as Record<string, unknown>;
+  ok(job.id === "daily-agenda" && job.instruction === "summarize" && job.task === undefined,
+     "job fields must match the PAS wire contract");
+  ok(/^pi-[0-9a-f]{64}$/.test(String(created?.idempotency_key)), "idempotency key required");
 
   // -- status and skills inspect ----------------------------------------
   const status = JSON.parse((await registered[1].execute("t2", {})).output);

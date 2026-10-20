@@ -142,18 +142,37 @@ def restore_backup(
         raise BackupError(
             f"daemon lock present at {lock_file}; stop the running instance before restore"
         )
+    if target.is_file():
+        try:
+            current = sqlite3.connect(target.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                row = current.execute("SELECT value FROM meta WHERE key='identity'").fetchone()
+                identity = json.loads(row[0]) if row is not None else None
+            finally:
+                current.close()
+        except (sqlite3.Error, ValueError) as exc:
+            raise BackupError("cannot read the target profile identity") from exc
+        if not isinstance(identity, dict) or (
+            identity.get("profile") != meta.get("profile")
+            or identity.get("owner") != meta.get("owner_destination")
+        ):
+            raise BackupError("backup identity does not match the target database")
     verify = sqlite3.connect(str(backup))
     try:
         row = verify.execute("PRAGMA integrity_check").fetchone()
         integrity = str(row[0]) if row is not None else "unknown"
         version_row = verify.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
         schema_version = int(version_row[0]) if version_row and version_row[0] is not None else 0
-    except sqlite3.Error as exc:
+        identity_row = verify.execute("SELECT value FROM meta WHERE key='identity'").fetchone()
+        backup_identity = json.loads(identity_row[0]) if identity_row is not None else None
+    except (sqlite3.Error, ValueError) as exc:
         raise BackupError(f"backup is not a readable PAS database: {exc}") from exc
     finally:
         verify.close()
     if integrity != "ok":
         raise BackupError(f"backup failed integrity check: {integrity}")
+    if backup_identity != {"profile": meta.get("profile"), "owner": meta.get("owner_destination")}:
+        raise BackupError("backup identity does not match its meta sidecar")
     recorded_version = meta.get("schema_version")
     if recorded_version != schema_version:
         raise BackupError(

@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from examples import release_app  # noqa: E402
 from proactive_sdk import ErrorCode, Job, OpenAICompatibleModel, PASError
-from proactive_sdk.config import PasConfig, PolicySection
+from proactive_sdk.config import PasConfig, PolicySection, load_config
 from proactive_sdk.host_bridge import HostBridge
 from proactive_sdk.host_drivers import HermesHostDriver, PiHostDriver
 from proactive_sdk.gws import SubprocessGwsConnector
@@ -24,6 +25,43 @@ from proactive_sdk.research import NewsSearchSource
 
 
 class ReleaseAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deployment_example_loads_page_file_and_seeds_explicit_jobs(self):
+        from examples.deployment.seed import seed
+
+        example = ROOT / "examples/deployment"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "PAS_PAGE_SOURCES_FILE": str(example / "sources.json"),
+        }, clear=True):
+            agent = release_app.build_agent(replace(load_config(example / "pas.yaml"), state_dir=tmp))
+            try:
+                seed(agent)
+                seed(agent)
+                self.assertEqual(len(agent.jobs_list()), 2)
+                daily = agent.jobs_get("source-daily")
+                self.assertEqual(daily.task["refresh_source_ids"], ["journal-a-current", "journal-b-index"])
+                selected = agent.coordinator._targeted_entries(daily)
+                self.assertEqual(len(selected), 2)
+                self.assertEqual(selected[0].source.max_excerpt_chars, 4000)
+                self.assertEqual(selected[0].source.hamming_threshold, 8)
+                self.assertEqual(daily.delivery_policy["quiet_hours_start"], "23:00")
+                self.assertEqual(daily.delivery_policy["quiet_hours_end"], "08:00")
+                self.assertTrue(daily.enabled)
+                hourly = agent.jobs_get("proactive-hourly")
+                self.assertFalse(hourly.enabled)
+                self.assertTrue(hourly.task["always_run"])
+                self.assertEqual(len(agent.grants_list()), 2)
+            finally:
+                await agent.close()
+
+    async def test_source_environment_and_file_conflict_is_rejected(self):
+        with patch.dict(os.environ, {
+            "PAS_PAGE_SOURCES": "[]", "PAS_PAGE_SOURCES_FILE": "/not-read.json",
+        }, clear=True):
+            with self.assertRaises(PASError) as ctx:
+                release_app._page_source_specs()
+        self.assertEqual(ctx.exception.code, ErrorCode.INVALID_CONFIG)
+        self.assertIn("set only one", ctx.exception.safe_message)
+
     async def test_due_reminder_uses_local_inbox_without_model_call(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
             agent = release_app.build_agent(

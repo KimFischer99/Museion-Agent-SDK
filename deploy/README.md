@@ -1,5 +1,9 @@
 # Deployment examples (P7 / SPEC §17.1)
 
+For a complete product-bundle layout with source files, trusted seeding and systemd setup,
+see [the deployment example](../examples/deployment/README.md). It also records which
+host-specific production extensions require separate wiring.
+
 One long-running PAS daemon + one profile directory + systemd or a container supervisor.
 **A sleeping laptop is not continuous cloud operation**; launchd works on macOS, but a real
 around-the-clock deployment belongs on a server or an always-on host.

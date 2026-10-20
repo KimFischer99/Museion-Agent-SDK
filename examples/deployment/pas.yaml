@@ -1,0 +1,22 @@
+config_version: "1"
+profile: demo
+timezone: Asia/Shanghai
+locale: zh-CN
+state_dir: /var/lib/pas-demo
+heartbeat:
+  enabled: false
+policy:
+  notification_window: {start: "23:00", end: "08:00"}
+  max_unsolicited_notifications_per_day: 5
+  cadence_min_gap_seconds: 1800
+  require_reason: true
+  idle_gate: true
+  idle_min_minutes: 60
+  conversation_context: false
+  memory_consolidation: false
+  goal_context: false
+  handoff: false
+  run_resume: false
+control_plane:
+  enabled: true
+  socket: /var/lib/pas-demo/pas.sock

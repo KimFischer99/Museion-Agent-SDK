@@ -70,6 +70,11 @@ python3 tools/build_release.py
 
 Use `--output <new-directory>` if `release/` already exists. The build creates separate `runtime/` and `skills/` directories. Skills are reference material and require explicit import and service configuration.
 
+The product bundle also includes `examples/deployment/`: a Linux/systemd deployment with
+file-based public sources, explicit job selection, grants and verification steps. See the
+[deployment example](https://github.com/KimFischer99/Museion-Agent-SDK/tree/main/examples/deployment).
+The optional Hermes plugin is shipped alongside it in `examples/pas_hermes_plugin/`.
+
 See [examples](https://github.com/KimFischer99/Museion-Agent-SDK/tree/main/examples) for SDK integration and [compatibility notes](https://github.com/KimFischer99/Museion-Agent-SDK/blob/main/docs/COMPATIBILITY.md) for supported adapters.
 
 ## License

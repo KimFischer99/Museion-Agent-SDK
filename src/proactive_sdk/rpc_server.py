@@ -251,6 +251,8 @@ class ControlPlaneServer:
             record = agent.jobs_upsert(
                 Job(
                     id=str(require(job, "id")),
+                    owner=job.get("owner", "pas"),
+                    revision=job.get("revision", 1),
                     mode=str(require(job, "mode")),
                     schedule=dict(job.get("schedule") or {}),
                     instruction=str(job.get("instruction") or ""),

@@ -1629,8 +1629,16 @@ class Store:
             reason = "quiet_hours"
         max_per_day = delivery_policy.get("max_per_day", default_max_per_day)
         if isinstance(max_per_day, int) and not isinstance(max_per_day, bool) and max_per_day > 0:
-            day_start = local_day_start_ms(_policy_timezone(delivery_policy), now_ms)
-            if self.notifications_today(day_start_ms=day_start, now_ms=now_ms) >= max_per_day:
+            tzname = _policy_timezone(delivery_policy)
+            day_start = local_day_start_ms(tzname, now_ms)
+            # Pending deliveries reserve their intended day until dispatch rechecks it.
+            queued_today = self.db.execute(
+                """SELECT COUNT(*) FROM outbox
+                   WHERE state IN ('pending','deferred','sending')
+                     AND not_before_ms>=? AND not_before_ms<?""",
+                (day_start, local_day_end_ms(tzname, now_ms)),
+            ).fetchone()[0]
+            if self.notifications_today(day_start_ms=day_start, now_ms=now_ms) + queued_today >= max_per_day:
                 reason = "quiet_hours+daily_quota" if reason else "daily_quota"
         return "deliver", reason
 
@@ -2726,6 +2734,15 @@ class Store:
                 (fence, now_ms + ttl_ms, now_ms, row["run_id"]),
             )
             return RunLease(row["run_id"], row["event_id"], fence, now_ms + ttl_ms)
+
+    def extend_run_lease(self, lease: RunLease, *, until_ms: int, now_ms: int) -> None:
+        """Keep the current fence alive through the bounded execution deadline."""
+        with self.transaction():
+            self._require_active_claim(lease, now_ms)
+            self.db.execute(
+                "UPDATE runs SET lease_until_ms=MAX(lease_until_ms, ?) WHERE run_id=? AND fence=?",
+                (until_ms, lease.run_id, lease.fence),
+            )
 
     def complete_run(self, lease: RunLease, *, now_ms: int) -> None:
         with self.transaction():
@@ -4062,6 +4079,16 @@ class Store:
         record = dict(row)
         record["request"] = canonical_loads(row["request_json"]) if row["request_json"] else {}
         record.pop("request_json")
+        event = None
+        if record["source"] == "reminder":
+            job = self.get_job(record["request"]["job_id"])
+        else:
+            run = self.get_run(record["run_id"]) if record["run_id"] else None
+            event = self.get_event(run["event_id"]) if run else None
+            job = self.get_job(event.job_id) if event and event.job_id else None
+        record["delivery_policy"] = dict(job.delivery_policy) if job else (
+            dict((event.authorization or {}).get("delivery_policy") or {}) if event else {}
+        )
         return record
 
     def list_actions(
@@ -4112,31 +4139,37 @@ class Store:
 
     def defer_outbox_in_quiet_hours(self, lease: OutboxLease, *, now_ms: int) -> str | None:
         """Recheck the trusted policy immediately before delivery, without spending retries."""
+        action = self.action_delivery_context(lease.action_id)
+        policy = action["delivery_policy"] if action else {}
+        end = quiet_end_ms(policy, now_ms)
+        return self.defer_outbox_for_policy(
+            lease, not_before_ms=end if end is not None else now_ms,
+            reason="quiet_hours", now_ms=now_ms,
+        )
+
+    def defer_outbox_for_policy(
+        self, lease: OutboxLease, *, not_before_ms: int | None,
+        reason: str | None, now_ms: int,
+    ) -> str | None:
+        """Apply a fresh timing verdict under the message fence, without a send attempt."""
         with self.transaction():
             message = self.get_outbox_message(lease.message_id)
             if message is None or message['state'] != 'sending' or message['fence'] != lease.fence:
                 return 'aborted'
-            action = self.action_delivery_context(lease.action_id)
-            if action is None:
+            if message["expires_at_ms"] <= now_ms:
+                state, reason = "expired", "expired"
+            elif not_before_ms is None:
+                state = "expired"
+            elif not_before_ms <= now_ms:
                 return None
-            if action['source'] == 'reminder':
-                job = self.get_job(action['request']['job_id'])
-                policy = job.delivery_policy if job else {}
+            elif message["expires_at_ms"] <= not_before_ms:
+                state, reason = "expired", "expired_in_" + (reason or "delivery_policy")
             else:
-                run = self.get_run(action['run_id'])
-                event = self.get_event(run['event_id']) if run else None
-                job = self.get_job(event.job_id) if event and event.job_id else None
-                policy = job.delivery_policy if job else (
-                    (event.authorization or {}).get('delivery_policy', {}) if event else {}
-                )
-            end = quiet_end_ms(policy, now_ms)
-            if end is None:
-                return None
-            state = 'expired' if message['expires_at_ms'] <= end else 'deferred'
+                state = "deferred"
             self.db.execute(
                 """UPDATE outbox SET state=?, not_before_ms=?, lease_until_ms=0, reason=?
                    WHERE message_id=?""",
-                (state, end, 'expired_in_quiet_hours' if state == 'expired' else 'quiet_hours',
+                (state, not_before_ms if not_before_ms is not None else now_ms, reason,
                  lease.message_id),
             )
             return state
@@ -4891,19 +4924,25 @@ class Store:
         merely queued.
         """
         row = self.db.execute(
-            """SELECT MAX(m.created_at_ms) FROM outbox m
-               WHERE m.state IN ('provider_accepted','stored_in_inbox','reconciled_delivered')
-                 AND m.created_at_ms <= ?""",
+            """SELECT MAX(sent_at_ms) FROM (
+                 SELECT COALESCE((SELECT MAX(a.completed_at_ms) FROM delivery_attempts a
+                                  WHERE a.message_id=m.message_id), m.created_at_ms) AS sent_at_ms
+                 FROM outbox m
+                 WHERE m.state IN ('provider_accepted','stored_in_inbox','reconciled_delivered')
+               ) WHERE sent_at_ms<=?""",
             (now_ms,),
         ).fetchone()
         return row[0] if row is not None and row[0] is not None else None
 
     def notifications_today(self, *, day_start_ms: int, now_ms: int) -> int:
-        """Quota input (§10.4 额度): messages queued since local day start,
-        excluding suppressed ones."""
+        """Quota input: successful deliveries on the user's current local day."""
         row = self.db.execute(
-            """SELECT COUNT(*) FROM outbox
-               WHERE created_at_ms>=? AND created_at_ms<=? AND state!='suppressed'""",
+            """SELECT COUNT(*) FROM (
+                 SELECT COALESCE((SELECT MAX(a.completed_at_ms) FROM delivery_attempts a
+                                  WHERE a.message_id=m.message_id), m.created_at_ms) AS sent_at_ms
+                 FROM outbox m
+                 WHERE m.state IN ('provider_accepted','stored_in_inbox','reconciled_delivered')
+               ) WHERE sent_at_ms>=? AND sent_at_ms<=?""",
             (day_start_ms, now_ms),
         ).fetchone()
         return int(row[0])

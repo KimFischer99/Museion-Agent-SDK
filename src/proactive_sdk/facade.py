@@ -106,6 +106,7 @@ class Job:
     revision: int = 1
     goal_id: str | None = None
     handoff: bool = False
+    owner: str = "pas"
 
     def to_spec(self) -> JobSpec:
         if type(self.handoff) is not bool:
@@ -123,6 +124,7 @@ class Job:
                 task["always_run"] = True
         return JobSpec(
             job_id=self.id,
+            owner=self.owner,
             revision=self.revision,
             mode=self.mode,
             schedule=dict(self.schedule),
@@ -248,7 +250,7 @@ class ProactiveAgent:
         )
 
         # Sources ----------------------------------------------------------
-        self.registry = SourceRegistry()
+        self.registry = SourceRegistry(store=self.store)
         for entry in sources:
             self.registry.register(
                 source_id=entry.source_id,
@@ -1309,6 +1311,7 @@ class ProactiveAgent:
     def _rebind_store(self) -> None:
         """After a restore the Store object must be rebuilt; repoint the
         kernels that hold a store reference."""
+        self.registry.store = self.store
         if isinstance(self.pack_builder.memory, SQLiteMemoryPort):
             self.pack_builder.memory.store = self.store
         self.grants = GrantManager(self.store)

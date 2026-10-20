@@ -67,6 +67,16 @@ def build_release(destination: Path) -> None:
                        for name in members)
         shutil.copy2(REPO / "README.md", runtime / "README.md")
         shutil.copy2(REPO / "examples/release_app.py", runtime / "app.py")
+        # Ship only reviewed example files, never local credentials or state.
+        example_files = {
+            "deployment": ("README.md", "pas.yaml", "pas.env.example", "sources.json", "seed.py", "pas-demo.service"),
+            "pas_hermes_plugin": ("README.md", "__init__.py", "tools.py", "pas_client.py", "plugin.yaml"),
+        }
+        for name, files in example_files.items():
+            target = staged / "examples" / name
+            target.mkdir(parents=True)
+            for filename in files:
+                shutil.copy2(REPO / "examples" / name / filename, target / filename)
 
         reference_root = REPO / "src" / REFERENCE_PREFIX
         skills = staged / "skills"

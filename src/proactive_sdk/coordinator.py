@@ -51,6 +51,7 @@ from .contracts import (
 )
 from .executor import ExecutorContext, ExecutorOutcome, RunExecutor
 from .store import RunLease, Store
+from .windows import quiet_end_ms
 
 if TYPE_CHECKING:
     from .policy import PolicyEngine
@@ -108,7 +109,7 @@ class StoreUserActivityProbe:
 
 @dataclass(frozen=True)
 class CoordinatorConfig:
-    run_lease_ttl_ms: int = 60_000
+    run_lease_ttl_ms: int = 180_000
     source_fetch_deadline_s: int = 10
     snapshot_default_ttl_ms: int = 30 * 60 * 1000
     # SPEC §21.1 step 6: how far back the "what did we already say" summary
@@ -197,6 +198,7 @@ class RunReport:
 _SILENCE_BY_RAW_REASON = {
     "l0_no_source_change": "no_source_change",
     "user_active": "user_active",
+    "quiet_window": "quiet_window",
 }
 
 
@@ -347,6 +349,11 @@ class ProactiveCoordinator:
         if staged and self.config.run_resume:
             checkpoint = self.store.load_run_checkpoint(lease, now_ms=now_ms, max_resumes=self.config.max_resumes)
         cutoff_ms = checkpoint["data"]["cutoff_ms"] if checkpoint else now_ms
+
+        # Reuse the job's delivery window before fetching sources or calling a host.
+        if (job is not None and mode != "reminder" and event.origin != "manual"
+                and quiet_end_ms(job.delivery_policy, now_ms) is not None):
+            return self._suppress(lease, "quiet_window", now_ms)
 
         # ---- W2 idle gate: do not spend a model call on a user who is here.
         # Reminders never reach the coordinator at all (scheduler path), and
@@ -544,6 +551,12 @@ class ProactiveCoordinator:
 
         run_row = self.store.get_run(lease.run_id)
         run_request = self._run_request(lease, run_row, now_ms, context)
+        execution_now = self.store.clock.wall_now_ms()
+        execution_end = min(
+            self.store._deadline_to_ms(run_request.deadline),
+            execution_now + run_request.budget.wall_time_s * 1000,
+        )
+        self.store.extend_run_lease(lease, until_ms=execution_end + 1000, now_ms=execution_now)
         self.store.append_run_event(
             lease,
             kind="context_built",

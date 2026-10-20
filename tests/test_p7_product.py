@@ -63,11 +63,14 @@ def _make_agent(tmp: str, *, profile: str = "p7a", clock=None) -> ProactiveAgent
     agent = ProactiveAgent(
         state_dir=tmp,
         executor=make_executor(_SilentModel(), clock=clock),
-        sources=(_FakeSource(),),
         timezone="Europe/Berlin",
         locale="zh-CN",
         profile=profile,
         clock=clock,
+    )
+    agent.registry.register(
+        source_id="cal", account_ref="account:primary", source=_FakeSource(),
+        required_capability="calendar.read", scope={"resource_ids": ["primary"]},
     )
     agent.grants.create(
         capability="calendar.read",

@@ -181,7 +181,28 @@ export class PasRpcClient {
   // are bound by the facade (P7) and stay `unknown` until then. --------
 
   createJob(spec: JobSpec): Promise<unknown> {
-    return this.call("jobs.create", { job: spec });
+    return this.call("jobs.create", {
+      job: {
+        id: spec.job_id,
+        owner: spec.owner,
+        revision: spec.revision,
+        mode: spec.mode,
+        schedule: spec.schedule,
+        instruction: spec.task.instruction,
+        goal_id: spec.task.goal_id,
+        handoff: spec.task.handoff,
+        always_run: spec.task.always_run,
+        grant_refs: spec.grant_refs,
+        notification_profile: spec.delivery_policy?.notification_profile,
+        misfire_policy: spec.misfire_policy,
+        deadline: spec.deadline,
+        enabled: spec.enabled,
+        delivery_policy: spec.delivery_policy,
+        reminder: spec.reminder,
+        obligation: spec.obligation,
+      },
+      idempotency_key: `client-ts-${spec.job_id}-${spec.revision}`,
+    });
   }
   pauseJob(jobId: string): Promise<unknown> {
     return this.call("jobs.pause", { job_id: jobId });

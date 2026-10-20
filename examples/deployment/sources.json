@@ -1,0 +1,16 @@
+[
+  {
+    "source_id": "journal-a-current",
+    "url": "https://journal-a.example.org/CN/current",
+    "allowed_hosts": ["journal-a.example.org"],
+    "max_excerpt_chars": 4000,
+    "hamming_threshold": 8
+  },
+  {
+    "source_id": "journal-b-index",
+    "url": "https://journal-b.example.org/portal/index",
+    "allowed_hosts": ["journal-b.example.org"],
+    "max_excerpt_chars": 4000,
+    "hamming_threshold": 8
+  }
+]

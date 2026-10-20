@@ -8,11 +8,15 @@ real loopback HTTP socket — no external network, no model calls.
 from __future__ import annotations
 
 import json
+import asyncio
+import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 sys.path.insert(0, str(EXAMPLES_DIR))
@@ -142,6 +146,8 @@ class PluginHandlerTests(unittest.TestCase):
         created = [r for r in self.server.requests if r.get("method") == "jobs.create"]
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0]["params"]["job"]["id"], "daily-agenda")
+        self.assertEqual(created[0]["params"]["job"]["instruction"], "summarize the day")
+        self.assertFalse(created[0]["params"]["job"]["always_run"])
         # jobs.create requires an idempotency_key (SPEC §14.2); sending it is
         # what makes a replay idempotent instead of an error.
         self.assertTrue(created[0]["params"]["idempotency_key"].startswith("plugin-"))
@@ -173,6 +179,40 @@ class PluginHandlerTests(unittest.TestCase):
             PasRpcClient("https://user:pass@example.org", "token")
         with self.assertRaises(PluginRpcError):
             PasRpcClient("http://127.0.0.1:1", "")  # missing token
+
+
+class NativeUnixPluginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schedule_against_real_daemon_survives_restart(self):
+        from examples.release_app import build_agent
+        from proactive_sdk.config import PasConfig
+        from proactive_sdk.rpc_server import ControlPlaneServer
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.dict(os.environ, {}, clear=True):
+            agent = build_agent(PasConfig(state_dir=tmp, profile="plugin-test", timezone="UTC", locale="en"))
+            server = ControlPlaneServer(agent, socket_path=Path(tmp) / "pas.sock", token="test-token")
+            await server.start()
+            client = PasRpcClient(f"unix://{server.socket_path}", "test-token")
+            try:
+                with patch("proactive_sdk.rpc_server.peer_uid", return_value=None), patch.object(
+                    plugin.tools, "_client", return_value=client,
+                ):
+                    await asyncio.to_thread(client.hello)
+                    reply = json.loads(await asyncio.to_thread(plugin.handle_proactive_schedule, {
+                        "job_id": "native-schedule", "mode": "task",
+                        "schedule": {"kind": "interval", "anchor": "2026-10-19T00:00:00Z", "every_seconds": 3600},
+                        "instruction": "stay silent", "always_run": True,
+                    }))
+                    self.assertTrue(reply["ok"], reply)
+                    job = agent.jobs_get("native-schedule")
+                    self.assertEqual(job.task["instruction"], "stay silent")
+                    self.assertTrue(job.task["always_run"])
+                    await server.close()
+                    await server.start()
+                    listed = await asyncio.to_thread(client.jobs_list)
+                    self.assertEqual(listed["jobs"][0]["job_id"], "native-schedule")
+            finally:
+                await server.close()
+                await agent.close()
 
 
 if __name__ == "__main__":

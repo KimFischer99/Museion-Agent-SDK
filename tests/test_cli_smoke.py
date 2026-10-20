@@ -18,6 +18,7 @@ exit code — never an unhandled Python exception.
 from __future__ import annotations
 
 import subprocess
+import json
 import sys
 import tempfile
 import unittest
@@ -132,6 +133,19 @@ class EverySubcommandReportsTests(unittest.TestCase):
             done = self._run(["config", "check", "--config", "/nope/none.yaml"], state_dir, workdir)
             self.assertEqual(done.returncode, 2)
             self.assertNotIn("Traceback", done.stderr)
+
+    def test_existing_job_show_without_json_flag(self):
+        with tempfile.TemporaryDirectory() as root:
+            state_dir = str(Path(root) / "state")
+            created = self._run([
+                "jobs", "create", "show-regression", "--mode", "task",
+                "--schedule-json", '{"kind":"interval","anchor":"2026-10-19T00:00:00Z","every_seconds":3600}',
+                "--instruction", "stay silent",
+            ], state_dir, root)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            shown = self._run(["jobs", "show", "show-regression"], state_dir, root)
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertEqual(json.loads(shown.stdout)["task"]["instruction"], "stay silent")
 
 
 if __name__ == "__main__":

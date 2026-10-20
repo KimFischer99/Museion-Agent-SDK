@@ -12,6 +12,8 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # p3_fixtures / coordinator helpers
@@ -70,6 +72,27 @@ class FakeProbe:
         if self.error is not None:
             raise self.error
         return self.last_ms
+
+
+class QuietAnalysisGateTests(unittest.TestCase):
+    def test_night_job_is_suppressed_before_fetch_and_model(self):
+        now_ms = int(datetime.fromisoformat("2026-10-20T23:30:00+08:00").timestamp() * 1000)
+        store, clock = make_store()
+        clock.set_wall(now_ms)
+        self.addCleanup(store.close)
+        job = replace(make_job(), delivery_policy={
+            "quiet_hours": {"start": "23:00", "end": "08:00", "timezone": "Asia/Shanghai"},
+        })
+        store.upsert_job(job, idempotency_key="quiet-gate")
+        admit_job_event(store, job, observed_ms=now_ms)
+        model = ScriptedModel([])
+        source = ScriptedSource([])
+        coordinator = make_gated_coordinator(store, model, source)
+        report = asyncio.run(coordinator.process_pending_run(now_ms=now_ms))
+        self.assertEqual((report.outcome, report.silence_reason, report.model_turns),
+                         ("suppressed", "quiet_window", 0))
+        self.assertEqual(model.calls, [])
+        self.assertEqual(source.requests, [])
 
 
 def make_gated_coordinator(

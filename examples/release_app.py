@@ -235,6 +235,8 @@ def build_agent(config=None) -> ProactiveAgent:
                 account_ref=spec.get("account_ref", "account:public"),
                 allowed_hosts=tuple(spec.get("allowed_hosts") or ()),
                 required_capability=spec.get("required_capability", "public.read"),
+                max_excerpt_chars=spec.get("max_excerpt_chars", 2000),
+                hamming_threshold=spec.get("hamming_threshold", 8),
             ),
         )
     if gws_command is not None:
@@ -252,23 +254,34 @@ def build_agent(config=None) -> ProactiveAgent:
 
 
 def _rss_source_specs() -> list[dict[str, Any]]:
-    """Parse ``PAS_RSS_SOURCES`` (JSON array); unset means no surface."""
+    """Parse ``PAS_RSS_SOURCES`` or its ``_FILE``; unset means no surface."""
     return _source_specs("PAS_RSS_SOURCES")
 
 
 def _page_source_specs() -> list[dict[str, Any]]:
-    """Parse ``PAS_PAGE_SOURCES`` (JSON array); unset means no surface."""
+    """Parse ``PAS_PAGE_SOURCES`` or its ``_FILE``; unset means no surface."""
     return _source_specs("PAS_PAGE_SOURCES")
 
 
 def _sitemap_source_specs() -> list[dict[str, Any]]:
-    """Parse ``PAS_SITEMAP_SOURCES`` (JSON array); unset means no surface."""
+    """Parse ``PAS_SITEMAP_SOURCES`` or its ``_FILE``; unset means no surface."""
     return _source_specs("PAS_SITEMAP_SOURCES")
 
 
 def _source_specs(env_name: str) -> list[dict[str, Any]]:
     raw = os.environ.get(env_name, "").strip()
-    if not raw:
+    file_name = env_name + "_FILE"
+    path = os.environ.get(file_name, "").strip()
+    if raw and path:
+        raise PASError(ErrorCode.INVALID_CONFIG, f"set only one of {env_name} and {file_name}",
+                       scope="release_app")
+    if path:
+        try:
+            raw = Path(path).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise PASError(ErrorCode.INVALID_CONFIG, f"cannot read {file_name} as UTF-8",
+                           scope="release_app") from None
+    if not raw and not path:
         return []
     try:
         value = json.loads(raw)

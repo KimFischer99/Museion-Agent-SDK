@@ -842,7 +842,7 @@ class PolicyEngine:
         *,
         queued_in_batch: int = 0,
         obligation: str = "opportunistic",
-    ) -> tuple[int, str | None]:
+    ) -> tuple[int | None, str | None]:
         """Compute not_before: quiet hours defer, quota defers to tomorrow.
         Returns (not_before_ms, defer_reason) or (None, suppression_reason)
         when the message would arrive stale."""
@@ -857,10 +857,10 @@ class PolicyEngine:
                 return None, "expired_in_quiet_hours"
         max_per_day = delivery_policy.get("max_per_day", self.config.max_per_day)
         if isinstance(max_per_day, int) and not isinstance(max_per_day, bool) and max_per_day > 0:
-            tzname = delivery_policy.get("timezone")
+            tzname = delivery_policy.get("quiet_hours_timezone") or delivery_policy.get("timezone")
             block = delivery_policy.get("quiet_hours")
             if isinstance(block, dict):
-                tzname = block.get("timezone")
+                tzname = block.get("timezone") or tzname
             day_start = local_day_start_ms(tzname, now_ms)
             sent_today = self.store.notifications_today(day_start_ms=day_start, now_ms=now_ms)
             # Phase A evaluates the whole batch before phase B queues it,
@@ -889,10 +889,10 @@ class PolicyEngine:
                         return None, "expired_in_cadence_defer"
             cap = delivery_policy.get("cadence_max_per_day", self.config.cadence_max_per_day)
             if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
-                tzname = delivery_policy.get("timezone")
+                tzname = delivery_policy.get("quiet_hours_timezone") or delivery_policy.get("timezone")
                 block = delivery_policy.get("quiet_hours")
                 if isinstance(block, dict):
-                    tzname = block.get("timezone")
+                    tzname = block.get("timezone") or tzname
                 day_start = local_day_start_ms(tzname, now_ms)
                 sent_today = (
                     self.store.notifications_today(day_start_ms=day_start, now_ms=now_ms)
@@ -1054,6 +1054,16 @@ class PolicyEngine:
         if not items:
             return 0
         return self.store.queue_approved_actions(items, now_ms=now)
+
+    def pre_dispatch_timing(
+        self, lease: Any, *, expires_at_ms: int, now_ms: int,
+    ) -> tuple[int | None, str | None]:
+        action = self.store.action_delivery_context(lease.action_id)
+        request = action["request"] if action else {}
+        return self._timing(
+            action["delivery_policy"] if action else {}, expires_at_ms, now_ms,
+            obligation=request.get("obligation") or (action.get("obligation") if action else None) or "opportunistic",
+        )
 
     def pre_dispatch_recheck(self, lease: Any, *, now_ms: int) -> str | None:
         """Last look before the effect. Returns a suppression reason or

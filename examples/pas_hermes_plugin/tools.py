@@ -90,7 +90,8 @@ def handle_proactive_schedule(args: dict[str, Any], **_kw: Any) -> str:
             "id": str(args["job_id"]),
             "mode": str(args["mode"]),
             "schedule": args["schedule"],
-            "task": {"instruction": str(args["instruction"])},
+            "instruction": str(args["instruction"]),
+            "always_run": args.get("always_run", False),
             "grant_refs": _grant_refs(),
             "enabled": True,
         }
@@ -148,7 +149,7 @@ def handle_proactive_skills_inspect(args: dict[str, Any], **_kw: Any) -> str:
 
 PROACTIVE_SCHEDULE_SCHEMA = _schema(
     "proactive_schedule",
-    "Propose one persisted proactive plan (heartbeat, task, watch). Landed in PAS; "
+    "Propose one persisted proactive plan (heartbeat, task). Landed in PAS; "
     "delivery still obeys PAS policy: grants, quiet hours, approval. "
     "Scheduling accepted is NOT a notification sent.",
     {
@@ -156,13 +157,14 @@ PROACTIVE_SCHEDULE_SCHEMA = _schema(
         "mode": {"type": "string", "enum": ["heartbeat", "task"],
                  "description": "Plan kind: 'task' runs the instruction on the schedule, "
                                 "'heartbeat' looks around opportunistically. 'task' reaches "
-                                "the model every occurrence; 'heartbeat' is suppressed with "
-                                "no model call when nothing changed."},
+                                "the model every occurrence only with always_run=true; "
+                                "otherwise unchanged sources suppress analysis."},
         "schedule": {"type": "object", "description":
                      "PAS schedule object, e.g. {\"kind\":\"daily\",\"local_time\":\"09:00\","
                      "\"timezone\":\"Europe/Berlin\"} or {\"kind\":\"interval\","
-                     "\"every_seconds\":1800}"},
+                     "\"anchor\":\"2026-10-19T00:00:00Z\",\"every_seconds\":1800}"},
         "instruction": _str("What the agent should analyse on each wake"),
+        "always_run": {"type": "boolean", "description": "Run even without source changes (default false)"},
     },
     ["job_id", "mode", "schedule", "instruction"],
 )

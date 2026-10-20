@@ -125,6 +125,19 @@ function schema(properties: Record<string, unknown>, required: string[]): Record
   return { type: "object", properties, required, additionalProperties: false };
 }
 
+async function idempotencyKey(job: Record<string, unknown>): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(job, (_key, value) =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
+        : value,
+    )),
+  );
+  const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+  return `pi-${hex}`;
+}
+
 function tools(): PasTool[] {
   return [
     {
@@ -135,21 +148,31 @@ function tools(): PasTool[] {
       parameters: schema(
         {
           job_id: str("Stable plan id, 3..128 chars [a-z0-9._-]"),
-          mode: { type: "string", enum: ["heartbeat", "task", "watch"] },
+          mode: { type: "string", enum: ["heartbeat", "task"] },
+          schedule: { type: "object", description: "PAS schedule object" },
           instruction: str("What the agent should analyse on each wake"),
+          always_run: { type: "boolean", description: "Run even without source changes (default false)" },
         },
-        ["job_id", "mode", "instruction"],
+        ["job_id", "mode", "schedule", "instruction"],
       ),
       execute: async (args) =>
         guard(async () => {
           const job = {
-            job_id: String(args.job_id ?? ""),
+            id: String(args.job_id ?? ""),
             mode: String(args.mode ?? ""),
             schedule: args.schedule as unknown,
-            task: { instruction: String(args.instruction ?? "") },
+            instruction: String(args.instruction ?? ""),
+            always_run: args.always_run ?? false,
+            grant_refs: (process.env.PAS_NOTIFY_GRANT ?? "")
+              .split(",")
+              .map(ref => ref.trim())
+              .filter(Boolean),
             enabled: true,
           };
-          const result = (await rpcCall("jobs.create", { job })) as Record<string, unknown>;
+          const result = (await rpcCall("jobs.create", {
+            job,
+            idempotency_key: await idempotencyKey(job),
+          })) as Record<string, unknown>;
           return { job: result };
         }),
     },

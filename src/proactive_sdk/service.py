@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .backup import read_backup_meta
 from .config import PasConfig, config_to_yaml_subset, load_config
 from .contracts import ErrorCode, PASError
 from .facade import DB_FILENAME, LOCK_FILENAME, SOCKET_FILENAME, Job, ProactiveAgent
@@ -599,7 +598,7 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     "obligation": record.obligation,
                     "stopped_at_ms": record.stopped_at_ms,
                 },
-                args.json,
+                _json_flag(args),
             )
         elif args.action == "create":
             is_reminder = args.mode == "reminder"
@@ -937,7 +936,6 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    meta = read_backup_meta(args.path)
     config = _load_config(args)
     state_dir = _state_dir(args, config)
     from .backup import restore_backup
@@ -945,8 +943,7 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     result = restore_backup(
         state_dir / DB_FILENAME,
         args.path,
-        expect_profile=meta.get("profile"),
-        expect_owner_destination=meta.get("owner_destination"),
+        expect_profile=config.profile if config is not None else None,
     )
     _print({"restored": result}, _json_flag(args))
     return 0

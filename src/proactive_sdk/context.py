@@ -148,7 +148,9 @@ class SourceEntry:
 
 
 class SourceRegistry:
-    def __init__(self) -> None:
+    def __init__(self, *, store: Store | None = None) -> None:
+        # Standalone registries use their caller's authority; facade registries bind grants.
+        self.store = store
         self._entries: dict[tuple[str, str], SourceEntry] = {}
 
     def register(
@@ -204,6 +206,19 @@ class SourceRegistry:
                 f"source {request.source_id!r}/{request.account_ref!r} is not registered",
                 scope="sources",
             )
+        if self.store is not None:
+            now = self.store.clock.wall_now_ms()
+            authorized = any(
+                grant.capability == entry.required_capability
+                and grant.account_ref == request.account_ref
+                and grant.is_active(now)
+                and all(key in request.scope and request.scope[key] == value
+                        for key, value in grant.scope.items())
+                for grant in self.store.list_grants()
+            )
+            if not authorized:
+                raise PASError(ErrorCode.PERMISSION_DENIED,
+                               "source account or scope is not granted", scope="sources")
         batch = await entry.source.fetch_delta(request)
         if not isinstance(batch, SourceBatch):
             raise PASError(
