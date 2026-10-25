@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO / "tests"))
 
 from p3_fixtures import T0, make_executor, rfc3339  # noqa: E402
 
-from proactive_sdk import FakeClock, Job, ProactiveAgent  # noqa: E402
+from proactive_sdk import FakeClock, Job, ProactiveAgent, __version__  # noqa: E402
 from proactive_sdk.contracts import ModelResponse  # noqa: E402
 from proactive_sdk.daemon import DaemonLock  # noqa: E402
 
@@ -407,7 +407,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("doctor", out.getvalue())
         self.assertIn("backup", out.getvalue())
         version = self._pas("version")
-        self.assertIn("Museion Agent SDK v0.1.4", version)
+        self.assertIn(f"Museion Agent SDK v{__version__}", version)
 
     def test_doctor_missing_state_dir_reports_the_finding(self):
         out = self._pas("--state-dir", str(Path(self.tmp) / "missing"), "doctor", "--json",

@@ -3,6 +3,8 @@
 /release/
 private-vendor/
 muse-refer/
+# A5 参考项目拆解工作目录（含 93MB 供应商包）——不进 git、不进发布包
+/A5-主动性拆解-20261025/
 
 # 运行时产物
 private-state/
