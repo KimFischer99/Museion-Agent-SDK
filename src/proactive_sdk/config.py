@@ -58,7 +58,8 @@ _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "require_reason", "idle_gate", "idle_min_minutes",
                 "max_candidates", "feedback_ignored_backfill",
                 "conversation_context", "memory_consolidation", "goal_context", "handoff",
-                "run_resume", "max_resumes", "goal_stale_days", "memory_ttl_days")
+                "run_resume", "max_resumes", "goal_stale_days", "memory_ttl_days",
+                "feedback_context")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -264,6 +265,11 @@ class PolicySection:
     #: reaction after 24h as ``ignored_24h``. Off by default — "no reply"
     #: is a weak signal and the deployer opts in explicitly.
     feedback_ignored_backfill: bool = False
+
+    #: A5 P3b: inject the newest delivery-outcome signals (redacted digest
+    #: + topic + signal, at most 5) into the run's context pack. Off by
+    #: default; turning it off stops new injections but keeps recorded rows.
+    feedback_context: bool = False
 
     conversation_context: bool = False
     memory_consolidation: bool = False
@@ -505,7 +511,8 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
     if not isinstance(feedback_ignored_backfill, bool):
         raise ConfigError("policy.feedback_ignored_backfill must be a boolean")
     v3 = {}
-    for name in ("conversation_context", "memory_consolidation", "goal_context", "handoff", "run_resume"):
+    for name in ("conversation_context", "memory_consolidation", "goal_context", "handoff",
+                 "run_resume", "feedback_context"):
         value = policy_raw.get(name, False)
         if type(value) is not bool:
             raise ConfigError(f"policy.{name} must be a boolean")

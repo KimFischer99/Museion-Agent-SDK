@@ -653,7 +653,7 @@ class Store:
             "SELECT goal_id FROM goals ORDER BY created_at_ms,goal_id LIMIT ?", (limit,)).fetchall()]
 
     def pending_notification_summary(self, *, now_ms: int) -> tuple[dict[str, Any], ...]:
-        rows = self.db.execute("""SELECT payload_json,state,created_at_ms FROM outbox
+        rows = self.db.execute("""SELECT payload_json,state,created_at_ms,not_before_ms FROM outbox
             WHERE state IN ('pending','sending','deferred','delivery_unknown') AND created_at_ms<=?
             ORDER BY created_at_ms DESC,rowid DESC LIMIT 20""", (now_ms,)).fetchall()
         result = []
@@ -661,7 +661,8 @@ class Store:
             payload = canonical_loads(row["payload_json"])
             result.append({"fact_digest": content_hash(payload.get("fact_id", ""))[:16],
                            "topic": str(payload.get("topic") or payload.get("title") or "")[:120],
-                           "state": row["state"], "at_ms": row["created_at_ms"]})
+                           "state": row["state"], "at_ms": row["created_at_ms"],
+                           "not_before_ms": row["not_before_ms"]})
         return tuple(result)
 
     def save_run_checkpoint(self, lease: RunLease, *, stage: str, input_hash: str,
@@ -3131,6 +3132,7 @@ class Store:
         silence_reason: str | None = None,
         candidates_count: int = 0,
         truncated_count: int = 0,
+        next_eligible_at_ms: int | None = None,
     ) -> None:
         """End a run before any model call with its machine reason (§5.3
         L0: 空清单、无变化、未授权等直接结束，记录机器原因但不通知).
@@ -3139,7 +3141,10 @@ class Store:
         events (existing L0 strings are unchanged); ``silence_reason`` is
         the closed v2 enum that the ledger/stats can aggregate. A raw
         verdict with no enum mapping passes ``None`` rather than being
-        forced into a wrong bucket.
+        forced into a wrong bucket. ``next_eligible_at_ms`` is the derived
+        "when this same gate could pass" snapshot (migration 018): only the
+        coordinator's quiet-window and idle-gate suppressions carry an
+        honest wall-clock value; every other caller leaves it ``None``.
         """
         if not reason or len(reason) > 500:
             raise PASError(ErrorCode.INVALID_CONFIG, "reason must be 1..500 chars", scope="runs")
@@ -3147,6 +3152,16 @@ class Store:
             raise PASError(
                 ErrorCode.INVALID_CONFIG,
                 f"silence_reason {silence_reason!r} not in {list(HOST_SILENCE_REASONS)}",
+                scope="runs",
+            )
+        if next_eligible_at_ms is not None and (
+            not isinstance(next_eligible_at_ms, int)
+            or isinstance(next_eligible_at_ms, bool)
+            or next_eligible_at_ms <= 0
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "next_eligible_at_ms must be a positive epoch-ms integer",
                 scope="runs",
             )
         with self.transaction():
@@ -3162,11 +3177,12 @@ class Store:
             self.db.execute(
                 """UPDATE runs SET state='suppressed', lease_until_ms=0,
                        silence_reason=?, candidates_count=?, truncated_count=?,
-                       updated_at_ms=? WHERE run_id=?""",
+                       next_eligible_at_ms=?, updated_at_ms=? WHERE run_id=?""",
                 (
                     silence_reason,
                     int(candidates_count),
                     int(truncated_count),
+                    next_eligible_at_ms,
                     now_ms,
                     lease.run_id,
                 ),
@@ -3389,7 +3405,7 @@ class Store:
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
                           decision_summary, proposal_count, context_ref, deadline_ms,
                           silence_reason, candidates_count, truncated_count,
-                          tool_authority, tool_authority_reason
+                          tool_authority, tool_authority_reason, next_eligible_at_ms
                    FROM runs WHERE state=? ORDER BY rowid LIMIT ?""",
                 (state, int(limit)),
             ).fetchall()
@@ -3398,7 +3414,7 @@ class Store:
                 """SELECT run_id, event_id, state, attempt, fence, error_class,
                           decision_summary, proposal_count, context_ref, deadline_ms,
                           silence_reason, candidates_count, truncated_count,
-                          tool_authority, tool_authority_reason
+                          tool_authority, tool_authority_reason, next_eligible_at_ms
                    FROM runs ORDER BY rowid LIMIT ?""",
                 (int(limit),),
             ).fetchall()
@@ -3409,7 +3425,8 @@ class Store:
             """SELECT run_id, event_id, state, attempt, fence, lease_until_ms, deadline_ms,
                       error_class, decision_summary, proposal_count, usage_json, context_ref,
                       silence_reason, candidates_count, truncated_count,
-                      tool_authority, tool_authority_reason, stage, input_hash, resume_count
+                      tool_authority, tool_authority_reason, stage, input_hash, resume_count,
+                      next_eligible_at_ms
                FROM runs WHERE run_id=?""",
             (run_id,),
         ).fetchone()
@@ -4800,6 +4817,35 @@ class Store:
             (message_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def recent_delivery_feedback(self, *, limit: int = 5) -> tuple[dict[str, Any], ...]:
+        """Redacted projection of the newest delivery-outcome signals.
+
+        One row per signal, newest first, bounded by ``limit`` (the pack
+        validator caps the field at 5). The shape mirrors
+        pending_notification_summary — fact digest plus bounded topic — so
+        no message body and no ledger join key reaches the model. It reads
+        only what the trusted UI or the host backfill already recorded;
+        it never invents a signal.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 5:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be 1..5", scope="feedback")
+        rows = self.db.execute(
+            """SELECT f.signal, f.created_at_ms, o.payload_json
+               FROM delivery_feedback f JOIN outbox o ON o.message_id=f.message_id
+               ORDER BY f.created_at_ms DESC, f.feedback_id DESC LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            payload = canonical_loads(row["payload_json"])
+            result.append({
+                "fact_digest": content_hash(payload.get("fact_id", ""))[:16],
+                "topic": str(payload.get("topic") or payload.get("title") or "")[:120],
+                "signal": row["signal"],
+                "at_ms": row["created_at_ms"],
+            })
+        return tuple(result)
 
     def sent_messages_since(
         self, *, since_ms: int, now_ms: int, limit: int = 5000

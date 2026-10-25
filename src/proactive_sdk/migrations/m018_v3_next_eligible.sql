@@ -1,0 +1,11 @@
+-- Migration 018: run-level "when could this gate pass" timestamp (A5 P2).
+--
+-- ``runs.silence_reason`` says why a run stayed quiet but not when the same
+-- gate could pass again. For the two suppression reasons with an honest
+-- wall-clock answer the coordinator now records it:
+--   quiet_window  -> end of the quiet window covering the suppression
+--   user_active   -> last observed user activity + idle_min_minutes
+-- Every other silence reason has no computable eligibility point and stays
+-- NULL rather than being guessed (same rule as migration 012's backfill).
+-- The column is a read-only derived snapshot; no decision reads it back.
+ALTER TABLE runs ADD COLUMN next_eligible_at_ms INTEGER;

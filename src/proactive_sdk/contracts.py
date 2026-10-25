@@ -1152,6 +1152,11 @@ class ContextPack:
     memory_entries: tuple["MemoryEntry", ...] = ()
     conversation_turns: tuple[ConversationTurn, ...] = ()
     pending_notifications: tuple[dict[str, Any], ...] = ()
+    #: Bounded, redacted delivery-outcome feedback (A5 P3): one entry per
+    #: recent signal — fact digest + topic + the four-way signal enum, no
+    #: message_id, no body. Context for the model, never evidence and never
+    #: authorization. Injected only while ``policy.feedback_context`` is on.
+    delivery_feedback: tuple[dict[str, Any], ...] = ()
     goal_summary: dict[str, Any] | None = None
     worker_report: dict[str, Any] | None = None
 
@@ -1159,6 +1164,7 @@ class ContextPack:
         problems = validate_v3_context({
             "conversation_turns": [t.to_dict() for t in self.conversation_turns],
             "pending_notifications": list(self.pending_notifications),
+            "delivery_feedback": list(self.delivery_feedback),
             "goal_summary": self.goal_summary, "worker_report": self.worker_report,
         })
         if problems:
@@ -1252,6 +1258,8 @@ class ContextPack:
             out["conversation_turns"] = [turn.to_dict() for turn in self.conversation_turns]
         if self.pending_notifications:
             out["pending_notifications"] = list(self.pending_notifications)
+        if self.delivery_feedback:
+            out["delivery_feedback"] = list(self.delivery_feedback)
         if self.goal_summary is not None:
             out["goal_summary"] = self.goal_summary
         if self.worker_report is not None:
@@ -1301,12 +1309,28 @@ def validate_v3_context(pack: dict[str, Any]) -> list[str]:
         errors.append("pending_notifications allows at most 20 entries")
     else:
         for entry in pending:
-            if (not isinstance(entry, dict) or set(entry) != {"fact_digest", "topic", "state", "at_ms"}
+            # not_before_ms is optional (migration-era packs predate it): the
+            # delivery layer's "earliest sendable time" for deferred rows.
+            if (not isinstance(entry, dict)
+                    or not set(entry) <= {"fact_digest", "topic", "state", "at_ms", "not_before_ms"}
+                    or not {"fact_digest", "topic", "state", "at_ms"} <= set(entry)
                     or not isinstance(entry["fact_digest"], str) or not re.fullmatch(r"[0-9a-f]{16}", entry["fact_digest"])
                     or not isinstance(entry["topic"], str) or len(entry["topic"]) > 120
                     or entry["state"] not in ("pending", "sending", "deferred", "delivery_unknown")
-                    or type(entry["at_ms"]) is not int):
+                    or type(entry["at_ms"]) is not int
+                    or ("not_before_ms" in entry and type(entry["not_before_ms"]) is not int)):
                 errors.append("invalid pending notification")
+    feedback = pack.get("delivery_feedback", [])
+    if not isinstance(feedback, (list, tuple)) or len(feedback) > 5:
+        errors.append("delivery_feedback allows at most 5 entries")
+    else:
+        for entry in feedback:
+            if (not isinstance(entry, dict) or set(entry) != {"fact_digest", "topic", "signal", "at_ms"}
+                    or not isinstance(entry["fact_digest"], str) or not re.fullmatch(r"[0-9a-f]{16}", entry["fact_digest"])
+                    or not isinstance(entry["topic"], str) or len(entry["topic"]) > 120
+                    or entry["signal"] not in ("replied", "ignored_24h", "dismissed", "complained")
+                    or type(entry["at_ms"]) is not int):
+                errors.append("invalid delivery feedback entry")
     goal = pack.get("goal_summary")
     if goal is not None:
         if (not isinstance(goal, dict) or set(goal) != {"goal_id", "status", "summary", "progress", "momentum"}

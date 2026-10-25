@@ -130,6 +130,7 @@ class CoordinatorConfig:
     goal_context: bool = False
     handoff: bool = False
     run_resume: bool = False
+    feedback_context: bool = False
     max_resumes: int = 2
     goal_stale_days: int = 14
     memory_ttl_days: int = 30
@@ -155,7 +156,7 @@ class CoordinatorConfig:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"{name} must be a positive integer")
-        for name in ("conversation_context", "memory_consolidation", "goal_context", "handoff", "run_resume"):
+        for name in ("conversation_context", "memory_consolidation", "goal_context", "handoff", "run_resume", "feedback_context"):
             if type(getattr(self, name)) is not bool:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"{name} must be boolean")
         if self.conversation_limit > 128 or self.conversation_total_chars > 32_000 or self.conversation_turn_chars > 32_000:
@@ -177,6 +178,10 @@ class RunReport:
     #: when the raw machine verdict has no honest mapping (the raw string
     #: stays in ``reason``/run events).
     silence_reason: str | None = None
+    #: Derived read-only snapshot (migration 018): when the SAME gate that
+    #: suppressed this run could pass again. Only quiet-window and idle-gate
+    #: suppressions carry a value; no decision logic reads it back.
+    next_eligible_at_ms: int | None = None
     #: W5 cost accounting: candidates admitted into the run and how many
     #: were cut by ``max_candidates``.
     candidates: int = 0
@@ -351,9 +356,11 @@ class ProactiveCoordinator:
         cutoff_ms = checkpoint["data"]["cutoff_ms"] if checkpoint else now_ms
 
         # Reuse the job's delivery window before fetching sources or calling a host.
-        if (job is not None and mode != "reminder" and event.origin != "manual"
-                and quiet_end_ms(job.delivery_policy, now_ms) is not None):
-            return self._suppress(lease, "quiet_window", now_ms)
+        quiet_end = quiet_end_ms(job.delivery_policy, now_ms) if (
+            job is not None and mode != "reminder" and event.origin != "manual"
+        ) else None
+        if quiet_end is not None:
+            return self._suppress(lease, "quiet_window", now_ms, next_eligible_at_ms=quiet_end)
 
         # ---- W2 idle gate: do not spend a model call on a user who is here.
         # Reminders never reach the coordinator at all (scheduler path), and
@@ -378,7 +385,14 @@ class ProactiveCoordinator:
                 idle_ms = self.config.idle_min_minutes * 60_000
                 if now_ms - last_activity < idle_ms:
                     # Fail open on unknown, suppress only on a known presence.
-                    return self._suppress(lease, "user_active", now_ms)
+                    # The eligible point is the honest one for THIS gate: the
+                    # earliest instant the same probe would pass again.
+                    return self._suppress(
+                        lease,
+                        "user_active",
+                        now_ms,
+                        next_eligible_at_ms=last_activity + idle_ms,
+                    )
 
         # The coordinator's entire view of the executor, asked once per run.
         # A host-backed executor may have to ask its host here, so this is
@@ -522,6 +536,15 @@ class ProactiveCoordinator:
             source_records.extend(materializer.materialize(filtered, now_ms=now_ms))
         turns, conversation_failed = await self._conversation_turns(lease, cutoff_ms=cutoff_ms, now_ms=now_ms)
         pending = self.store.pending_notification_summary(now_ms=cutoff_ms) if self.config.conversation_context else ()
+        # A5 P3: the model sees how the owner reacted to recent deliveries.
+        # Context only — it widens neither the evidence universe (the refs a
+        # proposal may cite) nor any tool authorization.
+        feedback_rows = self.store.recent_delivery_feedback(limit=5) if self.config.feedback_context else ()
+        if feedback_rows:
+            self.store.append_run_event(
+                lease, kind="feedback_context",
+                safe_summary=f"entries={len(feedback_rows)}", now_ms=now_ms,
+            )
         goal_summary = self._goal_summary(job, now_ms=now_ms)
         if goal_summary is not None:
             self.store.append_run_event(lease, kind="goal_context", safe_summary=f"status={goal_summary['status']}", now_ms=now_ms)
@@ -542,6 +565,7 @@ class ProactiveCoordinator:
                 memory_query=instruction,
                 conversation_turns=turns,
                 pending_notifications=pending,
+                delivery_feedback=feedback_rows,
                 goal_summary=goal_summary,
             )
         except PASError as exc:
@@ -984,6 +1008,7 @@ class ProactiveCoordinator:
         *,
         candidates_count: int = 0,
         truncated_count: int = 0,
+        next_eligible_at_ms: int | None = None,
     ) -> RunReport:
         silence_reason = _silence_reason_for(reason)
         self.store.record_run_suppressed(
@@ -993,6 +1018,7 @@ class ProactiveCoordinator:
             silence_reason=silence_reason,
             candidates_count=candidates_count,
             truncated_count=truncated_count,
+            next_eligible_at_ms=next_eligible_at_ms,
         )
         return RunReport(
             run_id=lease.run_id,
@@ -1002,6 +1028,7 @@ class ProactiveCoordinator:
             candidates=candidates_count,
             truncated=truncated_count,
             model_turns=0,
+            next_eligible_at_ms=next_eligible_at_ms,
         )
 
     def _fail(self, lease: RunLease, *, error_class: str, now_ms: int) -> None:

@@ -69,3 +69,13 @@ policy:
 - 真实宿主 e2e：Hermes gateway 与 Pi 1.0.4 各 16/16 断言通过，各 2 次真实模型调用（`pricing_basis=measured`），schema 17；首 tick 新队列按设计不投递，下一 tick 入本地 inbox；证据保留于 `artifacts/v3-e2e-20261019T073507Z/`。
 - 发布物（本地，未发布）：`release/v0.1.4/` 构建成功；wheel `proactive_sdk-0.1.4-py3-none-any.whl` 327710 字节；`package_gate` PASS；SBOM 生成；`install_smoke` PASS（`pas version` 报 v0.1.4）。
 - 仍未验收：跨进程恢复成功路径、开启开关下的故障注入、host-side activity probe、Python 3.11 的 v3 全量套件；当前工作区尚未提交，也没有 tag 或发布。
+
+## 增量：A5 对照改造（2026-10-25）
+
+依据 A5 0.3.1 拆解（工作目录 `A5-主动性拆解-20261025/`，未入库）修订后的三项改造，落在 v3 之后：
+
+- **P2 运行层到期时间（migration 018，schema 18）**：`runs.next_eligible_at_ms` 只在两类有诚实墙钟答案的抑制时写入——`quiet_window`（`quiet_end_ms` 窗口终点）与 `user_active`（last_activity + `idle_min_minutes`）；其余 9 类 silence_reason 一律 NULL，不造数。字段只读派生，判定逻辑不读回。`RunReport`、`facade.tick` 报告、`runs.get/list`、`store.get_run` 均透出。投递层既有 `not_before_ms` 补进 pending 通知摘要（pack 校验与 schema 同步允许可选字段）。
+- **P3b 反馈上下文注入**：新增 `policy.feedback_context`（默认 off，config/coordinator/装配全链透传）。开启时每次组上下文注入最近至多 5 条投递反馈的脱敏投影（fact_digest 16hex + topic ≤120 + signal 四值枚举 + at_ms；无 message_id、无正文），进 `ContextPack.delivery_feedback` 与持久化 pack；账本记 `feedback_context` 事件；不进 evidence universe、不扩授权。`store.recent_delivery_feedback()` 为唯一取数口。
+- **P3a 无代码改动**：`ignored_24h` 宿主回填自 v2 W6 已存在（`store.backfill_ignored_24h` + daemon tick，开关 `policy.feedback_ignored_backfill` 默认 off）。部署侧开开关即可。
+
+测试：新增 `tests/test_a5_followup.py` 6 个行为用例（P2 三项、P3b 注入开关与红线、契约校验）；`test_migration_v014` schema 断言 17→18；TS 类型再生成。基线 983 全绿 → 改动后 989 全绿（本机 Python 3.14.4）。合成验收 20/20（离线，脚本与记录在 A5 工作目录）：记忆巩固单/双证据→转正→recall 注入；静默窗到期字段及到点复跑；回填幂等与 delivery_attempts 联查；注入脱敏与无联查键；投递层 not_before 透出。未做：真实模型 token 对比、木木实例部署与 schema 17→18 升级演练、P1 人工抽查项。

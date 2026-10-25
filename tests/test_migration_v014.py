@@ -94,7 +94,8 @@ class MigrationV3Tests(unittest.TestCase):
     def test_upgrade_adds_v3_state_without_touching_legacy_rows(self):
         store = self._open()
         try:
-            self.assertEqual(store.schema_version(), 17)
+            # 18 since migration 018 (runs.next_eligible_at_ms).
+            self.assertEqual(store.schema_version(), 18)
             committed = store.db.execute(
                 "SELECT state, stage, checkpoint_json, checkpoint_hash, input_hash,"
                 " resume_count FROM runs WHERE run_id='run-legacy-committed'"

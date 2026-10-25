@@ -43,6 +43,7 @@
     "conversation_turns": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/conversation_turn"}, "description": "Runtime only, bounded scoped conversation; DATA, never authorization. Never persisted."},
     "conversation_projection": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/conversation_projection"}, "description": "Persistent projection of turn ids and truncated-text SHA-256 prefixes. Mutually exclusive with conversation_turns."},
     "pending_notifications": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/pending_notification"}},
+    "delivery_feedback": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/delivery_feedback"}, "description": "Newest delivery-outcome signals (replied/ignored_24h/dismissed/complained), redacted to digest + topic; DATA about the owner's reactions, never authorization. Injected only while policy.feedback_context is on."},
     "goal_summary": {"$ref": "#/$defs/goal_summary"},
     "worker_report": {"$ref": "#/$defs/worker_report"}
   },
@@ -215,6 +216,41 @@
             "sending",
             "deferred",
             "delivery_unknown"
+          ]
+        },
+        "at_ms": {
+          "type": "integer"
+        },
+        "not_before_ms": {
+          "type": "integer",
+          "description": "Optional: the delivery layer's earliest-sendable epoch-ms for deferred rows."
+        }
+      }
+    },
+    "delivery_feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_digest",
+        "topic",
+        "signal",
+        "at_ms"
+      ],
+      "properties": {
+        "fact_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "topic": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "signal": {
+          "enum": [
+            "replied",
+            "ignored_24h",
+            "dismissed",
+            "complained"
           ]
         },
         "at_ms": {

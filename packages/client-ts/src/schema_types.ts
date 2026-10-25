@@ -46,6 +46,8 @@ export interface ContextPack {
   /** Persistent projection of turn ids and truncated-text SHA-256 prefixes. Mutually exclusive with conversation_turns. */
   "conversation_projection"?: ReadonlyArray<Conversationprojection>;
   "pending_notifications"?: ReadonlyArray<Pendingnotification>;
+  /** Newest delivery-outcome signals (replied/ignored_24h/dismissed/complained), redacted to digest + topic; DATA about the owner's reactions, never authorization. I */
+  "delivery_feedback"?: ReadonlyArray<Deliveryfeedback>;
   "goal_summary"?: Goalsummary;
   "worker_report"?: Workerreport;
 }
@@ -90,6 +92,16 @@ export type Pendingnotification = {
     "fact_digest": string;
     "topic": string;
     "state": "pending" | "sending" | "deferred" | "delivery_unknown";
+    "at_ms": number;
+        /** Optional: the delivery layer's earliest-sendable epoch-ms for deferred rows. */
+"not_before_ms"?: number;
+  };
+
+// delivery_feedback
+export type Deliveryfeedback = {
+    "fact_digest": string;
+    "topic": string;
+    "signal": "replied" | "ignored_24h" | "dismissed" | "complained";
     "at_ms": number;
   };
 

@@ -429,6 +429,12 @@ class ProactiveAgent:
                 "model_turns": run_report.model_turns,
                 "policy_outcome": run_report.policy_outcome,
             }
+            if run_report.silence_reason is not None:
+                entry["silence_reason"] = run_report.silence_reason
+            if run_report.next_eligible_at_ms is not None:
+                # Read-only derived field (migration 018): when the same
+                # gate could pass again. Absent when no honest point exists.
+                entry["next_eligible_at_ms"] = run_report.next_eligible_at_ms
             report["runs"].append(entry)
             if run_report.outcome == "suppressed":
                 self.metrics.inc("suppressed")
@@ -1227,6 +1233,7 @@ class ProactiveAgent:
             goal_context=policy.goal_context,
             handoff=policy.handoff,
             run_resume=policy.run_resume,
+            feedback_context=policy.feedback_context,
             max_resumes=policy.max_resumes,
             goal_stale_days=policy.goal_stale_days,
             memory_ttl_days=policy.memory_ttl_days,
