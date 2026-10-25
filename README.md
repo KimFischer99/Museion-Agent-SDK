@@ -1,4 +1,4 @@
-# Museion Agent SDK v0.1.4
+# Museion Agent SDK v0.1.5
 
 Museion Agent SDK is developed based on Muse. It provides a proactive agent runtime for scheduled reminders, opt-in news research, persistent interests, and notification delivery.
 
