@@ -29,7 +29,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .artifacts import ArtifactRefError, missing_artifact_refs, normalize_artifact_ref
@@ -476,12 +476,23 @@ class PolicyEngine:
         reason = self._suppression_checks(proposal, topic, delivery_policy, now_ms)
         if reason:
             return self._suppressed(reason)
-        news_snapshot, reason = self._news_search_snapshot_binding(proposal, run_id, now_ms=now_ms)
+        run = self.store.get_run(run_id)
+        event = self.store.get_event(run["event_id"]) if run else None
+        job = self.store.get_job(event.job_id) if event and event.job_id else None
+        research_report = bool(job and job.obligation == "due" and job.task.get("research_topics"))
+        if research_report and not run.get("error_class"):
+            pack = self.store.get_context_pack(run["context_ref"]) if run.get("context_ref") else None
+            source_refs = {source.get("snapshot_ref") for source in (pack or {}).get("sources", [])}
+            if not source_refs.intersection(proposal.get("evidence_refs") or []):
+                return self._suppressed("research_evidence_missing")
+        news_snapshot, reason = self._news_search_snapshot_binding(
+            proposal, run_id, now_ms=now_ms, research_report=research_report
+        )
         if reason:
             return self._suppressed(reason)
 
         # Business dedup before anything else is computed.
-        business_key = self._business_key(goal_id, proposal["fact_id"], proposal.get("revision") or "0",
+        business_key = self._business_key(goal_id, event.event_id if research_report else proposal["fact_id"], "1" if research_report else proposal.get("revision") or "0",
                                           channel["channel_ref"], "notify_self")
         if self.store.has_business_key(business_key):
             return self._suppressed("duplicate_business_key")
@@ -494,6 +505,8 @@ class PolicyEngine:
             return self._suppressed(defer_reason)
 
         payload = self._notification_payload(proposal, run_id, channel, "notify_self")
+        if research_report and payload.get("body"):
+            payload["body"] = f"查证时间：{datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat()}\n" + payload["body"]
         if artifacts:
             payload["artifact_refs"] = list(artifacts)
         request = self._frozen_request(
@@ -506,6 +519,8 @@ class PolicyEngine:
         )
         if news_snapshot is not None:
             request["news_search_snapshot"] = news_snapshot
+        if research_report:
+            request["research_report"] = True
         request["obligation"] = obligation
         entry = self._entry(
             proposal=proposal,
@@ -755,7 +770,7 @@ class PolicyEngine:
         return None
 
     def _news_search_snapshot_binding(
-        self, proposal: dict[str, Any], run_id: str, *, now_ms: int
+        self, proposal: dict[str, Any], run_id: str, *, now_ms: int, research_report: bool = False
     ) -> tuple[dict[str, Any] | None, str | None]:
         """Bind news notifications to the fresh snapshot they cite.
 
@@ -769,7 +784,7 @@ class PolicyEngine:
         refs = [ref for ref in evidence_refs if isinstance(ref, str) and ref.startswith(prefix)]
         if not (isinstance(fact_id, str) and fact_id.startswith("news:") or refs):
             return None, None
-        if not isinstance(fact_id, str) or not fact_id.startswith("news:") or not refs:
+        if not refs or (not research_report and (not isinstance(fact_id, str) or not fact_id.startswith("news:"))):
             return None, "news_snapshot_unverified"
 
         run = self.store.get_run(run_id)
@@ -787,6 +802,14 @@ class PolicyEngine:
             snapshot.snapshot_id: snapshot
             for snapshot in self.store.snapshots_for("news-search", "account:public", limit=64)
         }
+        if research_report:
+            for ref in refs:
+                source = pack_sources.get(ref)
+                snapshot = snapshots.get(ref.removeprefix(prefix))
+                if (source is None or snapshot is None or snapshot.sensitivity != "public" or snapshot.tombstone
+                        or snapshot.fresh_until_ms <= now_ms):
+                    return None, "news_snapshot_unverified"
+            return None, None
         matching: list[tuple[str, int]] = []
         for ref in refs:
             source = pack_sources.get(ref)
@@ -1097,7 +1120,7 @@ class PolicyEngine:
                 isinstance(ref, str) and ref.startswith("snapshot:news-search:")
                 for ref in evidence_refs
             )
-            if is_news:
+            if is_news and not request.get("research_report"):
                 binding = request.get("news_search_snapshot")
                 if (
                     not isinstance(binding, dict)

@@ -66,6 +66,7 @@ from proactive_sdk.net import EgressBroker
 from proactive_sdk.policy import PolicyConfig
 from proactive_sdk.pi_worker import PiWorkerConfig, PiWorkerExecutor
 from proactive_sdk.proactive import ProactiveController
+from proactive_sdk.context import FileConversationPort, FileNotesMemoryPort
 from proactive_sdk.research import NewsSearchSource
 from proactive_sdk.sources import PageHashSource, RssSource, SitemapDiffSource
 
@@ -184,6 +185,12 @@ def build_agent(config=None) -> ProactiveAgent:
         sinks=(channel,) if channel is not None else (),
         policy_config=policy_config,
     )
+    note_path = os.environ.get("PAS_NOTE_FILE", "").strip()
+    if note_path:
+        agent.pack_builder.memory = FileNotesMemoryPort(agent.store, note_path)
+    conversation_path = os.environ.get("PAS_CONVERSATION_FILE", "").strip()
+    if conversation_path:
+        agent.coordinator.conversation = FileConversationPort(conversation_path)
     controller = ProactiveController(agent)
     agent.proactive = controller
     agent.registry.register(

@@ -114,6 +114,12 @@ class NewsSearchSource:
         }
 
     async def fetch_delta(self, request: SourceRequest) -> SourceBatch:
+        return await self._fetch(request, current=False)
+
+    async def fetch_current(self, request: SourceRequest) -> SourceBatch:
+        return await self._fetch(request, current=True)
+
+    async def _fetch(self, request: SourceRequest, *, current: bool) -> SourceBatch:
         if request.source_id != self.source_id or request.account_ref != self.account_ref:
             raise PASError(ErrorCode.INVALID_CONFIG, "source binding does not match request", scope="research")
         now = _utc_now()
@@ -122,7 +128,7 @@ class NewsSearchSource:
         if remaining_s <= 0:
             raise PASError(ErrorCode.DEADLINE_EXCEEDED, "source request deadline has expired", scope="research")
 
-        labels = self.topics()
+        labels = request.research_topics or self.topics()
         if not isinstance(labels, (tuple, list)):
             raise PASError(ErrorCode.INVALID_CONFIG, "topics() must return a tuple or list", scope="research")
         if len(labels) > 8:
@@ -238,7 +244,7 @@ class NewsSearchSource:
             cursor = "sha256:" + _sha256(
                 json.dumps(pairs, separators=(",", ":")).encode("utf-8"), 32
             )
-        returned_items = () if cursor == request.cursor_ref else tuple(items)
+        returned_items = () if not current and cursor == request.cursor_ref else tuple(items)
         return SourceBatch(
             source_id=self.source_id,
             account_ref=self.account_ref,

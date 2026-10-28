@@ -654,6 +654,13 @@ class JobSpec:
         if not isinstance(self.task, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "task must be an object")
         always_run = self.task.get("always_run")
+        if "require_fresh_sources" in self.task and type(self.task["require_fresh_sources"]) is not bool:
+            raise PASError(ErrorCode.INVALID_CONFIG, "task.require_fresh_sources must be boolean")
+        topics = self.task.get("research_topics")
+        if topics is not None and (not isinstance(topics, list) or not 1 <= len(topics) <= 8 or any(
+            not isinstance(topic, str) or not 1 <= len(topic.strip()) <= 128 for topic in topics
+        )):
+            raise PASError(ErrorCode.INVALID_CONFIG, "task.research_topics must contain 1..8 topics")
         if "handoff" in self.task and type(self.task["handoff"]) is not bool:
             raise PASError(ErrorCode.INVALID_CONFIG, "task.handoff must be boolean")
         if "goal_id" in self.task and (not isinstance(self.task["goal_id"], str)
@@ -1440,6 +1447,7 @@ class SourceRequest:
     scope: dict[str, Any] = field(default_factory=dict)
     cursor_ref: str | None = None
     max_items: int = 100
+    research_topics: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not 1 <= len(self.source_id) <= 128:
@@ -1452,6 +1460,10 @@ class SourceRequest:
             raise PASError(ErrorCode.INVALID_CONFIG, f"deadline: {exc}") from None
         if not isinstance(self.scope, dict):
             raise PASError(ErrorCode.INVALID_CONFIG, "scope must be an object")
+        if not isinstance(self.research_topics, tuple) or len(self.research_topics) > 8 or any(
+            not isinstance(topic, str) or not 1 <= len(topic.strip()) <= 128 for topic in self.research_topics
+        ):
+            raise PASError(ErrorCode.INVALID_CONFIG, "research_topics must contain at most 8 non-empty topics")
         if self.cursor_ref is not None and (
             not isinstance(self.cursor_ref, str) or not 1 <= len(self.cursor_ref) <= 256
         ):

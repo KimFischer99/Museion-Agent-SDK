@@ -107,10 +107,19 @@ class Job:
     goal_id: str | None = None
     handoff: bool = False
     owner: str = "pas"
+    refresh_source_ids: tuple[str, ...] = ()
+    require_fresh_sources: bool = False
+    research_topics: tuple[str, ...] = ()
 
     def to_spec(self) -> JobSpec:
         if type(self.handoff) is not bool:
             raise PASError(ErrorCode.INVALID_CONFIG, "handoff must be boolean")
+        if not isinstance(self.refresh_source_ids, (tuple, list)):
+            raise PASError(ErrorCode.INVALID_CONFIG, "refresh_source_ids must be a list")
+        if type(self.require_fresh_sources) is not bool:
+            raise PASError(ErrorCode.INVALID_CONFIG, "require_fresh_sources must be boolean")
+        if not isinstance(self.research_topics, (tuple, list)):
+            raise PASError(ErrorCode.INVALID_CONFIG, "research_topics must be a list")
         delivery_policy = dict(self.delivery_policy)
         delivery_policy.setdefault("notification_profile", self.notification_profile)
         task: dict[str, Any] = {}
@@ -122,6 +131,12 @@ class Job:
                 task["handoff"] = True
             if self.always_run:
                 task["always_run"] = True
+            if self.refresh_source_ids:
+                task["refresh_source_ids"] = list(self.refresh_source_ids)
+            if self.require_fresh_sources:
+                task["require_fresh_sources"] = True
+            if self.research_topics:
+                task["research_topics"] = list(self.research_topics)
         return JobSpec(
             job_id=self.id,
             owner=self.owner,
@@ -884,12 +899,22 @@ class ProactiveAgent:
         await self.pack_builder.memory.remember(entry)
 
     def memory_list(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        return [entry.to_dict() for entry in self.store.recall_memory(limit=limit)]
+        from .context import FileNotesMemoryPort
+        entries = self.store.recall_memory(limit=limit)
+        if isinstance(self.pack_builder.memory, FileNotesMemoryPort):
+            notes = tuple(entry for entry in self.pack_builder.memory.notes()
+                          if not self.store.memory_content_forgotten(entry.content))
+            notes = notes[:max(1, limit // 2)]
+            entries = entries[-(limit - len(notes)):] + notes if len(notes) < limit else notes
+        return [entry.to_dict() for entry in entries]
 
     def memory_candidates(self, *, limit: int = 50) -> list[dict[str, Any]]:
         return self.store.memory_candidates(limit=limit)
 
     def memory_forget(self, memory_id: str) -> bool:
+        from .context import FileNotesMemoryPort
+        if isinstance(self.pack_builder.memory, FileNotesMemoryPort) and memory_id.startswith("note:"):
+            return self.pack_builder.memory.forget(memory_id)
         return self.store.forget_memory(memory_id)
 
     def memory_consolidate(self) -> int:
@@ -1318,25 +1343,35 @@ class ProactiveAgent:
     def _rebind_store(self) -> None:
         """After a restore the Store object must be rebuilt; repoint the
         kernels that hold a store reference."""
+        previous_policy = self.policy
+        previous_dispatcher = self.dispatcher
+        previous_coordinator = self.coordinator
         self.registry.store = self.store
-        if isinstance(self.pack_builder.memory, SQLiteMemoryPort):
+        from .context import FileNotesMemoryPort
+        if isinstance(self.pack_builder.memory, (SQLiteMemoryPort, FileNotesMemoryPort)):
             self.pack_builder.memory.store = self.store
         self.grants = GrantManager(self.store)
         self.channels = OwnerChannelRegistry(self.store)
         self.approvals = ApprovalManager(self.store)
         self.feedback = FeedbackManager(self.store)
         self.policy = PolicyEngine(
-            self.store, channels=self.channels, config=self._policy_config_from_agent_config()
+            self.store, channels=self.channels, config=previous_policy.config
         )
-        self.dispatcher = OutboxDispatcher(self.store, policy=self.policy, sources=None)
+        self.dispatcher = OutboxDispatcher(self.store, policy=self.policy, sources=self.registry,
+                                           config=previous_dispatcher.config)
+        self.dispatcher._sinks.update(previous_dispatcher._sinks)
+        self.dispatcher._default_sinks = set(previous_dispatcher._default_sinks)
         self.coordinator = ProactiveCoordinator(
             self.store,
             registry=self.registry,
             pack_builder=self.pack_builder,
             executor=self.executor,
-            config=self.coordinator.config if hasattr(self.coordinator, "config") else None,
-            tool_allowlist=self.coordinator.tool_allowlist,
+            config=previous_coordinator.config,
+            tool_allowlist=previous_coordinator.tool_allowlist,
             policy_engine=self.policy,
+            conversation=previous_coordinator.conversation,
+            activity_probe=self.activity_probe,
+            artifact_root=self.state_dir / "artifacts",
         )
         self.scheduler = Scheduler(self.store, self.store.clock)
         self._hook_runner = None

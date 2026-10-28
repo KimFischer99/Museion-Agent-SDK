@@ -228,6 +228,9 @@ export interface JobSpec {
     "goal_id"?: string;
     "skill_refs"?: ReadonlyArray<string>;
     "handoff"?: boolean;
+    "refresh_source_ids"?: ReadonlyArray<string>;
+    "require_fresh_sources"?: boolean;
+    "research_topics"?: ReadonlyArray<string>;
         /** W5 compatibility switch: run the task on every slot even when no source candidate changed (pre-v2 task semantics). Default false: the two-stage path runs only w */
 "always_run"?: boolean;
   };

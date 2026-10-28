@@ -1,4 +1,4 @@
-# Museion Agent SDK v0.1.5
+# Museion Agent SDK v0.1.6
 
 Museion Agent SDK is developed based on Muse. It provides a proactive agent runtime for scheduled reminders, opt-in news research, persistent interests, and notification delivery.
 
@@ -39,6 +39,23 @@ python3 app.py say "Stop proactive notifications"
 ```
 
 Configuration is saved in `settings.json`. State defaults to `~/.local/state/museion`, or an existing runtime `state/` directory. Keep credentials and runtime data out of Git and shared release copies.
+
+For a direct scheduled request, use the trusted input with an explicit time and content:
+
+```bash
+python3 app.py say "2027-01-05T09:00:00-08:00 提醒我：带伞"
+python3 app.py say "每天 09:00 研究 NASA公开新闻并报告"
+python3 app.py say "每周一 09:00 研究 NASA 来源:nasa-public 并报告"
+python3 app.py say "每天 09:00 跟进 NASA会议 有重要进展通知我"
+```
+
+Daily, weekly, and monthly times use the configured profile timezone; interval forms such as
+`每隔30分钟` start from creation. Explicit source IDs must already be registered. These bounded forms require existing notification,
+memory and, for public research, public-read grants as applicable; unsupported time expressions need
+clarification. A successful response gives a job ID and next due time. Inspect the job and its activity
+with `pas jobs show <job-id>` and `pas jobs activity <job-id>`, and use `app.py inbox` to see actual
+local delivery. A report covers the configured public source's headlines and summaries, not full
+articles. `examples/deployment/` describes explicitly configured notes and conversation files.
 
 ## Proactive layer v2 (this branch)
 

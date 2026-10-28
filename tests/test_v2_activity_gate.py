@@ -75,6 +75,23 @@ class FakeProbe:
 
 
 class QuietAnalysisGateTests(unittest.TestCase):
+    def test_due_task_runs_during_quiet_hours_and_user_activity(self):
+        now_ms = int(datetime.fromisoformat("2026-10-20T23:30:00+08:00").timestamp() * 1000)
+        store, clock = make_store()
+        clock.set_wall(now_ms)
+        self.addCleanup(store.close)
+        job = replace(make_job(mode="task", task={"instruction": "Check", "always_run": True}),
+                      obligation="due", delivery_policy={
+                          "quiet_hours": {"start": "23:00", "end": "08:00", "timezone": "Asia/Shanghai"},
+                      })
+        store.upsert_job(job, idempotency_key="due-gate")
+        admit_job_event(store, job, observed_ms=now_ms)
+        model = ScriptedModel([silent_turn()])
+        coordinator = make_gated_coordinator(store, model, None, probe=FakeProbe(now_ms))
+        report = asyncio.run(coordinator.process_pending_run(now_ms=now_ms))
+        self.assertEqual(report.model_turns, 1)
+        self.assertNotEqual(report.silence_reason, "quiet_window")
+
     def test_night_job_is_suppressed_before_fetch_and_model(self):
         now_ms = int(datetime.fromisoformat("2026-10-20T23:30:00+08:00").timestamp() * 1000)
         store, clock = make_store()

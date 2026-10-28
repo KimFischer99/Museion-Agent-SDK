@@ -125,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="task: run every slot even without source changes (pre-v2 semantics)",
     )
     jobs.add_argument("--goal-id", help="explicit active goal binding")
+    jobs.add_argument("--refresh-source-id", action="append", default=[], help="source id to refresh (repeatable)")
+    jobs.add_argument("--require-fresh-sources", action="store_true", help="require fresh source snapshots")
+    jobs.add_argument("--research-topic", action="append", default=[], help="research topic (repeatable)")
     jobs.add_argument("--handoff", action="store_true", help="opt task into worker/compose when policy allows")
     jobs.add_argument("--grant-ref", action="append", default=[], help="grant ref (repeatable)")
     jobs.add_argument("--idempotency-key", help="idempotency key for create")
@@ -639,6 +642,9 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     always_run=args.always_run,
                     goal_id=args.goal_id,
                     handoff=args.handoff,
+                    refresh_source_ids=tuple(args.refresh_source_id),
+                    require_fresh_sources=args.require_fresh_sources,
+                    research_topics=tuple(args.research_topic),
                 ),
                 idempotency_key=args.idempotency_key or f"cli-{args.job_id}",
             )

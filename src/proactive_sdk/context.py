@@ -37,6 +37,7 @@ from .contracts import (
     RecentNotification,
     SourceBatch,
     SourceRequest,
+    content_hash,
 )
 from .store import SnapshotRecord, Store
 
@@ -100,6 +101,71 @@ class SQLiteMemoryPort:
 
     async def remember(self, entry: MemoryEntry) -> None:
         self.store.remember_memory(entry)
+
+
+class FileNotesMemoryPort:
+    """Explicitly configured read-only note combined with profile memory."""
+
+    def __init__(self, store: Store, path: str) -> None:
+        from pathlib import Path
+
+        self.store = store
+        self.path = Path(path).expanduser()
+
+    def notes(self) -> tuple[MemoryEntry, ...]:
+        from datetime import datetime, timezone
+
+        import os
+        try:
+            with self.path.open("rb") as stream:
+                raw = stream.read(65537)
+                modified_ms = os.fstat(stream.fileno()).st_mtime
+            content = raw.decode("utf-8")
+        except (OSError, UnicodeError):
+            raise PASError(ErrorCode.PROVIDER_UNAVAILABLE, "configured note could not be read", scope="memory") from None
+        if len(raw) > 65536:
+            raise PASError(ErrorCode.INVALID_CONFIG, "configured note exceeds 64 KiB", scope="memory")
+        identity = content_hash(str(self.path.resolve()))[:20]
+        timestamp = datetime.fromtimestamp(modified_ms, timezone.utc).isoformat().replace("+00:00", "Z")
+        return tuple(MemoryEntry(memory_id=f"note:{identity}:{index}", content=content[offset:offset + 2000],
+                                  source="configured-note", evidence_refs=(f"note:{identity}:{index}",),
+                                  last_confirmed_at=timestamp)
+                      for index, offset in enumerate(range(0, len(content), 2000)))
+
+    async def recall(self, *, limit: int = 16) -> tuple[MemoryEntry, ...]:
+        notes = tuple(entry for entry in self.notes() if not self.store.memory_content_forgotten(entry.content))
+        selected = notes[:max(1, limit // 2)]
+        saved = self.store.recall_memory(limit=limit)
+        return saved[-(limit - len(selected)):] + selected if len(selected) < limit else selected
+
+    def forget(self, memory_id: str) -> bool:
+        entry = next((entry for entry in self.notes() if entry.memory_id == memory_id), None)
+        if entry is None:
+            return False
+        self.store.forget_memory_content(entry.content)
+        return True
+
+    async def remember(self, entry: MemoryEntry) -> None:
+        self.store.remember_memory(entry)
+
+
+class FileConversationPort:
+    """Read an explicitly configured bounded JSON array of conversation turns."""
+
+    def __init__(self, path: str) -> None:
+        from pathlib import Path
+        self.path = Path(path).expanduser()
+
+    async def recent_turns(self, since_ms: int, limit: int) -> tuple[ConversationTurn, ...]:
+        with self.path.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise PASError(ErrorCode.INVALID_CONFIG, "conversation file exceeds 64 KiB", scope="conversation")
+        rows = json.loads(raw)
+        if not isinstance(rows, list) or len(rows) > 128:
+            raise PASError(ErrorCode.INVALID_CONFIG, "conversation file must contain at most 128 turns", scope="conversation")
+        turns = tuple(ConversationTurn(**row) for row in rows)
+        return tuple(sorted((turn for turn in turns if turn.at_ms >= since_ms), key=lambda turn: turn.at_ms)[-limit:])
 
 
 def _memory_terms(text: str) -> set[str]:
@@ -198,7 +264,7 @@ class SourceRegistry:
     def entries(self) -> tuple[SourceEntry, ...]:
         return tuple(self._entries.values())
 
-    async def fetch_delta(self, request: SourceRequest) -> SourceBatch:
+    async def fetch_delta(self, request: SourceRequest, *, current: bool = False) -> SourceBatch:
         entry = self._entries.get((request.source_id, request.account_ref))
         if entry is None:
             raise PASError(
@@ -219,7 +285,10 @@ class SourceRegistry:
             if not authorized:
                 raise PASError(ErrorCode.PERMISSION_DENIED,
                                "source account or scope is not granted", scope="sources")
-        batch = await entry.source.fetch_delta(request)
+        fetch = getattr(entry.source, "fetch_current", None) if current else entry.source.fetch_delta
+        if not callable(fetch):
+            raise PASError(ErrorCode.UNSUPPORTED_CAPABILITY, "source cannot provide current research material", scope="sources")
+        batch = await fetch(request)
         if not isinstance(batch, SourceBatch):
             raise PASError(
                 ErrorCode.INVALID_CONFIG, "source returned a non-SourceBatch result", scope="sources"

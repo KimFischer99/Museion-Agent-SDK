@@ -75,6 +75,7 @@ PROACTIVE_RPC_METHODS = (
     "jobs.delete",
     "jobs.activity",
     "input.note",
+    "proactive.input",
     "suggestions.list",
     "suggestions.resolve",
     "runs.get",

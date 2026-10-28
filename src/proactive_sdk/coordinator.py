@@ -45,11 +45,17 @@ from .contracts import (
     ErrorCode,
     ConversationPort,
     ConversationTurn,
+    ActionProposal,
+    ContextPack,
+    Decision,
+    MemoryEntry,
     PASError,
     SourceBatch,
+    SourceItem,
     content_hash,
 )
 from .executor import ExecutorContext, ExecutorOutcome, RunExecutor
+from .net import EgressBlocked
 from .store import RunLease, Store
 from .windows import quiet_end_ms
 
@@ -357,7 +363,7 @@ class ProactiveCoordinator:
 
         # Reuse the job's delivery window before fetching sources or calling a host.
         quiet_end = quiet_end_ms(job.delivery_policy, now_ms) if (
-            job is not None and mode != "reminder" and event.origin != "manual"
+            job is not None and mode != "reminder" and job.obligation != "due" and event.origin != "manual"
         ) else None
         if quiet_end is not None:
             return self._suppress(lease, "quiet_window", now_ms, next_eligible_at_ms=quiet_end)
@@ -370,6 +376,7 @@ class ProactiveCoordinator:
             self.config.idle_gate
             and job is not None
             and mode != "reminder"
+            and job.obligation != "due"
             and event.origin != "manual"
         ):
             last_activity, probe_failures = self._last_user_activity(now_ms)
@@ -428,7 +435,16 @@ class ProactiveCoordinator:
         unauthorized: list[str] = []
         source_errors: list[str] = []
         previous_cursors: dict[tuple[str, str], str | None] = {}
+        research_topics = tuple(job.task.get("research_topics", ())) if job is not None else ()
         for entry in entries:
+            if research_topics and not any(
+                grant is not None and grant.is_active(now_ms)
+                and grant.capability == entry.required_capability and grant.account_ref == entry.account_ref
+                and all(entry.scope.get(key) == value for key, value in grant.scope.items())
+                for grant in (self.store.get_grant(ref) for ref in job.grant_refs)
+            ):
+                unauthorized.append(f"{entry.source_id}:{entry.account_ref}")
+                continue
             if entry.required_capability not in context.capabilities:
                 unauthorized.append(f"{entry.source_id}:{entry.account_ref}")
                 continue
@@ -437,7 +453,11 @@ class ProactiveCoordinator:
                 previous.cursor_ref if previous is not None else None
             )
             try:
-                batch = await self.registry.fetch_delta(self._source_request(entry, now_ms))
+                request = self._source_request(entry, now_ms, research_topics=research_topics)
+                batch = await self.registry.fetch_delta(request, current=bool(research_topics))
+            except EgressBlocked as exc:
+                source_errors.append(f"{entry.source_id}:{exc.code.value}")
+                continue
             except PASError as exc:
                 if exc.code in (ErrorCode.PERMISSION_DENIED, ErrorCode.AUTH_REQUIRED):
                     unauthorized.append(f"{entry.source_id}:{entry.account_ref}")
@@ -479,6 +499,9 @@ class ProactiveCoordinator:
             # suppressions — but a task with no sources at all is pure
             # reasoning and still runs.
             if entries and not fetched:
+                if research_topics and job.obligation == "due":
+                    code = ErrorCode.PERMISSION_DENIED if unauthorized and not source_errors else ErrorCode.PROVIDER_UNAVAILABLE
+                    return self._research_failure(lease, job, code, now_ms=now_ms)
                 if unauthorized and not source_errors:
                     raise PASError(
                         ErrorCode.PERMISSION_DENIED,
@@ -517,6 +540,10 @@ class ProactiveCoordinator:
                 safe_summary=f"unauthorized: {','.join(unauthorized)[:480]}",
                 now_ms=now_ms,
             )
+        if source_errors:
+            self.store.append_run_event(
+                lease, kind="sources_failed", safe_summary=",".join(source_errors)[:480], now_ms=now_ms
+            )
 
         # ---- L1 preparation: snapshots + immutable ContextPack ----
         # Only the candidates that made the cut become snapshots; the full
@@ -534,6 +561,21 @@ class ProactiveCoordinator:
                 fresh_until=batch.fresh_until,
             )
             source_records.extend(materializer.materialize(filtered, now_ms=now_ms))
+        if research_topics:
+            for entry, batch in fetched:
+                status = SourceBatch(source_id="research-check", account_ref=entry.account_ref,
+                    observed_at=batch.observed_at, fresh_until=batch.fresh_until,
+                    items=(SourceItem(fact_id=f"research-check:{entry.source_id}", revision=lease.run_id,
+                        content=f"Source {entry.source_id} was checked at {batch.observed_at}; returned {len(batch.items)} items.",
+                        observed_at=batch.observed_at, sensitivity="public"),))
+                source_records.extend(materializer.materialize(status, now_ms=now_ms))
+            if source_errors or unauthorized:
+                status = SourceBatch(source_id="research-check", account_ref="account:public",
+                    observed_at=_ms_to_rfc3339(now_ms), fresh_until=_ms_to_rfc3339(now_ms + self.config.snapshot_default_ttl_ms),
+                    items=(SourceItem(fact_id="research-check:failures", revision=lease.run_id,
+                        content=f"Some configured sources could not be checked: {', '.join(source_errors + unauthorized)[:480]}. Do not claim those sources were checked.",
+                        observed_at=_ms_to_rfc3339(now_ms), sensitivity="public"),))
+                source_records.extend(materializer.materialize(status, now_ms=now_ms))
         turns, conversation_failed = await self._conversation_turns(lease, cutoff_ms=cutoff_ms, now_ms=now_ms)
         pending = self.store.pending_notification_summary(now_ms=cutoff_ms) if self.config.conversation_context else ()
         # A5 P3: the model sees how the owner reacted to recent deliveries.
@@ -561,7 +603,13 @@ class ProactiveCoordinator:
                 now_ms=now_ms,
                 allow_stale=not require_fresh,
                 recent_notifications=recent,
-                include_memory="memory.read" in context.capabilities,
+                include_memory="memory.read" in context.capabilities and (
+                    not research_topics or any(
+                        grant is not None and grant.is_active(now_ms) and grant.capability == "memory.read"
+                        and grant.account_ref == "account:primary"
+                        for grant in (self.store.get_grant(ref) for ref in job.grant_refs)
+                    )
+                ),
                 memory_query=instruction,
                 conversation_turns=turns,
                 pending_notifications=pending,
@@ -607,6 +655,13 @@ class ProactiveCoordinator:
                 run_request, pack, source_records,
                 instruction=instruction, cancel_event=cancel_event,
             )
+        research_refs = {record["snapshot_ref"] for record in source_records}
+        if research_topics and job.obligation == "due" and not any(
+            proposal.kind == "notify_self" and proposal.body and research_refs.intersection(proposal.evidence_refs)
+            for proposal in outcome.decision.proposals
+        ):
+            return self._research_failure(lease, job, ErrorCode.INVALID_CONFIG, now_ms=now_ms,
+                                          detail="分析未生成按期报告")
         if self.config.memory_consolidation and not staged:
             from .run_stages import validate_outcome
             validate_outcome(outcome, pack, require_reason=self._require_reason())
@@ -654,6 +709,29 @@ class ProactiveCoordinator:
             report = self._apply_policy(report, now_ms=now_ms)
         return report
 
+    def _research_failure(self, lease: RunLease, job: Any, code: ErrorCode, *, now_ms: int,
+                          detail: str = "公开来源无法读取") -> RunReport:
+        """Record a source failure and queue an auditable system status, not a research finding."""
+        message = f"研究任务 {job.job_id} 本轮未完成：{detail}（{code.value}）。未形成研究结论。"
+        ref = f"system:research-failure:{lease.run_id}"
+        entry = MemoryEntry(memory_id=ref, content=message, source="system-research-failure")
+        pack = ContextPack(task_goal_id=job.job_id, task_scope="system:research-failure",
+                           locale=self.pack_builder.locale, timezone=self.pack_builder.timezone,
+                           preferences_ref=self.pack_builder.preferences_ref, memory_refs=(ref,), memory_entries=(entry,))
+        proposal = ActionProposal(kind="notify_self", fact_id=ref, revision="1", body=message,
+                                  evidence_refs=(ref,), reason="requested")
+        decision = Decision("propose", "研究未完成", (proposal,))
+        self.store.append_run_event(lease, kind="system_research_failure", safe_summary=code.value, now_ms=now_ms)
+        context_ref = self.store.record_run_decision(
+            lease, context_pack=pack.persistent_dict(), decision=decision.to_wire_dict(),
+            proposals=[proposal.to_dict()], usage={"protocol_version": "1.0"}, now_ms=now_ms,
+            analysis_error=code.value,
+        )
+        policy = self.policy_engine.apply_to_run(lease.run_id, now_ms=now_ms) if self.policy_engine else None
+        return RunReport(run_id=lease.run_id, outcome="failed", reason=message, error_code=code.value,
+                         context_ref=context_ref, policy_outcome=policy.outcome if policy else None,
+                         queued=policy.queued if policy else 0)
+
     def _require_reason(self) -> bool:
         config = getattr(self.executor, "config", None)
         return getattr(self.executor, "require_reason", getattr(config, "require_reason", True))
@@ -663,10 +741,13 @@ class ProactiveCoordinator:
             return (), False
         truncated = 0
         failed = False
+        status = "empty"
         turns: tuple[ConversationTurn, ...] = ()
         try:
             if self.conversation is None:
-                raise ValueError("unregistered")
+                self.store.append_run_event(lease, kind="conversation_context",
+                                            safe_summary="status=unavailable count=0", now_ms=now_ms)
+                return (), True
             raw = await asyncio.wait_for(self.conversation.recent_turns(
                 cutoff_ms - self.config.conversation_window_ms, self.config.conversation_limit),
                 timeout=self.config.conversation_deadline_s)
@@ -687,12 +768,14 @@ class ProactiveCoordinator:
                 if text:
                     kept.append(replace(turn, text=text))
             turns = tuple(kept)
+            status = "ready" if turns else "empty"
         except Exception:
             # Host failures are optional-context failures; never log host error text.
             failed = True
             truncated = 0
+            status = "failed"
         self.store.append_run_event(lease, kind="conversation_context",
-            safe_summary=f"count={len(turns)} truncated_chars={truncated} failed={failed}", now_ms=now_ms)
+            safe_summary=f"status={status} count={len(turns)} truncated_chars={truncated} failed={failed}", now_ms=now_ms)
         return turns, failed
 
     def _goal_summary(self, job: Any, *, now_ms: int) -> dict[str, Any] | None:
@@ -956,7 +1039,7 @@ class ProactiveCoordinator:
         goal = f"hook:{hook_id}" if isinstance(hook_id, str) and hook_id else f"event:{event.event_id[:16]}"
         return reason[:_MAX_INSTRUCTION_CHARS], goal, f"origin:{event.origin}", "task"
 
-    def _source_request(self, entry: Any, now_ms: int) -> Any:
+    def _source_request(self, entry: Any, now_ms: int, *, research_topics: tuple[str, ...] = ()) -> Any:
         from .contracts import SourceRequest
 
         deadline = _ms_to_rfc3339(now_ms + self.config.source_fetch_deadline_s * 1000)
@@ -967,6 +1050,7 @@ class ProactiveCoordinator:
             deadline=deadline,
             scope=dict(entry.scope),
             cursor_ref=previous.cursor_ref if previous is not None else None,
+            research_topics=research_topics,
         )
 
     @staticmethod

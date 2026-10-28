@@ -16,7 +16,8 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 sys.path.insert(0, str(EXAMPLES_DIR))
@@ -115,6 +116,44 @@ class PluginRegistrationTests(unittest.TestCase):
             set(schedule["schema"]["parameters"]["required"]),
             {"job_id", "mode", "schedule", "instruction"},
         )
+
+
+class TrustedInputHookTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authorized_owner_message_reaches_trusted_input_and_reply(self):
+        env = {"PAS_HERMES_PLATFORM": "telegram", "PAS_HERMES_USER": "owner",
+               "PAS_HERMES_CHAT": "dm-1", "PAS_HERMES_PROFILE": "demo"}
+        source = SimpleNamespace(platform=SimpleNamespace(value="telegram"), user_id="owner",
+                                 chat_id="dm-1", profile="demo", chat_type="dm")
+        event = SimpleNamespace(source=source, message_id="message-1", text="每天 09:00 提醒我：喝水")
+        done = asyncio.Event()
+
+        async def send(chat_id, reply):
+            done.set()
+
+        adapter = SimpleNamespace(send=AsyncMock(side_effect=send))
+        gateway = SimpleNamespace(_is_user_authorized=MagicMock(return_value=True),
+                                  _adapter_for_source=MagicMock(return_value=adapter))
+        client = SimpleNamespace(proactive_input=MagicMock(return_value={"reply": "已安排"}))
+        with patch.dict(os.environ, env, clear=True), patch.object(plugin.tools, "_client", return_value=client):
+            result = plugin._trusted_input(event=event, gateway=gateway)
+            await asyncio.wait_for(done.wait(), timeout=2)
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual(client.proactive_input.call_args.args[0], event.text)
+        self.assertEqual(len(client.proactive_input.call_args.args[1]), 64)
+        adapter.send.assert_awaited_once_with("dm-1", "已安排")
+
+    async def test_gateway_rejected_sender_never_reaches_pas(self):
+        env = {"PAS_HERMES_PLATFORM": "telegram", "PAS_HERMES_USER": "owner",
+               "PAS_HERMES_CHAT": "dm-1", "PAS_HERMES_PROFILE": "demo"}
+        source = SimpleNamespace(platform=SimpleNamespace(value="telegram"), user_id="owner",
+                                 chat_id="dm-1", profile="demo", chat_type="dm")
+        event = SimpleNamespace(source=source, message_id="message-1", text="每天 09:00 提醒我：喝水")
+        gateway = SimpleNamespace(_is_user_authorized=MagicMock(return_value=False),
+                                  _adapter_for_source=MagicMock())
+        with patch.dict(os.environ, env, clear=True), patch.object(plugin.tools, "_client") as client:
+            self.assertIsNone(plugin._trusted_input(event=event, gateway=gateway))
+        gateway._adapter_for_source.assert_not_called()
+        client.assert_not_called()
 
 
 class PluginHandlerTests(unittest.TestCase):

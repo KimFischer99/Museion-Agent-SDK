@@ -149,6 +149,9 @@ class PasRpcClient:
             "jobs.create", {"job": job, "idempotency_key": idempotency_key}
         )
 
+    def proactive_input(self, text: str, request_id: str) -> dict:
+        return self._call("proactive.input", {"text": text, "request_id": request_id})
+
     def jobs_list(self) -> dict:
         return self._call("jobs.list", {})
 

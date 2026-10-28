@@ -477,6 +477,18 @@ class Store:
                 ) from exc
         return tuple(entries[-limit:])
 
+    def memory_content_forgotten(self, content: str) -> bool:
+        return self.db.execute("SELECT 1 FROM memory_forget_blocks WHERE content_hash=?",
+                               (content_hash(content),)).fetchone() is not None
+
+    def forget_memory_content(self, content: str) -> None:
+        digest = content_hash(content)
+        with self.transaction():
+            self.db.execute("INSERT OR REPLACE INTO memory_forget_blocks VALUES (?,?)",
+                            (digest, self.clock.wall_now_ms()))
+            self.db.execute("UPDATE memory_candidates SET state='forgotten' WHERE content_hash=?", (digest,))
+            self.db.execute("DELETE FROM memory_entries WHERE memory_id=?", ("auto:" + digest[:32],))
+
     def forget_memory(self, memory_id: str) -> bool:
         if not isinstance(memory_id, str) or not 1 <= len(memory_id) <= 128:
             raise PASError(ErrorCode.INVALID_CONFIG, "memory_id must be 1..128 chars")
@@ -3203,6 +3215,7 @@ class Store:
         source_states: tuple[dict[str, Any], ...] = (),
         memory_candidate_ttl_ms: int | None = None,
         staged: bool = False,
+        analysis_error: str | None = None,
     ) -> str:
         """Commit one finished analysis in a single transaction (§13.2:
         决策完成 = 校验 run fence + 保存审计 + 建 proposals + 更新 run state).
@@ -3330,12 +3343,13 @@ class Store:
                     ),
                 )
             self.db.execute(
-                """UPDATE runs SET state='proposed', lease_until_ms=0,
+                """UPDATE runs SET state='proposed', lease_until_ms=0, error_class=?,
                        decision_summary=?, proposal_count=?, usage_json=?,
                        silence_reason=?, candidates_count=?, truncated_count=?,
                        updated_at_ms=?
                    WHERE run_id=?""",
                 (
+                    analysis_error,
                     summary,
                     len(proposals),
                     canonical_json(usage) if usage is not None else None,

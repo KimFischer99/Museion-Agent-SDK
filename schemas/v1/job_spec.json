@@ -25,6 +25,9 @@
         "goal_id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "skill_refs": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 128 }, "maxItems": 64 },
         "handoff": { "type": "boolean", "default": false },
+        "refresh_source_ids": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" } },
+        "require_fresh_sources": { "type": "boolean" },
+        "research_topics": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 128 } },
         "always_run": {
           "type": "boolean",
           "description": "W5 compatibility switch: run the task on every slot even when no source candidate changed (pre-v2 task semantics). Default false: the two-stage path runs only when the probe produced candidates."

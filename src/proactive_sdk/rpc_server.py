@@ -269,6 +269,9 @@ class ControlPlaneServer:
                     always_run=job.get("always_run", False),
                     goal_id=job.get("goal_id"),
                     handoff=job.get("handoff", False),
+                    refresh_source_ids=job.get("refresh_source_ids", ()),
+                    require_fresh_sources=job.get("require_fresh_sources", False),
+                    research_topics=job.get("research_topics", ()),
                 ),
                 idempotency_key=str(require(p, "idempotency_key")),
             )
@@ -309,6 +312,9 @@ class ControlPlaneServer:
                         deadline=agent.store._ms_to_rfc3339(existing.deadline_ms) if existing.deadline_ms is not None else None,
                         enabled=bool(existing.enabled),
                         revision=existing.revision + 1,
+                        owner=existing.owner,
+                        reminder=existing.reminder,
+                        obligation=existing.obligation,
                     ),
                     idempotency_key=f"update-{job_id}-{existing.revision + 1}",
                 )
@@ -482,6 +488,18 @@ class ControlPlaneServer:
         d.register("goals.get", goals_get)
         d.register("jobs.pause", jobs_pause)
         d.register("jobs.resume", jobs_resume)
+        async def proactive_input(params, session):
+            from .proactive import ProactiveController
+
+            p = await params_of(params)
+            text = require(p, "text")
+            request_id = require(p, "request_id")
+            if not isinstance(text, str) or not isinstance(request_id, str) or not 1 <= len(request_id) <= 256:
+                raise PASError(ErrorCode.INVALID_CONFIG, "text and request_id must be strings", scope="rpc")
+            controller = getattr(agent, "proactive", None) or ProactiveController(agent)
+            return await controller.handle_input(text, actor=session.principal, request_id=request_id)
+
+        d.register("proactive.input", proactive_input)
         async def input_note(params, session):
             p = await params_of(params)
             grant_refs = p.get("grant_refs") or []

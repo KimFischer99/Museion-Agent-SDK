@@ -174,6 +174,12 @@ class RssSource:
         }
 
     async def fetch_delta(self, request: SourceRequest) -> SourceBatch:
+        return await self._fetch(request, current=False)
+
+    async def fetch_current(self, request: SourceRequest) -> SourceBatch:
+        return await self._fetch(request, current=True)
+
+    async def _fetch(self, request: SourceRequest, *, current: bool) -> SourceBatch:
         if request.source_id != self.source_id or request.account_ref != self.account_ref:
             raise PASError(
                 ErrorCode.INVALID_CONFIG, "source binding does not match request", scope="sources"
@@ -211,7 +217,7 @@ class RssSource:
             source_id=self.source_id,
             account_ref=self.account_ref,
             observed_at=observed_at,
-            items=tuple(items) if changed else (),
+            items=tuple(items) if current or changed else (),
             cursor_ref=cursor,
             fresh_until=rfc3339(datetime.now(timezone.utc) + timedelta(seconds=self.fresh_ttl_s)),
         )

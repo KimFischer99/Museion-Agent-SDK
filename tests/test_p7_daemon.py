@@ -105,6 +105,33 @@ def _rpc(sock_path: str, frames: list[dict]) -> list[dict]:
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_rpc_job_source_selection_survives_revision(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                async with _agent(tmp, "rpc") as agent:
+                    await agent.start()
+                    replies = await asyncio.to_thread(_rpc, f"{tmp}/pas.sock", [
+                        {"jsonrpc": "2.0", "id": 0, "method": "system.hello",
+                         "params": {"protocol_version": "1.0", "client": "t"}},
+                        {"jsonrpc": "2.0", "id": 1, "method": "jobs.create", "params": {
+                            "job": {"id": "research", "mode": "task", "schedule": {
+                                "kind": "runonce", "at": rfc3339(T0 + 10**9)},
+                                "instruction": "research", "obligation": "due", "always_run": True,
+                                "refresh_source_ids": ["news-search"], "require_fresh_sources": True},
+                            "idempotency_key": "research"}},
+                        {"jsonrpc": "2.0", "id": 2, "method": "jobs.update",
+                         "params": {"job_id": "research", "instruction": "research again"}},
+                    ])
+                    for reply in replies:
+                        self.assertNotIn("error", reply, reply)
+                    job = agent.jobs_get("research")
+                    self.assertEqual(job.obligation, "due")
+                    self.assertEqual(job.task["refresh_source_ids"], ["news-search"])
+                    self.assertTrue(job.task["require_fresh_sources"])
+                    await agent.stop()
+
+        asyncio.run(scenario())
+
     def test_start_stop_refuses_second_instance_and_cleans_lock(self):
         async def scenario():
             tmp = tempfile.mkdtemp()

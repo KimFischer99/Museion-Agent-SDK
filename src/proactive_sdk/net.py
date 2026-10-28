@@ -176,7 +176,7 @@ class EgressBroker:
                 return self._single_fetch(conn, target)
             except EgressBlocked as exc:
                 last_error = exc
-                if "refused" in str(exc) or "timed out" in str(exc):
+                if "refused" in str(exc).casefold() or "timed out" in str(exc).casefold():
                     continue  # next resolved address (v6/v4 fallback)
                 raise
             finally:

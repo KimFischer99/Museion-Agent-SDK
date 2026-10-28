@@ -16,7 +16,7 @@ threads, daemons or I/O.
 from __future__ import annotations
 
 PAS_PROTOCOL_VERSION = "1.0"
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 from .clock import Clock, FakeClock, SystemClock
 from .contracts import (

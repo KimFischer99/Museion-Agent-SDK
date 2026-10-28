@@ -30,6 +30,13 @@ Environment variables (profile-scoped, injected through the profile's `.env`):
 When unconfigured, tool calls return an explicit `ok:false` (fail closed) and plugin loading is
 unaffected.
 
+The optional `pre_gateway_dispatch` input hook is separate from model-facing tools. Set
+`PAS_HERMES_PLATFORM`, `PAS_HERMES_USER`, `PAS_HERMES_CHAT`, and `PAS_HERMES_PROFILE` to the
+exact authorized owner DM. The hook runs before gateway authentication, so it also checks the
+gateway's authorization decision itself and requires a host message ID. It routes the original
+user text to `proactive.input`; neither a model-supplied actor nor a model tool grants reminder
+authority. Without the complete binding it stays inactive.
+
 Unix calls open a fresh connection and authenticate with `system.hello` each time, so a daemon
 restart leaves no stale negotiated session. Interrupted calls fail explicitly without automatic
 replay. The host must have permission to open the daemon's 0600 socket (normally the same UID).

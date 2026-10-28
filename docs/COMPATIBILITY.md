@@ -1,5 +1,18 @@
 # Compatibility matrix (P7 / SPEC §17.3.3)
 
+## v0.1.6 verification
+
+On macOS with Python 3.14, the offline unit/contract suite passed 999 tests. Scripted
+checks cover trusted request classification and source selection, scheduled reminders,
+unchanged-source research across restart, note follow-up deduplication and forgetting,
+quiet-window report deferral, source failure feedback, and the Hermes input hook's owner
+and unauthorized paths. The Hermes hook tests use a stub host; they do not establish
+compatibility with a deployed Hermes gateway. An isolated local run fetched the NASA RSS
+feed and delivered two manually triggered reports to the local inbox using a scripted
+executor; it did not verify a real model, real scheduled wall-clock execution, or an
+external notification provider. TypeScript 5.8.3 compilation and wheel install smoke
+passed. No database migration was introduced for these changes.
+
 This document records the supported scope, the verified host versions and the unverified items.
 Host versions are not read or pinned automatically by the SDK; a deployer that upgrades a host
 must re-verify compatibility.

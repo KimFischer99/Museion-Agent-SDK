@@ -15,7 +15,7 @@
 | `proactive-hourly` | 停用 | 每小时 task + `always_run`；接好宿主上下文后再启用 |
 
 23:00–08:00 为静默时段，日通知上限 5、最小间隔 1800 秒；这些通知限制不等于模型调用上限。
-非手动的 job 在静默时段先被抑制，不抓源、不调用模型；手动触发绕过该分析门，
+机会型 job 在静默时段先被抑制；到期任务和手动触发绕过该分析门，
 投递仍受原有策略约束。reminder 继续使用确定性提醒路径。
 
 PageHash 必须出现在 `task.refresh_source_ids` 中；首轮只建 cursor 基线，无候选，
@@ -81,8 +81,15 @@ socket 为 0600，同机同 UID 可连接；token 不会绕过文件权限。
 插件提交扁平 `instruction`，`always_run` 默认 false。它仍只有公开版本的五个工具；
 生产自定义的 remind / ledger / watch 不包含在此包中。改完插件后须重启宿主网关。
 
-启用小时任务前，用自有 app factory 接入经过 profile/通道授权过滤的 `ConversationPort`
-与只读 `ActivityProbe`，再打开 `policy.conversation_context`。端口参考仓库的
+启用小时任务前，显式配置 `PAS_NOTE_FILE` 和 `PAS_CONVERSATION_FILE`，并打开
+`policy.conversation_context`。会话文件是最多 128 条的 JSON 数组，字段为
+`turn_id`、`role`、`at_ms`、`text`、`channel_ref`，须由宿主提前过滤到本 profile。
+笔记和会话文件各限 64 KiB；只读取指定文件，不扫描目录。笔记与 SQLite 记忆合并；
+`memory forget <note-id>` 会屏蔽对应内容并保留原文件；内容发生变化后需要重新判断。
+移除环境变量可停止读取整个笔记文件。
+使用 `seed.py --config ... --consent --context` 显式授权 `memory.read` 并启用小时任务。
+也可用自有 app factory 接入经过授权过滤的 `ConversationPort`
+与只读 `ActivityProbe`。端口参考仓库的
 `examples/scoped_conversation.py`；默认上下文界限是 12h / 12 轮 / 单轮 500 字 / 总 4000 字 / 2s。
 需要生产记录中的 8h / 10 / 300 / 3000，或慢站点 25s 抓取 deadline 时，
 在该 factory 传入相应 `CoordinatorConfig`，并保留 YAML 中已有的策略开关。
@@ -90,8 +97,7 @@ socket 为 0600，同机同 UID 可连接；token 不会绕过文件权限。
 
 以下行为仍需部署方实现，不能把本样例等同于生产补丁的完整复刻：IM sink 的去链接/400 字限制、
 30 秒与 30 分钟通道节流、投递前再次检查用户活动并 hold、每日模型调用成本上限、
-Hermes 文件记忆与 SQLite 学习记忆的合并，以及分类员路由与模型 JSON 剥壳。
-SDK 默认的 SQLiteMemoryPort 已能读取 store 学习记忆；只有改用文件记忆端口时才需自行合并。
+分类员路由与模型 JSON 剥壳。
 `memory_consolidation` / `goal_context` / `handoff` / `run_resume` 均保持关闭。
 首次真实外部投递和整夜行为仍应由部署操作者验收。
 
@@ -103,7 +109,7 @@ SDK 默认的 SQLiteMemoryPort 已能读取 store 学习记忆；只有改用文
 与原部署记录的一处差异：基线 facade 的 `_with_policy_defaults` 已会将
 `policy.notification_window` 的 start/end 原样写入新建 job 的静默时段；它并非完全无效。
 本样例明确使用 23:00–08:00；显式 job 静默配置优先，既有 job 不会因修改 YAML 自动回填。
-CLI/RPC 尚不支持选源字段，因此 seed 使用公开的 `JobSpec` + `jobs_upsert`，不调用私有 `_open_agent`。
+CLI/RPC 可显式指定来源和研究主题；seed 使用公开的 `JobSpec` + `jobs_upsert`。
 
 升级前停服务并用 `pas ... backup /var/lib/pas-demo/backup.bin` 备份 state，保留 `.meta.json`；
 迁移不支持降级。用新目录保留旧运行包，切换前做配置检查、doctor 与 health 验证。
