@@ -667,6 +667,67 @@ class PayloadSensitivityTests(P4TestCase):
 # --------------------------------------------------------------------------- #
 
 
+class NotificationObservationTests(P4TestCase):
+    """Stage C: observation evaluates the same notification but only records
+    a would-be result; it never queues, never consumes the business key and
+    remains queryable as explicitly undelivered."""
+
+    def test_observation_is_queryable_without_outbox_and_does_not_pollute_dedup(self):
+        # Control: the same legal opportunity notification in normal mode
+        # reaches the outbox.
+        normal_store, normal_clock, _, normal_policy, normal_job = make_stack()
+        normal_clock.set_wall(DAY)
+        normal_run = make_proposed_run(
+            normal_store, normal_clock, normal_job,
+            proposals=[notify_proposal("fact-observe-1")],
+        )
+        normal_report = normal_policy.apply_to_run(
+            normal_run, now_ms=normal_clock.wall_now_ms()
+        )
+        self.assertEqual(normal_report.outcome, "actions_queued")
+        self.assertEqual(normal_report.queued, 1)
+        self.assertEqual(len(normal_store.list_outbox()), 1)
+
+        # Observation: same proposal shape, no actions/approvals/outbox.
+        store, clock, _, policy, job = make_stack()
+        policy.config = PolicyConfig(observe_notifications=True)
+        clock.set_wall(DAY)
+        observed_run = make_proposed_run(
+            store, clock, job, proposals=[notify_proposal("fact-observe-1")]
+        )
+        observed_report = policy.apply_to_run(observed_run, now_ms=clock.wall_now_ms())
+        self.assertEqual(observed_report.outcome, "completed")
+        self.assertEqual(observed_report.queued, 0)
+        self.assertEqual(store.list_outbox(), [])
+        self.assertEqual(len(store.list_approvals()), 0)
+        self.assertEqual(
+            store.db.execute("SELECT COUNT(*) AS n FROM actions").fetchone()["n"], 0
+        )
+
+        observations = store.notification_observations(limit=1)
+        self.assertEqual(observations["count"], 1)
+        self.assertFalse(observations["truncated"])
+        item = observations["observations"][0]
+        self.assertEqual(item["delivery_state"], "not_delivered")
+        self.assertEqual(item["delivery_label"], "未投递")
+        self.assertEqual(item["observed_result"], "would_send")
+        self.assertEqual(item["body"], "明早与后端团队的评审提前到 10:00。")
+        self.assertEqual(item["evidence_refs"], ["snapshot:snap-fixture"])
+        self.assertEqual(item["proposed_result"]["destination_ref"], OWNER_CHANNEL)
+
+        # The observation did not write actions.business_key: a later real
+        # decision for the same fact/revision/destination is still queueable.
+        policy.config = PolicyConfig(observe_notifications=False)
+        real_run = make_proposed_run(
+            store, clock, job, proposals=[notify_proposal("fact-observe-1")]
+        )
+        real_report = policy.apply_to_run(real_run, now_ms=clock.wall_now_ms())
+        self.assertEqual(real_report.outcome, "actions_queued")
+        self.assertEqual(real_report.queued, 1)
+        self.assertEqual(len(store.list_outbox()), 1)
+        self.assertEqual(store.notification_observations()["count"], 1)
+
+
 class StorePrimitiveTests(P4TestCase):
     def test_grant_create_is_content_idempotent(self):
         store, clock, _, _, _ = make_stack()

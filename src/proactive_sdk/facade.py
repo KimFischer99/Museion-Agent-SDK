@@ -59,7 +59,7 @@ from .policy import (
 )
 from .scheduler import Scheduler
 from .skills import LegacySkillImporter
-from .store import Store
+from .store import JobWriteSource, Store
 
 __all__ = ["ProactiveAgent", "Job", "ChannelSink", "DB_FILENAME", "LOCK_FILENAME", "SOCKET_FILENAME"]
 
@@ -475,7 +475,11 @@ class ProactiveAgent:
     # ------------------------------------------------------------------ #
 
     def jobs_upsert(
-        self, job: Job | JobSpec, *, idempotency_key: str | None = None
+        self,
+        job: Job | JobSpec,
+        *,
+        idempotency_key: str | None = None,
+        provenance: JobWriteSource | None = None,
     ) -> Any:
         """Create or revise a job (trusted entry point).
 
@@ -490,6 +494,10 @@ class ProactiveAgent:
         looks like this"): re-submitting identical content is a no-op, and
         changing it is a new revision. Pass an explicit key when you want
         two *different* jobs to share one revision history.
+
+        ``provenance`` comes from the authenticated write boundary, not
+        from ``JobSpec``.  When a low-level caller has no source context the
+        store records ``unspecified`` rather than guessing a user identity.
         """
         spec = job.to_spec() if isinstance(job, Job) else job
         spec = self._with_policy_defaults(spec)
@@ -502,7 +510,15 @@ class ProactiveAgent:
                     raise PASError(ErrorCode.INVALID_CONFIG, "new or changed goal binding requires an active goal")
         if idempotency_key is None:
             idempotency_key = f"job:{content_hash(dataclasses.asdict(spec))[:32]}"
-        return self.scheduler.register_job(spec, idempotency_key=idempotency_key)
+        if provenance is None:
+            provenance = JobWriteSource(
+                entry_kind="sdk",
+                actor="unspecified",
+                request_id=idempotency_key,
+            )
+        return self.scheduler.register_job(
+            spec, idempotency_key=idempotency_key, provenance=provenance
+        )
 
     def grant(
         self,
@@ -720,7 +736,17 @@ class ProactiveAgent:
             delivery_policy=dict(claimed["delivery_policy"]),
             misfire_policy=claimed["misfire_policy"],
         )
-        created = self.jobs_upsert(frozen, idempotency_key=f"suggestion:{suggestion_id}")
+        created = self.jobs_upsert(
+            frozen,
+            idempotency_key=f"suggestion:{suggestion_id}",
+            # The acceptance action is the trusted source; the suggestion
+            # id is the correlation/frozen-input reference.
+            provenance=JobWriteSource(
+                entry_kind="suggestion",
+                actor=actor,
+                request_id=suggestion_id,
+            ),
+        )
         return self.store.attach_watch_job(
             suggestion_id, created_job_id=created.job_id, now_ms=now
         )
@@ -728,20 +754,73 @@ class ProactiveAgent:
     def jobs_get(self, job_id: str) -> Any:
         return self.store.get_job(job_id)
 
+    def jobs_provenance(self, job_id: str) -> dict[str, Any]:
+        """Task authorization provenance and recorded revision history.
+
+        Read-only.  A legacy job with no migration-era record is reported
+        as ``not_recorded``; the current jobs row is never used to invent a
+        source, actor or historical grant list.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise PASError(ErrorCode.INVALID_CONFIG, f"unknown job {job_id!r}", scope="jobs")
+        recorded = self.store.list_job_provenance(job_id)
+        current = next((row for row in recorded if row.revision == job.revision), None)
+        current_view = current.to_dict() if current is not None else {
+            "job_id": job_id,
+            "revision": job.revision,
+            "recorded": False,
+            "source_status": "not_recorded",
+            "source_label": "来源未记录",
+            "entry_kind": None,
+            "authenticated_actor": None,
+            "request_id": None,
+            "host_ref": None,
+            "input_hash": None,
+            "recorded_at_ms": None,
+            "task": None,
+            "grant_refs": [],
+            "job_spec": None,
+            "raw_input_stored": False,
+        }
+        return {
+            "job_id": job_id,
+            "current_revision": job.revision,
+            "recorded": current is not None,
+            "source_status": "recorded" if current is not None else "not_recorded",
+            "source_label": "来源已记录" if current is not None else "来源未记录",
+            "current": current_view,
+            "revisions": [row.to_dict() for row in recorded],
+        }
+
     def jobs_list(self, *, enabled: bool | None = None) -> list[Any]:
         return self.store.list_jobs(enabled=enabled)
 
-    def jobs_pause(self, job_id: str) -> Any:
+    def jobs_pause(
+        self, job_id: str, *, provenance: JobWriteSource | None = None
+    ) -> Any:
         job = self.store.get_job(job_id)
         if job is None:
             raise PASError(ErrorCode.INVALID_CONFIG, f"unknown job {job_id!r}", scope="jobs")
-        return self.store.set_job_enabled(job_id, enabled=False, expected_revision=job.revision)
+        return self.store.set_job_enabled(
+            job_id,
+            enabled=False,
+            expected_revision=job.revision,
+            provenance=provenance,
+        )
 
-    def jobs_resume(self, job_id: str) -> Any:
+    def jobs_resume(
+        self, job_id: str, *, provenance: JobWriteSource | None = None
+    ) -> Any:
         job = self.store.get_job(job_id)
         if job is None:
             raise PASError(ErrorCode.INVALID_CONFIG, f"unknown job {job_id!r}", scope="jobs")
-        return self.store.set_job_enabled(job_id, enabled=True, expected_revision=job.revision)
+        return self.store.set_job_enabled(
+            job_id,
+            enabled=True,
+            expected_revision=job.revision,
+            provenance=provenance,
+        )
 
     def jobs_delete(self, job_id: str, *, reason: str | None = None) -> dict[str, Any]:
         """The user's "delete" action, with the audit trail preserved.
@@ -951,7 +1030,13 @@ class ProactiveAgent:
         return self.store.list_grants(include_revoked=include_revoked)
 
     def approvals_pending(self) -> list[Any]:
-        return self.approvals.pending()
+        """Pending approvals that are actionable now.
+
+        The raw state query stays available through ``store.list_approvals``
+        for audit work; the user-facing listing excludes expired approvals
+        and approvals whose grant has expired or been revoked.
+        """
+        return self.store.list_active_approvals(now_ms=self.store.clock.wall_now_ms())
 
     def approvals_get(self, approval_id: str) -> Any:
         return self.store.get_approval(approval_id)
@@ -1139,6 +1224,33 @@ class ProactiveAgent:
     # Status, health, backup/restore, export/delete (§14.1 / §17.2)
     # ------------------------------------------------------------------ #
 
+    def manual_todos(self, *, limit: int = 50) -> dict[str, Any]:
+        """Bounded read-only projection of current human-attention items."""
+        return self.store.current_issues(
+            now_ms=self.store.clock.wall_now_ms(), limit=limit
+        )
+
+    #: Wording used by the implementation plan; kept as a discoverable
+    #: alias rather than a second projection with different semantics.
+    def current_issues(self, *, limit: int = 50) -> dict[str, Any]:
+        return self.manual_todos(limit=limit)
+
+    def notification_observations(
+        self,
+        *,
+        limit: int = 50,
+        run_id: str | None = None,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Bounded, read-only query for stage-C notification observations.
+
+        Every item is explicitly marked ``not_delivered``; observed proposals
+        were never turned into actions, approvals or outbox rows.
+        """
+        return self.store.notification_observations(
+            limit=limit, run_id=run_id, job_id=job_id
+        )
+
     def status(self) -> dict[str, Any]:
         now = self.store.clock.wall_now_ms()
         jobs = self.store.list_jobs()
@@ -1164,6 +1276,10 @@ class ProactiveAgent:
             # able to see that without opening the ledger.
             "run_tool_authority": self.store.run_tool_authority_counts(),
             "outbox": outbox,
+            # Additive status fields: old counters stay unchanged and this
+            # projection never mutates the ledgers it reads.
+            "manual_todos": self.manual_todos(),
+            "current_issues": self.manual_todos(),
             "inbox_unread": len(self.store.list_inbox(unread_only=True, limit=1000)),
             "grants_active": len(self.store.active_capabilities(now_ms=now)),
             "health": health,
@@ -1273,6 +1389,7 @@ class ProactiveAgent:
             cadence=policy.cadence,
             cadence_min_gap_seconds=policy.cadence_min_gap_seconds,
             cadence_max_per_day=policy.cadence_max_per_day,
+            observe_notifications=policy.observe_notifications,
         )
 
     def _assemble_builtin_executor(self, model: Any, include_builtin: bool) -> Any:

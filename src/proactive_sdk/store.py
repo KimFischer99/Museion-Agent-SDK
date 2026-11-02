@@ -67,6 +67,8 @@ __all__ = [
     "ApprovalRecord",
     "OutboxLease",
     "ReminderAdmission",
+    "JobWriteSource",
+    "JobProvenanceRecord",
     "MIGRATION_COUNT",
 ]
 
@@ -95,6 +97,7 @@ def _policy_timezone(delivery_policy: dict[str, Any]) -> str | None:
     return None
 
 _MIGRATION_NAME_RE = re.compile(r"m(\d+)_[a-z0-9_]+\.sql")
+_SOURCE_ENTRY_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 
 def _load_migrations() -> tuple[tuple[int, str], ...]:
@@ -169,6 +172,80 @@ class JobRecord:
     obligation: str = "opportunistic"
     stopped_at_ms: int | None = None
     stop_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class JobWriteSource:
+    """Trusted metadata for one job write.
+
+    This object is deliberately not part of :class:`JobSpec`: model output,
+    request bodies, source content and Skills cannot populate it.  Callers
+    at an authenticated boundary construct it from values they already own
+    (the authenticated principal, a correlation/request id, a host ref and,
+    optionally, a digest of the raw trusted input).  ``unspecified`` is an
+    honest fallback for low-level SDK/system writes, never a fabricated
+    user request.
+    """
+
+    entry_kind: str = "unspecified"
+    actor: str = "unspecified"
+    request_id: str | None = None
+    host_ref: str | None = None
+    #: SHA-256 digest of the trusted input.  Raw input is never stored here.
+    input_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entry_kind, str) or not _SOURCE_ENTRY_RE.fullmatch(self.entry_kind):
+            raise PASError(ErrorCode.INVALID_CONFIG, "provenance.entry_kind is invalid", scope="jobs")
+        if not isinstance(self.actor, str) or not 1 <= len(self.actor.strip()) <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "provenance.actor is required", scope="jobs")
+        for name, value in (("request_id", self.request_id), ("host_ref", self.host_ref)):
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 256):
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"provenance.{name} must be 1..256 chars", scope="jobs"
+                )
+        if self.input_hash is not None and (
+            not isinstance(self.input_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", self.input_hash)
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "provenance.input_hash must be a sha256 hex digest", scope="jobs"
+            )
+
+
+@dataclass(frozen=True)
+class JobProvenanceRecord:
+    """One immutable ``(job_id, revision)`` source record."""
+
+    job_id: str
+    revision: int
+    entry_kind: str
+    authenticated_actor: str
+    request_id: str | None
+    host_ref: str | None
+    input_hash: str
+    recorded_at_ms: int
+    task: dict[str, Any]
+    grant_refs: tuple[str, ...]
+    job_spec: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "revision": self.revision,
+            "recorded": True,
+            "source_status": "recorded",
+            "source_label": "来源已记录",
+            "entry_kind": self.entry_kind,
+            "authenticated_actor": self.authenticated_actor,
+            "request_id": self.request_id,
+            "host_ref": self.host_ref,
+            "input_hash": self.input_hash,
+            "recorded_at_ms": self.recorded_at_ms,
+            "task": self.task,
+            "grant_refs": list(self.grant_refs),
+            "job_spec": self.job_spec,
+            "raw_input_stored": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -870,8 +947,14 @@ class Store:
         idempotency_key: str,
         now_ms: int | None = None,
         initial_next_due_ms: int | None = None,
+        provenance: JobWriteSource | None = None,
     ) -> JobRecord:
         """Create or revise a job.
+
+        ``provenance`` is trusted metadata supplied by the authenticated
+        write boundary; it is not part of the JobSpec and is never derived
+        from model output.  A provenance row is inserted inside this same
+        transaction for every new ``(job_id, revision)``.
 
         - New job: stored at ``spec.revision`` (use 1 for a fresh job).
         - Existing job: ``spec.revision`` must equal current revision + 1
@@ -885,7 +968,9 @@ class Store:
         now = self.clock.wall_now_ms() if now_ms is None else now_ms
         if not idempotency_key or len(idempotency_key) > 256:
             raise PASError(ErrorCode.INVALID_CONFIG, "idempotency_key must be 1..256 chars")
-        request_hash = content_hash(spec.to_dict())
+        source = provenance or JobWriteSource()
+        spec_dict = spec.to_dict()
+        request_hash = content_hash(spec_dict)
         resolved_misfire = spec.misfire_policy or (
             "coalesce_latest" if spec.mode == "heartbeat" else "grace_once"
         )
@@ -980,6 +1065,7 @@ class Store:
                 " VALUES (?,?,?,?)",
                 (idempotency_key, request_hash, spec.job_id, now),
             )
+            self._write_job_provenance_tx(spec_dict, source, now)
             record = self._read_job(spec.job_id)
             assert record is not None
             return record
@@ -998,7 +1084,13 @@ class Store:
         return [record for record in records if record is not None]
 
     def set_job_enabled(
-        self, job_id: str, *, expected_revision: int, enabled: bool, now_ms: int | None = None
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        enabled: bool,
+        now_ms: int | None = None,
+        provenance: JobWriteSource | None = None,
     ) -> JobRecord:
         """Pause or resume with optimistic revision.
 
@@ -1008,6 +1100,7 @@ class Store:
         their grace window, strict jobs expire).
         """
         now = self.clock.wall_now_ms() if now_ms is None else now_ms
+        source = provenance or JobWriteSource()
         with self.transaction():
             cursor = self.db.execute(
                 "SELECT revision, stopped_at_ms FROM jobs WHERE job_id=?", (job_id,)
@@ -1041,6 +1134,13 @@ class Store:
                     " WHERE job_id=? AND revision=?",
                     (expected_revision + 1, 0, now, job_id, expected_revision),
                 )
+            version_row = self.db.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            assert version_row is not None
+            self._write_job_provenance_tx(
+                self._job_spec_dict_from_row(version_row), source, now
+            )
             record = self._read_job(job_id)
             assert record is not None
             return record
@@ -1868,6 +1968,388 @@ class Store:
             sql + " ORDER BY created_at_ms DESC, rowid DESC LIMIT ?", (*params, int(limit))
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # Current human-attention projection (phase A: items 2/6/7)
+    # ------------------------------------------------------------------ #
+    #
+    # This is deliberately a read-only projection over the ledgers that
+    # already exist.  It is not a second task/issue store: approvals,
+    # outbox rows and job activity remain authoritative, and resolving
+    # them makes the corresponding item disappear on the next read.
+
+    _ANALYSIS_SUCCESS_REASONS = frozenset({"no_source_change", "l0_no_source_change"})
+    _ANALYSIS_UNAUTHORIZED_REASON = "l0_source_unauthorized"
+    _SOURCE_CHECK_KINDS = (
+        "source_check_ok",
+        "source_check_partial",
+        "source_check_retryable_failure",
+        "source_check_unauthorized",
+    )
+    _ISSUE_PRIORITY = {
+        "approval_pending": 0,
+        "delivery_unknown": 1,
+        "approval_blocked": 2,
+        "job_failed": 2,
+        "source_unavailable": 2,
+        "source_unauthorized": 2,
+        "analysis_failed": 2,
+        "delivery_failed": 2,
+    }
+
+    @staticmethod
+    def _issue_item(
+        *,
+        object_ref: str,
+        kind: str,
+        category: str,
+        occurred_at_ms: int,
+        reason: str,
+        handling: str,
+        **refs: Any,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "object_ref": object_ref,
+            "kind": kind,
+            "category": category,
+            "occurred_at_ms": int(occurred_at_ms),
+            "reason": str(reason)[:500],
+            "handling": handling,
+        }
+        for key, value in refs.items():
+            if value is not None:
+                item[key] = value
+        return item
+
+    def list_active_approvals(self, *, now_ms: int) -> list[ApprovalRecord]:
+        """Currently actionable pending approvals.
+
+        ``list_approvals(state='pending')`` intentionally remains the raw
+        state query for audit callers.  This method adds the two validity
+        checks a person needs: the approval itself has not expired and its
+        grant has not expired or been revoked.
+        """
+        rows = self.db.execute(
+            """SELECT ap.* FROM approvals ap
+               JOIN grants g ON g.grant_id=ap.grant_id
+               WHERE ap.state='pending' AND ap.expires_at_ms>?
+                 AND g.revoked_at_ms IS NULL
+                 AND (g.expires_at_ms IS NULL OR g.expires_at_ms>?)
+               ORDER BY ap.created_at_ms, ap.approval_id""",
+            (int(now_ms), int(now_ms)),
+        ).fetchall()
+        return [self._approval_record(row) for row in rows]
+
+    def current_issues(self, *, now_ms: int, limit: int = 50) -> dict[str, Any]:
+        """Bounded, read-only projection of items that need a human.
+
+        The result contains approvals that are still valid, deliveries
+        whose outcome is unknown/failed terminally, and per-job analysis
+        faults.  Quiet windows, ordinary deferrals and healthy waiting are
+        not issues.  A retryable opportunistic fault is promoted only
+        after three consecutive real source-check failures; a real check
+        success for the same job clears that streak.  Other jobs' success
+        never clears it because every query is scoped by job.
+        """
+        if not isinstance(now_ms, int) or isinstance(now_ms, bool):
+            raise PASError(ErrorCode.INVALID_CONFIG, "now_ms must be an integer", scope="status")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be an integer in 1..200", scope="status")
+        items: list[dict[str, Any]] = []
+
+        # 1) Frozen-parameter approvals.  Expired/invalid approvals are not
+        # shown as actionable approvals; if they still gate an active
+        # action they become an explicit "job blocked" item below.
+        approval_rows = self.db.execute(
+            """SELECT ap.approval_id, ap.grant_id, ap.grant_version,
+                      ap.expires_at_ms, ap.created_at_ms,
+                      g.revoked_at_ms AS grant_revoked_at_ms,
+                      g.expires_at_ms AS grant_expires_at_ms,
+                      ac.action_id, ac.state AS action_state, ac.run_id,
+                      r.state AS run_state,
+                      e.job_id AS job_id, j.stopped_at_ms AS job_stopped_at_ms
+               FROM approvals ap
+               JOIN grants g ON g.grant_id=ap.grant_id
+               LEFT JOIN actions ac ON ac.approval_id=ap.approval_id
+               LEFT JOIN runs r ON r.run_id=ac.run_id
+               LEFT JOIN events e ON e.event_id=r.event_id
+               LEFT JOIN jobs j ON j.job_id=e.job_id
+               WHERE ap.state='pending'
+               ORDER BY ap.created_at_ms, ap.approval_id
+               LIMIT ?""",
+            (limit + 1,),
+        ).fetchall()
+        seen_approvals: set[str] = set()
+        for row in approval_rows:
+            approval_id = str(row["approval_id"])
+            if approval_id in seen_approvals:
+                continue
+            seen_approvals.add(approval_id)
+            grant_valid = row["grant_revoked_at_ms"] is None and (
+                row["grant_expires_at_ms"] is None or int(row["grant_expires_at_ms"]) > now_ms
+            )
+            approval_valid = int(row["expires_at_ms"]) > now_ms and grant_valid
+            if approval_valid:
+                items.append(
+                    self._issue_item(
+                        object_ref=f"approval:{approval_id}",
+                        kind="approval",
+                        category="approval_pending",
+                        occurred_at_ms=int(row["created_at_ms"]),
+                        reason=f"审批待处理：授权 {row['grant_id']} 的冻结操作需要确认。",
+                        handling=f"pas approvals resolve {approval_id} --approve|--deny",
+                        approval_id=approval_id,
+                        grant_id=row["grant_id"],
+                        job_id=row["job_id"],
+                    )
+                )
+                continue
+
+            # The approval is no longer actionable.  Do not silently drop
+            # the associated task if it is still blocked on this approval.
+            action_still_active = (
+                row["action_state"] in ("planned", "approved", "queued")
+                or row["run_state"] == "waiting_for_approval"
+            )
+            if not action_still_active or row["job_stopped_at_ms"] is not None:
+                continue
+            expired = int(row["expires_at_ms"]) <= now_ms
+            category = "approval_blocked"
+            reason = (
+                "审批已过期，关联任务仍受阻；需要检查并处理。"
+                if expired
+                else "审批依赖的授权已失效，关联任务仍受阻；需要检查并处理。"
+            )
+            job_id = row["job_id"]
+            items.append(
+                self._issue_item(
+                    object_ref=(
+                        f"job:{job_id}:approval:{approval_id}"
+                        if job_id else f"approval:{approval_id}:blocked"
+                    ),
+                    kind="job",
+                    category=category,
+                    occurred_at_ms=int(row["expires_at_ms"]),
+                    reason=reason,
+                    handling=(
+                        f"pas approvals resolve {approval_id} --deny；"
+                        + (f"随后查看 pas jobs activity {job_id}" if job_id else "随后检查任务状态")
+                    ),
+                    approval_id=approval_id,
+                    grant_id=row["grant_id"],
+                    job_id=job_id,
+                    action_id=row["action_id"],
+                )
+            )
+
+        # 2) Delivery outcomes that still need a person.  delivery_unknown
+        # is never expired or cleared by elapsed time; only an authoritative
+        # reconciliation or a real terminal state leaves this projection.
+        outbox_rows = self.db.execute(
+            """SELECT o.message_id, o.action_id, o.state, o.reason,
+                      o.created_at_ms, o.destination_ref,
+                      ac.source, ac.request_json, ac.run_id,
+                      e.job_id AS event_job_id
+               FROM outbox o
+               JOIN actions ac ON ac.action_id=o.action_id
+               LEFT JOIN runs r ON r.run_id=ac.run_id
+               LEFT JOIN events e ON e.event_id=r.event_id
+               WHERE o.state IN ('delivery_unknown','failed_terminal')
+               ORDER BY o.created_at_ms, o.message_id
+               LIMIT ?""",
+            (limit + 1,),
+        ).fetchall()
+        for row in outbox_rows:
+            job_id = row["event_job_id"]
+            if job_id is None and row["source"] == "reminder":
+                try:
+                    request = canonical_loads(row["request_json"])
+                except (TypeError, ValueError):
+                    request = None
+                if isinstance(request, dict) and isinstance(request.get("job_id"), str):
+                    job_id = request["job_id"]
+            category = "delivery_unknown" if row["state"] == "delivery_unknown" else "delivery_failed"
+            if category == "delivery_unknown":
+                reason = row["reason"] or "投递结果未确认，需要通过权威回执核实。"
+                handling = (
+                    f"pas status；通过受信控制面核实 {row['message_id']} "
+                    "（不重发未确认通知）"
+                )
+            else:
+                reason = row["reason"] or "投递进入失败终态，需要人工检查。"
+                handling = f"pas jobs activity {job_id}" if job_id else "pas status"
+            items.append(
+                self._issue_item(
+                    object_ref=f"delivery:{row['message_id']}",
+                    kind="delivery",
+                    category=category,
+                    occurred_at_ms=int(row["created_at_ms"] or 0),
+                    reason=str(reason),
+                    handling=handling,
+                    message_id=row["message_id"],
+                    action_id=row["action_id"],
+                    job_id=job_id,
+                    destination_ref=row["destination_ref"],
+                )
+            )
+
+        # 3) Per-job analysis faults.  The activity ledger keeps the raw
+        # history; the projection only answers whether the CURRENT revision
+        # still has an unresolved fault.  Quiet/idle suppressions are
+        # deliberately not recovery and not new failures.
+        for job in self.list_jobs():
+            if not job.enabled or job.stopped_at_ms is not None:
+                continue
+            analysis_rows = self.db.execute(
+                """SELECT activity_id, state, reason, retryable, created_at_ms, run_id
+                   FROM job_activity
+                   WHERE job_id=? AND job_revision=? AND phase='analysis'
+                     AND (
+                       state IN ('proposed','failed')
+                       OR retryable=1
+                       OR (state='suppressed' AND reason IN
+                           ('no_source_change','l0_no_source_change','l0_source_unauthorized'))
+                     )
+                   ORDER BY created_at_ms DESC, rowid DESC
+                   LIMIT 64""",
+                (job.job_id, job.revision),
+            ).fetchall()
+            source_events = self.db.execute(
+                """SELECT ev.kind, ev.safe_summary, ev.created_at_ms, ev.run_id
+                   FROM run_events ev
+                   JOIN runs r ON r.run_id=ev.run_id
+                   JOIN events e ON e.event_id=r.event_id
+                   WHERE e.job_id=? AND e.job_revision=?
+                     AND ev.kind IN (?,?,?,?)
+                   ORDER BY ev.created_at_ms DESC, ev.rowid DESC
+                   LIMIT 3""",
+                (job.job_id, job.revision, *self._SOURCE_CHECK_KINDS),
+            ).fetchall()
+
+            analysis_issue: dict[str, Any] | None = None
+            if analysis_rows:
+                first = analysis_rows[0]
+                reason = first["reason"] or "任务分析失败，需要检查 activity。"
+                success = first["state"] == "proposed" or (
+                    first["state"] == "suppressed" and reason in self._ANALYSIS_SUCCESS_REASONS
+                )
+                unauthorized = (
+                    first["state"] == "suppressed"
+                    and reason == self._ANALYSIS_UNAUTHORIZED_REASON
+                )
+                if unauthorized:
+                    analysis_issue = self._issue_item(
+                        object_ref=f"job:{job.job_id}:analysis",
+                        kind="job",
+                        category="source_unauthorized",
+                        occurred_at_ms=int(first["created_at_ms"]),
+                        reason="来源授权缺失，需要人工处理。",
+                        handling=f"pas jobs activity {job.job_id}",
+                        job_id=job.job_id,
+                        run_id=first["run_id"],
+                    )
+                elif not success and first["state"] == "failed" and job.obligation == "due":
+                    analysis_issue = self._issue_item(
+                        object_ref=f"job:{job.job_id}:analysis",
+                        kind="job",
+                        category="job_failed",
+                        occurred_at_ms=int(first["created_at_ms"]),
+                        reason=str(reason),
+                        handling=f"pas jobs activity {job.job_id}",
+                        job_id=job.job_id,
+                        run_id=first["run_id"],
+                    )
+                elif not success and first["state"] == "failed" and not bool(first["retryable"]):
+                    analysis_issue = self._issue_item(
+                        object_ref=f"job:{job.job_id}:analysis",
+                        kind="job",
+                        category="analysis_failed",
+                        occurred_at_ms=int(first["created_at_ms"]),
+                        reason=str(reason),
+                        handling=f"pas jobs activity {job.job_id}",
+                        job_id=job.job_id,
+                        run_id=first["run_id"],
+                    )
+                elif not source_events and not success and bool(first["retryable"]) and first["state"] in ("failed", "suppressed"):
+                    # Legacy rows predating the structured source-check
+                    # event: the retryable flag was already machine-written,
+                    # so counting it is safe and does not parse prose.
+                    streak = 0
+                    for row in analysis_rows:
+                        if row["state"] in ("failed", "suppressed") and bool(row["retryable"]):
+                            streak += 1
+                        else:
+                            break
+                    if streak >= 3:
+                        analysis_issue = self._issue_item(
+                            object_ref=f"job:{job.job_id}:analysis",
+                            kind="job",
+                            category="analysis_failed",
+                            occurred_at_ms=int(analysis_rows[streak - 1]["created_at_ms"]),
+                            reason=f"连续 {streak} 次可重试分析失败：{reason}",
+                            handling=f"pas jobs activity {job.job_id}",
+                            job_id=job.job_id,
+                            run_id=first["run_id"],
+                        )
+
+            source_issue: dict[str, Any] | None = None
+            if source_events:
+                latest = source_events[0]
+                if latest["kind"] == "source_check_unauthorized":
+                    source_issue = self._issue_item(
+                        object_ref=f"job:{job.job_id}:analysis",
+                        kind="job",
+                        category="source_unauthorized",
+                        occurred_at_ms=int(latest["created_at_ms"]),
+                        reason="来源授权缺失，需要人工处理。",
+                        handling=f"pas jobs activity {job.job_id}",
+                        job_id=job.job_id,
+                        run_id=latest["run_id"],
+                    )
+                elif (
+                    len(source_events) == 3
+                    and all(row["kind"] == "source_check_retryable_failure" for row in source_events)
+                ):
+                    latest_reason = None
+                    if analysis_rows:
+                        latest_reason = analysis_rows[0]["reason"]
+                    source_issue = self._issue_item(
+                        object_ref=f"job:{job.job_id}:analysis",
+                        kind="job",
+                        category="source_unavailable",
+                        occurred_at_ms=int(source_events[2]["created_at_ms"]),
+                        reason=(
+                            f"连续 3 次可重试来源故障，分析未能执行。"
+                            + (f" 最近原因：{latest_reason}" if latest_reason else "")
+                        ),
+                        handling=f"pas jobs activity {job.job_id}",
+                        job_id=job.job_id,
+                        run_id=latest["run_id"],
+                    )
+
+            chosen = analysis_issue
+            if source_issue is not None and (
+                chosen is None or chosen["category"] == "analysis_failed"
+            ):
+                chosen = source_issue
+            if chosen is not None:
+                items.append(chosen)
+
+        items.sort(
+            key=lambda item: (
+                self._ISSUE_PRIORITY.get(item["category"], 3),
+                item["occurred_at_ms"],
+                item["object_ref"],
+            )
+        )
+        truncated = len(items) > limit
+        return {
+            "items": items[:limit],
+            "returned": min(len(items), limit),
+            "limit": limit,
+            "truncated": truncated,
+            "total_at_least": len(items),
+        }
 
     # ------------------------------------------------------------------ #
     # Watch suggestions (SPEC §22.1 item 7)
@@ -3145,6 +3627,8 @@ class Store:
         candidates_count: int = 0,
         truncated_count: int = 0,
         next_eligible_at_ms: int | None = None,
+        source_check_kind: str | None = None,
+        source_check_summary: str | None = None,
     ) -> None:
         """End a run before any model call with its machine reason (§5.3
         L0: 空清单、无变化、未授权等直接结束，记录机器原因但不通知).
@@ -3176,6 +3660,25 @@ class Store:
                 "next_eligible_at_ms must be a positive epoch-ms integer",
                 scope="runs",
             )
+        if source_check_kind is not None and source_check_kind not in (
+            "source_check_ok",
+            "source_check_partial",
+            "source_check_retryable_failure",
+            "source_check_unauthorized",
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "source_check_kind is not a known structured outcome",
+                scope="runs",
+            )
+        if source_check_summary is not None and (
+            not isinstance(source_check_summary, str) or len(source_check_summary) > 500
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG,
+                "source_check_summary must be at most 500 chars",
+                scope="runs",
+            )
         with self.transaction():
             self._require_active_claim(lease, now_ms)
             seq = self.db.execute(
@@ -3186,6 +3689,21 @@ class Store:
                    VALUES (?,?, 'suppressed', ?, NULL, ?)""",
                 (lease.run_id, seq, reason, now_ms),
             )
+            if source_check_kind is not None:
+                # Keep the historical 'suppressed' row at seq 1 (callers and
+                # operators rely on that order); the structured source-check
+                # outcome follows it in the same transaction.
+                self.db.execute(
+                    """INSERT INTO run_events(run_id, seq, kind, safe_summary, detail_ref, created_at_ms)
+                       VALUES (?,?,?,?,NULL,?)""",
+                    (
+                        lease.run_id,
+                        seq + 1,
+                        source_check_kind,
+                        source_check_summary,
+                        now_ms,
+                    ),
+                )
             self.db.execute(
                 """UPDATE runs SET state='suppressed', lease_until_ms=0,
                        silence_reason=?, candidates_count=?, truncated_count=?,
@@ -3402,6 +3920,94 @@ class Store:
             }
             for row in rows
         ]
+
+    def notification_observations(
+        self, *, limit: int = 50, run_id: str | None = None, job_id: str | None = None
+    ) -> dict[str, Any]:
+        """Bounded read-only view of stage-C notification observations.
+
+        Rows come from the existing ``run_proposals`` verdict ledger; there
+        is no observation table and this method never mutates either the
+        proposals or the outbox. ``delivery_state`` is always
+        ``not_delivered``: an observed notification was never queued.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be an integer in 1..100")
+        where = [
+            "p.policy_json IS NOT NULL",
+            "json_extract(p.policy_json, '$.observed') = 1",
+        ]
+        params: list[Any] = []
+        if run_id is not None:
+            if not isinstance(run_id, str) or not run_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "run_id must be a non-empty string")
+            where.append("p.run_id = ?")
+            params.append(run_id)
+        if job_id is not None:
+            if not isinstance(job_id, str) or not job_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "job_id must be a non-empty string")
+            where.append("e.job_id = ?")
+            params.append(job_id)
+        params.append(limit + 1)
+        rows = self.db.execute(
+            """SELECT p.proposal_id, p.run_id, e.job_id, p.seq, p.kind, p.fact_id,
+                      p.revision, p.body, p.arguments_json, p.evidence_refs_json,
+                      p.expires_at_ms, p.reason AS proposal_reason, p.policy_json,
+                      p.created_at_ms, r.state AS run_state
+               FROM run_proposals p
+               JOIN runs r ON r.run_id=p.run_id
+               JOIN events e ON e.event_id=r.event_id
+               WHERE """ + " AND ".join(where) + """
+               ORDER BY p.created_at_ms DESC, p.rowid DESC
+               LIMIT ?""",
+            tuple(params),
+        ).fetchall()
+        truncated = len(rows) > limit
+        items: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            verdict = canonical_loads(row["policy_json"]) if row["policy_json"] else {}
+            reason = verdict.get("reason") or row["proposal_reason"]
+            items.append(
+                {
+                    "proposal_id": row["proposal_id"],
+                    "run_id": row["run_id"],
+                    "job_id": row["job_id"],
+                    "seq": row["seq"],
+                    "kind": row["kind"],
+                    "fact_id": row["fact_id"],
+                    "revision": row["revision"],
+                    "body": row["body"],
+                    "arguments": (
+                        canonical_loads(row["arguments_json"])
+                        if row["arguments_json"]
+                        else {}
+                    ),
+                    "evidence_refs": canonical_loads(row["evidence_refs_json"]),
+                    "reason": reason,
+                    "proposal_reason": row["proposal_reason"],
+                    "observed_result": verdict.get("observed_result"),
+                    "proposed_result": verdict.get("proposed_result") or {
+                        "outcome": verdict.get("outcome"),
+                        "destination_ref": verdict.get("destination_ref"),
+                        "not_before_ms": verdict.get("not_before_ms"),
+                        "reason": verdict.get("reason"),
+                    },
+                    "run_state": row["run_state"],
+                    "delivery_state": "not_delivered",
+                    "delivery_label": "未投递",
+                    "created_at_ms": row["created_at_ms"],
+                }
+            )
+        return {
+            "observations": items,
+            "items": items,
+            "count": len(items),
+            "returned": len(items),
+            "limit": limit,
+            "truncated": truncated,
+            "delivery_state": "not_delivered",
+            "delivery_label": "未投递",
+        }
 
     def get_context_pack(self, context_ref: str) -> dict[str, Any] | None:
         row = self.db.execute(
@@ -5011,6 +5617,117 @@ class Store:
     # Internals
     # ------------------------------------------------------------------ #
 
+    def get_job_provenance(
+        self, job_id: str, *, revision: int | None = None
+    ) -> JobProvenanceRecord | None:
+        """One source record by revision (latest when omitted), or None.
+
+        ``None`` for a legacy revision means "not recorded"; callers must
+        display that absence rather than infer a source from the current
+        jobs row.
+        """
+        if revision is None:
+            row = self.db.execute(
+                "SELECT * FROM job_provenance WHERE job_id=?"
+                " ORDER BY revision DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        else:
+            if type(revision) is not int or revision < 1:
+                raise PASError(ErrorCode.INVALID_CONFIG, "revision must be >= 1", scope="jobs")
+            row = self.db.execute(
+                "SELECT * FROM job_provenance WHERE job_id=? AND revision=?",
+                (job_id, revision),
+            ).fetchone()
+        return self._provenance_record_from_row(row) if row is not None else None
+
+    def list_job_provenance(self, job_id: str) -> list[JobProvenanceRecord]:
+        rows = self.db.execute(
+            "SELECT * FROM job_provenance WHERE job_id=? ORDER BY revision",
+            (job_id,),
+        ).fetchall()
+        return [self._provenance_record_from_row(row) for row in rows]
+
+    @staticmethod
+    def _provenance_record_from_row(row: Any) -> JobProvenanceRecord:
+        return JobProvenanceRecord(
+            job_id=row["job_id"],
+            revision=int(row["revision"]),
+            entry_kind=row["entry_kind"],
+            authenticated_actor=row["authenticated_actor"],
+            request_id=row["request_id"],
+            host_ref=row["host_ref"],
+            input_hash=row["input_hash"],
+            recorded_at_ms=int(row["recorded_at_ms"]),
+            task=canonical_loads(row["task_json"]),
+            grant_refs=tuple(canonical_loads(row["grant_refs_json"])),
+            job_spec=canonical_loads(row["job_spec_json"]),
+        )
+
+    def _write_job_provenance_tx(
+        self, spec_dict: dict[str, Any], source: JobWriteSource, now_ms: int
+    ) -> None:
+        """Append the source record for the revision just written.
+
+        Must only be called inside the caller's ``upsert_job`` /
+        ``set_job_enabled`` transaction.  It intentionally never updates an
+        existing row: duplicate revisions are an invariant violation, not a
+        backfill opportunity.
+        """
+        if not isinstance(spec_dict, dict):
+            raise PASError(ErrorCode.INTERNAL_ERROR, "job version snapshot is not an object")
+        input_hash = source.input_hash or content_hash(spec_dict)
+        task = spec_dict.get("task")
+        grant_refs = spec_dict.get("grant_refs")
+        if not isinstance(task, dict) or not isinstance(grant_refs, list):
+            raise PASError(ErrorCode.INTERNAL_ERROR, "job version snapshot is incomplete")
+        self.db.execute(
+            """INSERT INTO job_provenance(
+                   job_id, revision, entry_kind, authenticated_actor,
+                   request_id, host_ref, input_hash, recorded_at_ms,
+                   task_json, grant_refs_json, job_spec_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                spec_dict["job_id"],
+                spec_dict["revision"],
+                source.entry_kind,
+                source.actor.strip(),
+                source.request_id,
+                source.host_ref,
+                input_hash,
+                now_ms,
+                canonical_json(task),
+                canonical_json(grant_refs),
+                canonical_json(spec_dict),
+            ),
+        )
+
+    @staticmethod
+    def _job_spec_dict_from_row(row: Any) -> dict[str, Any]:
+        """Canonical JobSpec shape for a stored jobs row (history snapshot)."""
+        source = {
+            "job_id": row["job_id"],
+            "revision": int(row["revision"]),
+            "owner": row["scheduler_owner"],
+            "mode": row["mode"],
+            "schedule": canonical_loads(row["schedule_json"]),
+            "task": canonical_loads(row["task_json"]),
+            "grant_refs": canonical_loads(row["grant_refs_json"]),
+            "delivery_policy": canonical_loads(row["delivery_policy_json"]),
+            "misfire_policy": row["misfire_policy"],
+            "deadline": (
+                Store._ms_to_rfc3339(int(row["deadline_ms"]))
+                if row["deadline_ms"] is not None
+                else None
+            ),
+            "enabled": bool(row["enabled"]),
+        }
+        if row["reminder_json"]:
+            source["reminder"] = canonical_loads(row["reminder_json"])
+        if row["obligation"] is not None:
+            source["obligation"] = row["obligation"]
+        return source
+
     def _read_job(self, job_id: str) -> JobRecord | None:
         row = self.db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
@@ -5278,7 +5995,7 @@ class Store:
             # v0.1.1 additions: the occurrence ledger and the user-visible
             # activity projection are part of the profile's data, so export
             # and delete must not silently skip them.
-            "job_occurrences", "job_activity",
+            "job_occurrences", "job_activity", "job_provenance",
             "context_packs", "memory_entries", "proactive_preferences",
             # v2 W6: delivery-outcome feedback is profile data too.
             "delivery_feedback", "memory_candidates", "memory_forget_blocks", "goals", "goal_entries",
@@ -5316,6 +6033,7 @@ class Store:
             "approvals",          # -> grants
             "job_grants",         # -> jobs, grants
             "job_occurrences",    # -> jobs, events
+            "job_provenance",     # append-only audit rows; no FK to jobs
             "jobs_idempotency",   # -> jobs
             "grants",
             "topic_mutes",

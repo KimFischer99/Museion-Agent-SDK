@@ -16,10 +16,11 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import Job, JobSpec, PASError, ErrorCode
-from .config import PasConfig
+from .config import PasConfig, PolicySection
 from .daemon import DaemonLock
 from .decision_parse import strict_json
 from .service import _probe_socket
+from .store import JobWriteSource
 
 _ENV_KEYS = frozenset({
     "PAS_EXECUTOR", "PAS_MODEL_BASE_URL", "PAS_MODEL_API_KEY", "PAS_MODEL_NAME",
@@ -43,7 +44,8 @@ def _defaults(root: Path, state_dir: str | None) -> dict:
         previous if previous.exists() else Path.home() / ".local/state/museion"
     )
     return {"state_dir": str(state.resolve()), "timezone": "UTC",
-            "environment": {key: os.environ[key] for key in _ENV_KEYS if key in os.environ}}
+            "environment": {key: os.environ[key] for key in _ENV_KEYS if key in os.environ},
+            "observe_notifications": False}
 
 
 def load_settings(path: Path) -> dict:
@@ -55,8 +57,12 @@ def load_settings(path: Path) -> dict:
         settings = strict_json(path.read_text())
     except (ValueError, UnicodeError):
         raise _error("settings.json 不是有效的配置对象；可运行 setup --state-dir 原状态目录 重新配置。") from None
-    if not isinstance(settings, dict) or set(settings) != {"state_dir", "timezone", "environment"}:
-        raise _error("settings.json 需要 state_dir、timezone 和 environment 三项。")
+    required = {"state_dir", "timezone", "environment"}
+    allowed = required | {"observe_notifications"}
+    if not isinstance(settings, dict) or not required <= set(settings) or set(settings) - allowed:
+        raise _error("settings.json 需要 state_dir、timezone、environment，可选 observe_notifications。")
+    if "observe_notifications" in settings and type(settings["observe_notifications"]) is not bool:
+        raise _error("settings.json 的 observe_notifications 必须是布尔值。")
     environment = settings["environment"]
     if not isinstance(environment, dict) or set(environment) - _ENV_KEYS or any(
         not isinstance(value, str) or len(value) > 4096 for value in environment.values()
@@ -161,7 +167,12 @@ def collect_settings(previous: dict) -> tuple[dict, list[str], bool, bool]:
             raise _error("公开主题最多 8 项，每项最多 128 字符。")
         enable = _ask("启用/保持后台研究，允许将已保存记忆交给所选模型分析并向自己发送通知？y/N", "N").casefold() in {"y", "yes", "是"}
     demo = choice == "1" and _ask("创建一条 5 秒后的体验提醒？y/N", "N").casefold() in {"y", "yes", "是"}
-    return {"state_dir": previous["state_dir"], "timezone": tz, "environment": environment}, topics, enable, demo
+    return {
+        "state_dir": previous["state_dir"],
+        "timezone": tz,
+        "environment": environment,
+        "observe_notifications": bool(previous.get("observe_notifications", False)),
+    }, topics, enable, demo
 
 
 def _apply_environment(settings: dict) -> None:
@@ -223,20 +234,37 @@ def readiness(agent, settings: dict) -> dict:
     daemon = "running" if locked and _probe_socket(str(agent.state_dir / "pas.sock")) else "starting_or_locked" if locked else "stopped"
     activity = agent.activity_list(limit=5)
     latest = activity[0] if activity else None
+    # The launcher consumes the same per-item projection as `pas status`
+    # instead of deciding attention from one global "latest activity" row.
+    issues = agent.current_issues(limit=20)
+    todo_items = issues.get("items", [])
     recent = "尚无执行记录。"
     if latest:
         reason = str(latest.get("reason") or "")
-        if latest.get("state") in {"failed", "failed_terminal", "unknown"} or reason.startswith(("l0_source_error", "l0_context_stale", "l0_source_unauthorized")):
-            recent = "最近一次检查或投递失败，请查看 activity 中的原因。"
-            if state == "ready":
-                state, detail = "attention", "最近检查失败，需要处理 activity 中的原因。"
-        elif latest.get("state") == "suppressed":
+        if latest.get("state") == "suppressed":
             recent = "最近一次检查保持静默；原因：" + reason
         else:
             recent = "最近一次状态：" + str(latest.get("state"))
+    if todo_items:
+        first = todo_items[0]
+        recent = f"有 {len(todo_items)} 项待办；首先：{first['reason']}"
+        if state != "blocked":
+            state, detail = "attention", "存在需要人工处理的事项，请查看 manual_todos。"
+    elif latest and not latest.get("job_id"):
+        # Compatibility for legacy/unscoped activity snapshots that predate
+        # the per-job projection.  Current rows always carry job_id and are
+        # never promoted here from a single transient source failure.
+        legacy_reason = str(latest.get("reason") or "")
+        if latest.get("state") in {"failed", "failed_terminal", "unknown"} or legacy_reason.startswith(
+            ("l0_source_error", "l0_context_stale", "l0_source_unauthorized")
+        ):
+            recent = "最近一次检查或投递失败，请查看 activity 中的原因。"
+            if state == "ready":
+                state, detail = "attention", "最近检查失败，需要处理 activity 中的原因。"
     counts = agent.store.outbox_state_counts()
     if counts.get("unknown", 0):
-        recent = "存在投递结果未确认的通知，请查看 outbox 状态。"
+        if not todo_items:
+            recent = "存在投递结果未确认的通知，请查看 outbox 状态。"
         if state == "ready":
             state, detail = "attention", "通知投递结果未确认，需要查看 outbox 状态。"
     return {"can_start": not problems, "proactive_ready": state == "ready",
@@ -245,7 +273,9 @@ def readiness(agent, settings: dict) -> dict:
             "notification": "webhook" if environment.get("PAS_NOTIFY_URL") else "local_inbox",
             "daemon": daemon, "state_dir": str(agent.state_dir),
             "public_topics": list(topics), "next_due_ms": job.next_due_ms if job else None,
-            "recent_status": recent, "activity": activity, "outbox": counts}
+            "recent_status": recent, "activity": activity, "outbox": counts,
+            "manual_todos": issues, "current_issues": issues,
+            "job_provenance": agent.jobs_provenance(job.job_id) if job else None}
 
 
 def _check_topic_capacity(agent, topics: list[str]) -> None:
@@ -260,7 +290,12 @@ async def _configure(agent, topics: list[str], enable: bool, demo: bool) -> None
     for topic in topics:
         await agent.remember_user_context(agent.proactive._interest_entry(topic, public=True, now=now))
     if enable:
-        agent.proactive.enable(actor="launcher")
+        agent.proactive.enable(
+            actor="launcher",
+            entry_kind="launcher",
+            request_id="launcher-setup-enable",
+            host_ref=str(agent.state_dir),
+        )
     else:
         agent.proactive.disable()
     job = agent.jobs_get("proactive-research")
@@ -271,14 +306,26 @@ async def _configure(agent, topics: list[str], enable: bool, demo: bool) -> None
                 schedule=job.schedule, task=job.task, enabled=job.enabled, owner=job.owner,
                 grant_refs=job.grant_refs, delivery_policy=policy, misfire_policy=job.misfire_policy,
                 deadline=datetime.fromtimestamp(job.deadline_ms/1000, timezone.utc).isoformat() if job.deadline_ms else None,
-                reminder=job.reminder, obligation=job.obligation))
+                reminder=job.reminder, obligation=job.obligation),
+                provenance=JobWriteSource(
+                    entry_kind="launcher",
+                    actor="launcher",
+                    request_id="launcher-setup-policy",
+                    host_ref=str(agent.state_dir),
+                ))
     if demo:
         grant = agent.grant("notify.self", evidence="consent:launcher-demo")
         old_job = agent.jobs_get("first-demo")
         agent.jobs_upsert(Job(id="first-demo", revision=old_job.revision + 1 if old_job else 1,
             mode="reminder", schedule={"kind": "runonce", "at": (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()},
             reminder={"body": "体验提醒已送达。你现在可以创建自己的提醒。", "timezone": agent.timezone},
-            grant_refs=(grant.grant_id,)))
+            grant_refs=(grant.grant_id,)),
+            provenance=JobWriteSource(
+                entry_kind="launcher",
+                actor="launcher",
+                request_id="launcher-demo-reminder",
+                host_ref=str(agent.state_dir),
+            ))
 
 
 def main(factory, root: Path, argv: list[str] | None = None) -> int:
@@ -288,6 +335,20 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
     parser.add_argument("--state-dir", help="明确指定持久状态目录")
     parser.add_argument("--inbox-id", help="say 知道了 时对应的通知 id")
     parser.add_argument("--json", action="store_true")
+    observe_group = parser.add_mutually_exclusive_group()
+    observe_group.add_argument(
+        "--observe-notifications",
+        dest="observe_notifications",
+        action="store_true",
+        default=None,
+        help="仅对 job 绑定的机会型后台任务启用通知观察模式",
+    )
+    observe_group.add_argument(
+        "--no-observe-notifications",
+        dest="observe_notifications",
+        action="store_false",
+        help="关闭通知观察模式",
+    )
     args = parser.parse_args(argv)
     path = root / "settings.json"
     try:
@@ -300,6 +361,8 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
             settings = _defaults(root, args.state_dir)
         if args.state_dir:
             settings["state_dir"] = str(Path(args.state_dir).expanduser().resolve())
+        if args.observe_notifications is not None:
+            settings["observe_notifications"] = args.observe_notifications
         setup = args.action == "setup" or args.action == "run" and not path.exists()
         topics, enable, demo = [], False, False
         if setup:
@@ -313,7 +376,19 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
             state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
             if state_dir.stat().st_mode & 0o077:
                 raise _error("状态目录需限制为 0700；请修正该目录权限，或用 --state-dir 选择新的专用目录。")
-            agent = factory(PasConfig(state_dir=settings["state_dir"], profile="personal", timezone=settings["timezone"], locale="zh-CN"))
+            agent = factory(
+                PasConfig(
+                    state_dir=settings["state_dir"],
+                    profile="personal",
+                    timezone=settings["timezone"],
+                    locale="zh-CN",
+                    policy=PolicySection(
+                        observe_notifications=bool(
+                            settings.get("observe_notifications", False)
+                        )
+                    ),
+                )
+            )
             try:
                 if setup:
                     initial = readiness(agent, settings)
@@ -327,7 +402,13 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
                 if args.action == "say":
                     if not args.text:
                         raise _error("say 需要用户本人输入的文本。")
-                    result = await agent.proactive.handle_input(args.text, actor="launcher", inbox_id=args.inbox_id)
+                    result = await agent.proactive.handle_input(
+                        args.text,
+                        actor="launcher",
+                        inbox_id=args.inbox_id,
+                        entry_kind="launcher",
+                        host_ref=str(agent.state_dir),
+                    )
                 elif args.action == "inbox":
                     result = {"notifications": agent.inbox_list(limit=20)}
                 else:

@@ -38,6 +38,7 @@ from typing import Any
 
 from .contracts import ErrorCode, PASError
 from .facade import Job, ProactiveAgent
+from .store import JobWriteSource
 from .observability import Metrics, StructuredLogger
 from .rpc import (
     RPC_APPLICATION_ERROR,
@@ -248,6 +249,7 @@ class ControlPlaneServer:
             job = p.get("job")
             if not isinstance(job, dict):
                 raise PASError(ErrorCode.INVALID_CONFIG, "params.job must be an object", scope="rpc")
+            idempotency_key = str(require(p, "idempotency_key"))
             record = agent.jobs_upsert(
                 Job(
                     id=str(require(job, "id")),
@@ -273,7 +275,15 @@ class ControlPlaneServer:
                     require_fresh_sources=job.get("require_fresh_sources", False),
                     research_topics=job.get("research_topics", ()),
                 ),
-                idempotency_key=str(require(p, "idempotency_key")),
+                idempotency_key=idempotency_key,
+                # These fields come from the authenticated RPC boundary.
+                # The job body cannot supply them.
+                provenance=JobWriteSource(
+                    entry_kind="rpc",
+                    actor=session.principal,
+                    request_id=idempotency_key,
+                    host_ref=getattr(session, "client_name", None),
+                ),
             )
             return {"job_id": record.job_id, "revision": record.revision}
 
@@ -283,8 +293,19 @@ class ControlPlaneServer:
             existing = agent.jobs_get(job_id)
             if existing is None:
                 raise PASError(ErrorCode.INVALID_CONFIG, f"unknown job {job_id!r}", scope="jobs")
+            update_request_id = f"update-{job_id}-{existing.revision + 1}"
+            update_source = JobWriteSource(
+                entry_kind="rpc",
+                actor=session.principal,
+                request_id=update_request_id,
+                host_ref=getattr(session, "client_name", None),
+            )
             if "enabled" in p:
-                record = agent.jobs_resume(job_id) if p["enabled"] else agent.jobs_pause(job_id)
+                record = (
+                    agent.jobs_resume(job_id, provenance=update_source)
+                    if p["enabled"]
+                    else agent.jobs_pause(job_id, provenance=update_source)
+                )
                 return {"job_id": job_id, "revision": record.revision, "enabled": bool(p["enabled"])}
             if any(key in p for key in ("instruction", "goal_id", "handoff")):
                 task = dict(existing.task)
@@ -316,7 +337,8 @@ class ControlPlaneServer:
                         reminder=existing.reminder,
                         obligation=existing.obligation,
                     ),
-                    idempotency_key=f"update-{job_id}-{existing.revision + 1}",
+                    idempotency_key=update_request_id,
+                    provenance=update_source,
                 )
                 return {"job_id": job_id, "revision": record.revision}
             raise PASError(
@@ -361,11 +383,29 @@ class ControlPlaneServer:
             }
 
         async def jobs_pause(params, session):
-            record = agent.jobs_pause(str(require(await params_of(params), "job_id")))
+            job_id = str(require(await params_of(params), "job_id"))
+            record = agent.jobs_pause(
+                job_id,
+                provenance=JobWriteSource(
+                    entry_kind="rpc",
+                    actor=session.principal,
+                    request_id=f"pause-{job_id}",
+                    host_ref=getattr(session, "client_name", None),
+                ),
+            )
             return {"job_id": record.job_id, "enabled": False, "revision": record.revision}
 
         async def jobs_resume(params, session):
-            record = agent.jobs_resume(str(require(await params_of(params), "job_id")))
+            job_id = str(require(await params_of(params), "job_id"))
+            record = agent.jobs_resume(
+                job_id,
+                provenance=JobWriteSource(
+                    entry_kind="rpc",
+                    actor=session.principal,
+                    request_id=f"resume-{job_id}",
+                    host_ref=getattr(session, "client_name", None),
+                ),
+            )
             return {"job_id": record.job_id, "enabled": True, "revision": record.revision}
 
         async def jobs_stop(params, session):
@@ -497,7 +537,13 @@ class ControlPlaneServer:
             if not isinstance(text, str) or not isinstance(request_id, str) or not 1 <= len(request_id) <= 256:
                 raise PASError(ErrorCode.INVALID_CONFIG, "text and request_id must be strings", scope="rpc")
             controller = getattr(agent, "proactive", None) or ProactiveController(agent)
-            return await controller.handle_input(text, actor=session.principal, request_id=request_id)
+            return await controller.handle_input(
+                text,
+                actor=session.principal,
+                request_id=request_id,
+                entry_kind="rpc",
+                host_ref=getattr(session, "client_name", None),
+            )
 
         d.register("proactive.input", proactive_input)
         async def input_note(params, session):

@@ -44,7 +44,7 @@ from zoneinfo import ZoneInfo
 
 from .clock import Clock
 from .contracts import JobSpec, validate_schedule
-from .store import Store
+from .store import JobWriteSource, Store
 
 __all__ = [
     "Schedule",
@@ -342,10 +342,17 @@ class Scheduler:
     # Registration
     # ------------------------------------------------------------------ #
 
-    def register_job(self, spec: JobSpec, *, idempotency_key: str) -> Any:
+    def register_job(
+        self,
+        spec: JobSpec,
+        *,
+        idempotency_key: str,
+        provenance: JobWriteSource | None = None,
+    ) -> Any:
         """Store-level upsert plus a computed initial due time, so a new
         job's first tick lands on its first real occurrence instead of
-        rescanning until then."""
+        rescanning until then. Provenance is passed through untouched so
+        the jobs row and its immutable source record commit together."""
         now = self.clock.wall_now_ms()
         sched = parse_schedule(spec.schedule)
         if spec.enabled:
@@ -353,7 +360,11 @@ class Scheduler:
         else:
             initial = now
         return self.store.upsert_job(
-            spec, idempotency_key=idempotency_key, now_ms=now, initial_next_due_ms=initial
+            spec,
+            idempotency_key=idempotency_key,
+            now_ms=now,
+            initial_next_due_ms=initial,
+            provenance=provenance,
         )
 
     def _initial_next_due(self, sched: Schedule, created_at_ms: int) -> int:

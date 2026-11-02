@@ -38,6 +38,7 @@ from . import __version__
 from .config import PasConfig, config_to_yaml_subset, load_config
 from .contracts import ErrorCode, PASError
 from .facade import DB_FILENAME, LOCK_FILENAME, SOCKET_FILENAME, Job, ProactiveAgent
+from .store import JobWriteSource
 from .observability import free_disk_mb
 
 __all__ = ["main", "build_parser"]
@@ -199,8 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="window: 7d/24h/30m or an ISO timestamp (default 7d)",
     )
 
-    runs = add("runs", help_text="run operations: list|show|cancel|events")
-    runs.add_argument("action", choices=["list", "show", "cancel", "events"])
+    runs = add(
+        "runs",
+        help_text="run operations: list|show|cancel|events|observations",
+    )
+    runs.add_argument("action", choices=["list", "show", "cancel", "events", "observations"])
     runs.add_argument("run_id", nargs="?")
     runs.add_argument("--state", help="filter by run state (list)")
     runs.add_argument("--limit", type=int, default=20)
@@ -384,7 +388,13 @@ def _cmd_proactive(args: argparse.Namespace) -> int:
         agent = _load_app(args)
         try:
             controller = getattr(agent, "proactive", None) or ProactiveController(agent)
-            return await controller.handle_input(args.text, actor=args.actor, inbox_id=args.inbox_id)
+            return await controller.handle_input(
+                args.text,
+                actor=args.actor,
+                inbox_id=args.inbox_id,
+                entry_kind="cli",
+                host_ref="pas-cli",
+            )
         finally:
             await agent.close()
 
@@ -574,6 +584,7 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     "revision": r.revision,
                     "next_due_ms": r.next_due_ms,
                     "misfire_policy": r.misfire_policy,
+                    "source_status": agent.jobs_provenance(r.job_id)["source_status"],
                 }
                 for r in agent.jobs_list(enabled=getattr(args, "enabled", None))
             ]
@@ -600,6 +611,7 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     "handoff": bool(record.task.get("handoff")),
                     "obligation": record.obligation,
                     "stopped_at_ms": record.stopped_at_ms,
+                    "provenance": agent.jobs_provenance(record.job_id),
                 },
                 _json_flag(args),
             )
@@ -647,13 +659,35 @@ def _cmd_jobs(args: argparse.Namespace) -> int:
                     research_topics=tuple(args.research_topic),
                 ),
                 idempotency_key=args.idempotency_key or f"cli-{args.job_id}",
+                provenance=JobWriteSource(
+                    entry_kind="cli",
+                    actor="cli",
+                    request_id=args.idempotency_key or f"cli-{args.job_id}",
+                    host_ref="pas-cli",
+                ),
             )
             _print({"job_id": record.job_id, "revision": record.revision}, _json_flag(args))
         elif args.action == "pause":
-            record = agent.jobs_pause(args.job_id)  # type: ignore[arg-type]
+            record = agent.jobs_pause(
+                args.job_id,  # type: ignore[arg-type]
+                provenance=JobWriteSource(
+                    entry_kind="cli",
+                    actor="cli",
+                    request_id=f"cli-pause-{args.job_id}",
+                    host_ref="pas-cli",
+                ),
+            )
             _print({"job_id": record.job_id, "enabled": False, "revision": record.revision}, _json_flag(args))
         elif args.action == "resume":
-            record = agent.jobs_resume(args.job_id)  # type: ignore[arg-type]
+            record = agent.jobs_resume(
+                args.job_id,  # type: ignore[arg-type]
+                provenance=JobWriteSource(
+                    entry_kind="cli",
+                    actor="cli",
+                    request_id=f"cli-resume-{args.job_id}",
+                    host_ref="pas-cli",
+                ),
+            )
             _print({"job_id": record.job_id, "enabled": True, "revision": record.revision}, _json_flag(args))
         elif args.action == "stop":
             if not args.job_id:
@@ -810,6 +844,11 @@ def _cmd_runs(args: argparse.Namespace) -> int:
         elif args.action == "events":
             events = agent.run_events(args.run_id)  # type: ignore[arg-type]
             _print({"events": events, "count": len(events)}, _json_flag(args))
+        elif args.action == "observations":
+            observations = agent.notification_observations(
+                limit=args.limit, run_id=args.run_id
+            )
+            _print(observations, _json_flag(args))
     finally:
         agent.store.close()
     return 0

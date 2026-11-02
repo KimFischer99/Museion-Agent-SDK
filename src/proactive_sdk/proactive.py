@@ -19,6 +19,7 @@ from .contracts import (
     RunRequest,
     content_hash,
 )
+from .store import JobWriteSource
 
 _MAX_TOPIC_CHARS = 128
 _MAX_INTERESTS = 8
@@ -257,10 +258,25 @@ class ProactiveController:
             return False, ()
         return True, tuple(grants[key].grant_id for key in _REQUIRED_GRANTS)
 
-    def ensure_research_job(self) -> Any | None:
+    def ensure_research_job(
+        self,
+        *,
+        actor: str = "system",
+        entry_kind: str = "system",
+        request_id: str | None = None,
+        host_ref: str | None = None,
+        input_hash: str | None = None,
+    ) -> Any | None:
         ready, grant_refs = self._has_research_prerequisites()
         if not ready:
             return None
+        provenance = JobWriteSource(
+            entry_kind=entry_kind,
+            actor=actor,
+            request_id=request_id,
+            host_ref=host_ref,
+            input_hash=input_hash,
+        )
         existing = self.agent.jobs_get(_BOOTSTRAP_JOB_ID)
         if existing is not None:
             if existing.grant_refs == grant_refs or existing.stopped_at_ms is not None:
@@ -270,7 +286,8 @@ class ProactiveController:
                 enabled=existing.enabled, owner=existing.owner, grant_refs=grant_refs,
                 delivery_policy=existing.delivery_policy, misfire_policy=existing.misfire_policy,
                 deadline=datetime.fromtimestamp(existing.deadline_ms/1000, timezone.utc).isoformat() if existing.deadline_ms else None,
-                reminder=existing.reminder, obligation=existing.obligation))
+                reminder=existing.reminder, obligation=existing.obligation),
+                provenance=provenance)
 
         now = self.agent.store.clock.wall_now_ms()
         anchor = datetime.fromtimestamp(now / 1000, timezone.utc) + timedelta(seconds=self.interval_seconds)
@@ -300,7 +317,9 @@ class ProactiveController:
             delivery_policy={"proactive": True},
             obligation="opportunistic",
         )
-        return self.agent.jobs_upsert(spec, idempotency_key=_BOOTSTRAP_KEY)
+        return self.agent.jobs_upsert(
+            spec, idempotency_key=_BOOTSTRAP_KEY, provenance=provenance
+        )
 
     def disable(self) -> dict[str, Any]:
         current = self.agent.proactive_preferences()
@@ -310,7 +329,15 @@ class ProactiveController:
         })
         return {"preferences": preferences, "applied_actions": [{"kind": "proactive_disabled"}]}
 
-    def enable(self, *, actor: str = "cli") -> dict[str, Any]:
+    def enable(
+        self,
+        *,
+        actor: str = "cli",
+        entry_kind: str = "unspecified",
+        request_id: str | None = None,
+        host_ref: str | None = None,
+        input_hash: str | None = None,
+    ) -> dict[str, Any]:
         current = self.agent.proactive_preferences()
         # Validate the topic bound before persisting the enable request.
         topics = self._eligible_public_topics(current["allowed_topics"])
@@ -336,7 +363,13 @@ class ProactiveController:
                     scope={},
                     consent_evidence_ref=evidence,
                 )
-        job = self.ensure_research_job()
+        job = self.ensure_research_job(
+            actor=actor,
+            entry_kind=entry_kind,
+            request_id=request_id,
+            host_ref=host_ref,
+            input_hash=input_hash,
+        )
         return {
             "preferences": preferences,
             "research_job": job.job_id if job is not None else None,
@@ -354,23 +387,54 @@ class ProactiveController:
         actor: str = "cli",
         inbox_id: str | None = None,
         request_id: str | None = None,
+        entry_kind: str = "unspecified",
+        host_ref: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:
             raise PASError(ErrorCode.INVALID_CONFIG, "text must be 1..2000 chars", scope="proactive")
         if not isinstance(actor, str) or not actor.strip():
             raise PASError(ErrorCode.AUTH_REQUIRED, "actor is required", scope="proactive")
         raw = text.strip()
-        scheduled = self._scheduled_input(raw, actor=actor, request_id=request_id)
+        # Digest the trusted input here, at the authenticated boundary.  The
+        # raw text is not copied into provenance; only this one-way value is.
+        input_hash = content_hash({
+            "entry_kind": entry_kind,
+            "actor": actor,
+            "request_id": request_id,
+            "host_ref": host_ref,
+            "text": raw,
+        })
+        scheduled = self._scheduled_input(
+            raw,
+            actor=actor,
+            request_id=request_id,
+            entry_kind=entry_kind,
+            host_ref=host_ref,
+            input_hash=input_hash,
+        )
         if scheduled is not None:
             return scheduled
         if re.search(r"提醒我|(?:每天|每周|每月|每隔).*(?:研究|跟进)", raw):
-            return await self._classify_schedule(raw, actor=actor, request_id=request_id)
+            return await self._classify_schedule(
+                raw,
+                actor=actor,
+                request_id=request_id,
+                entry_kind=entry_kind,
+                host_ref=host_ref,
+                input_hash=input_hash,
+            )
         if _matches_direct_phrase(raw, _DISABLE_PHRASES):
             result = self.disable()
             result["reply"] = "已关闭主动通知偏好；不会再进行主动新闻提醒。"
             return result
         if _matches_direct_phrase(raw, _ENABLE_PHRASES):
-            return self.enable(actor=actor)
+            return self.enable(
+                actor=actor,
+                entry_kind=entry_kind,
+                request_id=request_id,
+                host_ref=host_ref,
+                input_hash=input_hash,
+            )
         allowed_topic = _topic_command(raw, kind="allow")
         if allowed_topic:
             current = self.agent.proactive_preferences()
@@ -411,12 +475,35 @@ class ProactiveController:
         if direct is not None or direct_watch is not None:
             actions = await self._save_direct(raw, direct=direct, watch=direct_watch)
             return await self._after_user_context(
-                raw, actor=actor, actions=actions, explicit_notify=_explicit_notify_request(raw)
+                raw,
+                actor=actor,
+                actions=actions,
+                explicit_notify=_explicit_notify_request(raw),
+                entry_kind=entry_kind,
+                request_id=request_id,
+                host_ref=host_ref,
+                input_hash=input_hash,
             )
 
-        return await self._classify_free_text(raw, actor=actor)
+        return await self._classify_free_text(
+            raw,
+            actor=actor,
+            entry_kind=entry_kind,
+            request_id=request_id,
+            host_ref=host_ref,
+            input_hash=input_hash,
+        )
 
-    def _scheduled_input(self, text: str, *, actor: str, request_id: str | None = None) -> dict[str, Any] | None:
+    def _scheduled_input(
+        self,
+        text: str,
+        *,
+        actor: str,
+        request_id: str | None = None,
+        entry_kind: str = "unspecified",
+        host_ref: str | None = None,
+        input_hash: str | None = None,
+    ) -> dict[str, Any] | None:
         # Only complete, direct requests can authorize a persistent job.
         reminder = re.fullmatch(r"(?:请)?(?:在\s*)?(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d))\s*提醒我[：:,， ]+(.+)", text)
         period_pattern = r"每天|每周[一二三四五六日天]|每月(?:[1-9]|[12]\d|3[01])(?:日|号)"
@@ -499,7 +586,17 @@ class ProactiveController:
                 task["instruction"] = f"结合已授权上下文跟进：{subject}。只有有依据且值得打扰时通知，否则说明静默原因。"
             spec = JobSpec(job_id=job_id, mode="task", schedule=schedule, task=task, grant_refs=tuple(refs),
                            obligation="due" if research else "opportunistic")
-        record = self.agent.jobs_upsert(spec, idempotency_key=f"user-input:{identifier}")
+        record = self.agent.jobs_upsert(
+            spec,
+            idempotency_key=f"user-input:{identifier}",
+            provenance=JobWriteSource(
+                entry_kind=entry_kind,
+                actor=actor,
+                request_id=request_id,
+                host_ref=host_ref,
+                input_hash=input_hash,
+            ),
+        )
         next_due = datetime.fromtimestamp(record.next_due_ms / 1000, ZoneInfo(self.agent.timezone)).isoformat(timespec="seconds") if record.next_due_ms is not None else None
         state = ("已停止" if record.stopped_at_ms is not None else "已暂停" if not record.enabled
                  else "无下次执行" if record.next_due_ms is None else "已安排")
@@ -527,7 +624,16 @@ class ProactiveController:
         return {"kind": "interval", "anchor": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(timespec="seconds"),
                 "every_seconds": seconds}
 
-    async def _classify_schedule(self, text: str, *, actor: str, request_id: str | None) -> dict[str, Any]:
+    async def _classify_schedule(
+        self,
+        text: str,
+        *,
+        actor: str,
+        request_id: str | None,
+        entry_kind: str = "unspecified",
+        host_ref: str | None = None,
+        input_hash: str | None = None,
+    ) -> dict[str, Any]:
         clarification = {"applied_actions": [], "reply": "尚未建立任务：请明确提醒内容、可表示的时间和交付方式；研究任务还需明确公开来源。"}
         if not re.match(r"^(?:请|帮我|麻烦|我想|我希望|在|每天|每周|每月|每隔|提醒我|\d{4}-)", text) or re.search(r"不要|别|取消|停止", text):
             return clarification
@@ -576,7 +682,14 @@ class ProactiveController:
             normalized = f"{schedule} 跟进 {content} {delivery}"
         else:
             return clarification
-        return self._scheduled_input(normalized, actor=actor, request_id=request_id) or clarification
+        return self._scheduled_input(
+            normalized,
+            actor=actor,
+            request_id=request_id,
+            entry_kind=entry_kind,
+            host_ref=host_ref,
+            input_hash=input_hash,
+        ) or clarification
 
     async def _save_direct(
         self,
@@ -622,13 +735,33 @@ class ProactiveController:
         actor: str,
         actions: list[dict[str, Any]],
         explicit_notify: bool,
+        entry_kind: str = "unspecified",
+        request_id: str | None = None,
+        host_ref: str | None = None,
+        input_hash: str | None = None,
     ) -> dict[str, Any]:
         if explicit_notify:
-            enabled = self.enable(actor=actor)
+            enabled = self.enable(
+                actor=actor,
+                entry_kind=entry_kind,
+                request_id=request_id,
+                host_ref=host_ref,
+                input_hash=input_hash,
+            )
             actions.extend(enabled["applied_actions"])
             reply = enabled.get("reply") or "已记录兴趣并处理主动通知设置。"
             return {**enabled, "applied_actions": actions, "reply": reply}
-        job = self.ensure_research_job() if self.agent.proactive_preferences()["enabled"] else None
+        job = (
+            self.ensure_research_job(
+                actor=actor,
+                entry_kind=entry_kind,
+                request_id=request_id,
+                host_ref=host_ref,
+                input_hash=input_hash,
+            )
+            if self.agent.proactive_preferences()["enabled"]
+            else None
+        )
         reply = "已记录你的兴趣。" if any(a["kind"] == "interest_saved" for a in actions) else "已记录这件进行中的事项。"
         if job is not None:
             actions.append({"kind": "research_job_ready", "job_id": job.job_id})
@@ -641,7 +774,16 @@ class ProactiveController:
             "reply": reply,
         }
 
-    async def _classify_free_text(self, text: str, *, actor: str) -> dict[str, Any]:
+    async def _classify_free_text(
+        self,
+        text: str,
+        *,
+        actor: str,
+        entry_kind: str = "unspecified",
+        request_id: str | None = None,
+        host_ref: str | None = None,
+        input_hash: str | None = None,
+    ) -> dict[str, Any]:
         executor = self.agent.executor
         run_id = f"proactive-input-{uuid.uuid4().hex}"
         now = datetime.now(timezone.utc)
@@ -748,6 +890,10 @@ class ProactiveController:
             actor=actor,
             actions=actions,
             explicit_notify=_explicit_notify_request(text),
+            entry_kind=entry_kind,
+            request_id=request_id,
+            host_ref=host_ref,
+            input_hash=input_hash,
         )
         result["classification"] = {"model_turns": outcome.model_turns, "usage": usage}
         if not actions:

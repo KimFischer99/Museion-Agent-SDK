@@ -145,7 +145,13 @@ class EverySubcommandReportsTests(unittest.TestCase):
             self.assertEqual(created.returncode, 0, created.stderr)
             shown = self._run(["jobs", "show", "show-regression"], state_dir, root)
             self.assertEqual(shown.returncode, 0, shown.stderr)
-            self.assertEqual(json.loads(shown.stdout)["task"]["instruction"], "stay silent")
+            payload = json.loads(shown.stdout)
+            self.assertEqual(payload["task"]["instruction"], "stay silent")
+            self.assertEqual(payload["provenance"]["source_status"], "recorded")
+            self.assertEqual(payload["provenance"]["current"]["entry_kind"], "cli")
+            self.assertEqual(
+                payload["provenance"]["current"]["request_id"], "cli-show-regression"
+            )
 
 
 if __name__ == "__main__":
