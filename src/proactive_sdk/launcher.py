@@ -223,20 +223,37 @@ def readiness(agent, settings: dict) -> dict:
     daemon = "running" if locked and _probe_socket(str(agent.state_dir / "pas.sock")) else "starting_or_locked" if locked else "stopped"
     activity = agent.activity_list(limit=5)
     latest = activity[0] if activity else None
+    # The launcher consumes the same per-item projection as `pas status`
+    # instead of deciding attention from one global "latest activity" row.
+    issues = agent.current_issues(limit=20)
+    todo_items = issues.get("items", [])
     recent = "尚无执行记录。"
     if latest:
         reason = str(latest.get("reason") or "")
-        if latest.get("state") in {"failed", "failed_terminal", "unknown"} or reason.startswith(("l0_source_error", "l0_context_stale", "l0_source_unauthorized")):
-            recent = "最近一次检查或投递失败，请查看 activity 中的原因。"
-            if state == "ready":
-                state, detail = "attention", "最近检查失败，需要处理 activity 中的原因。"
-        elif latest.get("state") == "suppressed":
+        if latest.get("state") == "suppressed":
             recent = "最近一次检查保持静默；原因：" + reason
         else:
             recent = "最近一次状态：" + str(latest.get("state"))
+    if todo_items:
+        first = todo_items[0]
+        recent = f"有 {len(todo_items)} 项待办；首先：{first['reason']}"
+        if state != "blocked":
+            state, detail = "attention", "存在需要人工处理的事项，请查看 manual_todos。"
+    elif latest and not latest.get("job_id"):
+        # Compatibility for legacy/unscoped activity snapshots that predate
+        # the per-job projection.  Current rows always carry job_id and are
+        # never promoted here from a single transient source failure.
+        legacy_reason = str(latest.get("reason") or "")
+        if latest.get("state") in {"failed", "failed_terminal", "unknown"} or legacy_reason.startswith(
+            ("l0_source_error", "l0_context_stale", "l0_source_unauthorized")
+        ):
+            recent = "最近一次检查或投递失败，请查看 activity 中的原因。"
+            if state == "ready":
+                state, detail = "attention", "最近检查失败，需要处理 activity 中的原因。"
     counts = agent.store.outbox_state_counts()
     if counts.get("unknown", 0):
-        recent = "存在投递结果未确认的通知，请查看 outbox 状态。"
+        if not todo_items:
+            recent = "存在投递结果未确认的通知，请查看 outbox 状态。"
         if state == "ready":
             state, detail = "attention", "通知投递结果未确认，需要查看 outbox 状态。"
     return {"can_start": not problems, "proactive_ready": state == "ready",
@@ -245,7 +262,8 @@ def readiness(agent, settings: dict) -> dict:
             "notification": "webhook" if environment.get("PAS_NOTIFY_URL") else "local_inbox",
             "daemon": daemon, "state_dir": str(agent.state_dir),
             "public_topics": list(topics), "next_due_ms": job.next_due_ms if job else None,
-            "recent_status": recent, "activity": activity, "outbox": counts}
+            "recent_status": recent, "activity": activity, "outbox": counts,
+            "manual_todos": issues, "current_issues": issues}
 
 
 def _check_topic_capacity(agent, topics: list[str]) -> None:

@@ -951,7 +951,13 @@ class ProactiveAgent:
         return self.store.list_grants(include_revoked=include_revoked)
 
     def approvals_pending(self) -> list[Any]:
-        return self.approvals.pending()
+        """Pending approvals that are actionable now.
+
+        The raw state query stays available through ``store.list_approvals``
+        for audit work; the user-facing listing excludes expired approvals
+        and approvals whose grant has expired or been revoked.
+        """
+        return self.store.list_active_approvals(now_ms=self.store.clock.wall_now_ms())
 
     def approvals_get(self, approval_id: str) -> Any:
         return self.store.get_approval(approval_id)
@@ -1139,6 +1145,17 @@ class ProactiveAgent:
     # Status, health, backup/restore, export/delete (§14.1 / §17.2)
     # ------------------------------------------------------------------ #
 
+    def manual_todos(self, *, limit: int = 50) -> dict[str, Any]:
+        """Bounded read-only projection of current human-attention items."""
+        return self.store.current_issues(
+            now_ms=self.store.clock.wall_now_ms(), limit=limit
+        )
+
+    #: Wording used by the implementation plan; kept as a discoverable
+    #: alias rather than a second projection with different semantics.
+    def current_issues(self, *, limit: int = 50) -> dict[str, Any]:
+        return self.manual_todos(limit=limit)
+
     def status(self) -> dict[str, Any]:
         now = self.store.clock.wall_now_ms()
         jobs = self.store.list_jobs()
@@ -1164,6 +1181,10 @@ class ProactiveAgent:
             # able to see that without opening the ledger.
             "run_tool_authority": self.store.run_tool_authority_counts(),
             "outbox": outbox,
+            # Additive status fields: old counters stay unchanged and this
+            # projection never mutates the ledgers it reads.
+            "manual_todos": self.manual_todos(),
+            "current_issues": self.manual_todos(),
             "inbox_unread": len(self.store.list_inbox(unread_only=True, limit=1000)),
             "grants_active": len(self.store.active_capabilities(now_ms=now)),
             "health": health,

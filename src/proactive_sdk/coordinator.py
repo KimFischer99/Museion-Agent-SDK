@@ -200,6 +200,10 @@ class RunReport:
     queued: int = 0
     approval_pending: int = 0
     suppressed_by_policy: int = 0
+    #: Machine-safe retry classification for the analysis phase.  The
+    #: status projection uses this to keep one-off opportunistic faults as
+    #: diagnostics and promote only an actual retryable streak.
+    retryable: bool = False
 
 
 #: Raw L0 verdicts (kept verbatim in run events for backward compatibility)
@@ -275,7 +279,7 @@ class ProactiveCoordinator:
             self._fail(lease, error_class=exc.code.value, now_ms=now)
             report = RunReport(
                 run_id=lease.run_id, outcome="failed", error_code=exc.code.value,
-                reason=exc.safe_message,
+                reason=exc.safe_message, retryable=bool(exc.retryable),
             )
         self._project_analysis(lease, report, now_ms=now)
         return report
@@ -334,6 +338,7 @@ class ProactiveCoordinator:
                 obligation=job.obligation,
                 reason=(str(reason)[:500] if reason else None),
                 run_id=lease.run_id,
+                retryable=report.retryable,
                 dedupe_suffix=f"analysis:{state}",
                 now_ms=now_ms,
             )
@@ -482,6 +487,30 @@ class ProactiveCoordinator:
             or bool(batch.items)
         ]
 
+        # Structured source-check accounting for the human-attention
+        # projection.  The event kind carries the outcome; status never has
+        # to parse a free-text summary.  Suppressions that happen before
+        # sources are checked (idle/quiet) write no such event and therefore
+        # neither extend nor clear a failure streak.
+        source_check_kind: str | None = None
+        if entries:
+            if not fetched:
+                source_check_kind = (
+                    "source_check_unauthorized"
+                    if unauthorized and not source_errors
+                    else "source_check_retryable_failure"
+                )
+            elif source_errors or unauthorized:
+                source_check_kind = "source_check_partial"
+            else:
+                source_check_kind = "source_check_ok"
+
+        def _source_check_summary() -> str:
+            return (
+                f"checked={len(fetched)} errors={len(source_errors)}"
+                f" unauthorized={len(unauthorized)}"
+            )
+
         if mode == "heartbeat":
             # Opportunistic heartbeat: nothing checkable ends here — machine
             # reason, zero model calls (§5.3 L0).
@@ -489,9 +518,20 @@ class ProactiveCoordinator:
                 return self._suppress(lease, "l0_nothing_to_check", now_ms)
             if not fetched:
                 if unauthorized:
-                    return self._suppress(lease, "l0_source_unauthorized", now_ms)
+                    return self._suppress(
+                        lease,
+                        "l0_source_unauthorized",
+                        now_ms,
+                        source_check_kind=source_check_kind,
+                        source_check_summary=_source_check_summary(),
+                    )
                 return self._suppress(
-                    lease, "l0_source_error:" + ",".join(source_errors)[:480], now_ms
+                    lease,
+                    "l0_source_error:" + ",".join(source_errors)[:480],
+                    now_ms,
+                    retryable=True,
+                    source_check_kind=source_check_kind,
+                    source_check_summary=_source_check_summary(),
                 )
         else:
             # Explicit task / hook wake: authorization and provider
@@ -499,6 +539,15 @@ class ProactiveCoordinator:
             # suppressions — but a task with no sources at all is pure
             # reasoning and still runs.
             if entries and not fetched:
+                # This path ends by raising/reporting a failure, so there is
+                # no later successful-commit point for the marker.
+                if source_check_kind is not None:
+                    self.store.append_run_event(
+                        lease,
+                        kind=source_check_kind,
+                        safe_summary=_source_check_summary(),
+                        now_ms=now_ms,
+                    )
                 if research_topics and job.obligation == "due":
                     code = ErrorCode.PERMISSION_DENIED if unauthorized and not source_errors else ErrorCode.PROVIDER_UNAVAILABLE
                     return self._research_failure(lease, job, code, now_ms=now_ms)
@@ -512,6 +561,7 @@ class ProactiveCoordinator:
                     ErrorCode.PROVIDER_UNAVAILABLE,
                     "all configured sources failed before the run",
                     scope="coordinator",
+                    retryable=True,
                 )
 
         # ---- W5 two-stage path: candidates before analysis ----
@@ -529,8 +579,24 @@ class ProactiveCoordinator:
             and event.origin != "manual"
             and not candidates
         ):
-            return self._suppress(lease, "l0_no_source_change", now_ms)
+            return self._suppress(
+                lease,
+                "l0_no_source_change",
+                now_ms,
+                source_check_kind=source_check_kind,
+                source_check_summary=_source_check_summary(),
+            )
         candidates_count = len(candidates)
+        # Successful/partial source checks continue into analysis.  Record
+        # the marker after the zero-model suppression branch so the existing
+        # run-event order for suppressed runs stays unchanged.
+        if source_check_kind is not None:
+            self.store.append_run_event(
+                lease,
+                kind=source_check_kind,
+                safe_summary=_source_check_summary(),
+                now_ms=now_ms,
+            )
         truncated_count = max(0, deduped_total - candidates_count)
 
         if unauthorized:
@@ -730,7 +796,8 @@ class ProactiveCoordinator:
         policy = self.policy_engine.apply_to_run(lease.run_id, now_ms=now_ms) if self.policy_engine else None
         return RunReport(run_id=lease.run_id, outcome="failed", reason=message, error_code=code.value,
                          context_ref=context_ref, policy_outcome=policy.outcome if policy else None,
-                         queued=policy.queued if policy else 0)
+                         queued=policy.queued if policy else 0,
+                         retryable=code == ErrorCode.PROVIDER_UNAVAILABLE)
 
     def _require_reason(self) -> bool:
         config = getattr(self.executor, "config", None)
@@ -913,6 +980,7 @@ class ProactiveCoordinator:
                 proposals=report.proposals,
                 context_ref=report.context_ref,
                 policy_outcome="policy_error",
+                retryable=report.retryable,
             )
         return RunReport(
             run_id=report.run_id,
@@ -929,6 +997,7 @@ class ProactiveCoordinator:
             queued=verdict.queued,
             approval_pending=verdict.approval_pending,
             suppressed_by_policy=verdict.suppressed,
+            retryable=report.retryable,
         )
 
     # ------------------------------------------------------------------ #
@@ -1093,6 +1162,9 @@ class ProactiveCoordinator:
         candidates_count: int = 0,
         truncated_count: int = 0,
         next_eligible_at_ms: int | None = None,
+        retryable: bool = False,
+        source_check_kind: str | None = None,
+        source_check_summary: str | None = None,
     ) -> RunReport:
         silence_reason = _silence_reason_for(reason)
         self.store.record_run_suppressed(
@@ -1103,6 +1175,8 @@ class ProactiveCoordinator:
             candidates_count=candidates_count,
             truncated_count=truncated_count,
             next_eligible_at_ms=next_eligible_at_ms,
+            source_check_kind=source_check_kind,
+            source_check_summary=source_check_summary,
         )
         return RunReport(
             run_id=lease.run_id,
@@ -1113,6 +1187,7 @@ class ProactiveCoordinator:
             truncated=truncated_count,
             model_turns=0,
             next_eligible_at_ms=next_eligible_at_ms,
+            retryable=retryable,
         )
 
     def _fail(self, lease: RunLease, *, error_class: str, now_ms: int) -> None:
