@@ -26,8 +26,10 @@ from p3_fixtures import (
     rfc3339,
     static_batch,
 )
+from proactive_sdk.decision_contract import NOTIFICATION_EXPRESSION_GUIDANCE
 from proactive_sdk import (
     ContextPackBuilder,
+    CoordinatorConfig,
     EphemeralMemoryPort,
     ErrorCode,
     FakeClock,
@@ -460,6 +462,192 @@ class MaliciousSourceTests(P3TestCase):
         run = store.list_runs(state="proposed")[0]
         denied = [e for e in store.run_events(run["run_id"]) if e["kind"] == "tool_denied"]
         self.assertEqual(len(denied), 1)
+
+
+class PendingContextAndExpressionTests(P3TestCase):
+    @staticmethod
+    def _seed_pending_outbox(store, *, count=21):
+        with store.transaction():
+            store.db.execute(
+                """INSERT INTO grants(
+                       grant_id, account_ref, capability, scope_json, version,
+                       consent_evidence_ref, created_at_ms)
+                   VALUES ('seed-grant','account:primary','notify.self','{}',1,
+                           'test:seed',?)""",
+                (T0,),
+            )
+            store.db.execute(
+                """INSERT INTO events(
+                       event_id, idempotency_key, origin, payload_hash, payload_ref,
+                       observed_at_ms, expires_at_ms)
+                   VALUES ('seed-event','seed-event-key','scheduler','seed-hash',
+                           'inline',?,?)""",
+                (T0, T0 + 60_000),
+            )
+            store.db.execute(
+                """INSERT INTO runs(
+                       run_id, event_id, state, deadline_ms, policy_version,
+                       created_at_ms, updated_at_ms)
+                   VALUES ('seed-run','seed-event','completed',?,1,?,?)""",
+                (T0 + 60_000, T0, T0),
+            )
+            for index in range(count):
+                action_id = f"seed-action-{index}"
+                message_id = f"seed-message-{index}"
+                created_at_ms = T0 - 10_000 + index
+                state = "pending" if index % 2 == 0 else "delivery_unknown"
+                payload = json.dumps(
+                    {
+                        "fact_id": f"seed-fact-{index}",
+                        "topic": f"pending-notification-{index}",
+                        "title": f"pending-notification-{index}",
+                        "body": "SECRET_FULL_NOTIFICATION_BODY",
+                    },
+                    ensure_ascii=False,
+                )
+                store.db.execute(
+                    """INSERT INTO actions(
+                           action_id, run_id, business_key, kind, request_json,
+                           request_hash, grant_id, grant_version, approval_id,
+                           policy_version, state, expires_at_ms, source,
+                           occurrence_id, obligation, created_at_ms)
+                       VALUES (?, 'seed-run', ?, 'notify_self', '{}', 'seed-hash',
+                               'seed-grant', 1, NULL, 1, 'queued', ?, 'agent',
+                               NULL, 'opportunistic', ?)""",
+                    (action_id, f"seed-business-{index}", T0 + 60_000, created_at_ms),
+                )
+                store.db.execute(
+                    """INSERT INTO outbox(
+                           message_id, action_id, delivery_key, destination_ref,
+                           payload_ref, state, not_before_ms, expires_at_ms,
+                           fence, lease_until_ms, receipt_ref, provider_key,
+                           payload_json, attempts, reason, created_at_ms)
+                       VALUES (?, ?, ?, 'local-inbox:demo', 'blob:seed', ?, ?, ?,
+                               0, 0, NULL, ?, ?, 0, NULL, ?)""",
+                    (
+                        message_id,
+                        action_id,
+                        f"seed-delivery-{index}",
+                        state,
+                        created_at_ms,
+                        T0 + 60_000,
+                        f"pas-{action_id}",
+                        payload,
+                        created_at_ms,
+                    ),
+                )
+
+    def test_pending_summary_and_expression_rules_are_shared_without_conversation(self):
+        store, _ = make_store()
+        self._seed_pending_outbox(store, count=21)
+
+        class NeverReadConversation:
+            def __init__(self):
+                self.calls = 0
+
+            async def recent_turns(self, since_ms, limit):
+                self.calls += 1
+                raise AssertionError("conversation must remain unread")
+
+        conversation = NeverReadConversation()
+        config = CoordinatorConfig(conversation_context=False, handoff=True)
+
+        # Plain single-stage path.
+        plain_job = make_job(
+            job_id="plain-pending",
+            mode="task",
+            task={"instruction": "检查来源", "always_run": True},
+        )
+        store.upsert_job(plain_job, idempotency_key="plain-pending")
+        admit_job_event(store, plain_job)
+        plain_model = ScriptedModel(
+            [{"content": json.dumps(
+                {"decision": "silent", "summary": "无新结果", "proposals": []},
+                ensure_ascii=False,
+            )}]
+        )
+        plain = ProactiveCoordinator(
+            store,
+            registry=SourceRegistry(),
+            pack_builder=make_pack_builder(),
+            executor=make_executor(plain_model, broker=make_broker()),
+            config=config,
+            conversation=conversation,
+        )
+        plain_report = self.run_async(plain.process_pending_run())
+        self.assertEqual(plain_report.outcome, "proposed")
+        plain_prompt = json.dumps(plain_model.calls[0]["messages"], ensure_ascii=False)
+        self.assertIn("queued/unknown is NOT received or read", plain_prompt)
+        self.assertNotIn("SECRET_FULL_NOTIFICATION_BODY", plain_prompt)
+        self.assertIn(
+            NOTIFICATION_EXPRESSION_GUIDANCE,
+            plain_model.calls[0]["messages"][0]["content"],
+        )
+        plain_pack = store.get_context_pack(plain_report.context_ref)
+        self.assertEqual(len(plain_pack["pending_notifications"]), 20)
+        self.assertEqual(
+            {entry["state"] for entry in plain_pack["pending_notifications"]},
+            {"pending", "delivery_unknown"},
+        )
+        self.assertEqual(
+            plain_pack["pending_notifications"][0]["topic"],
+            "pending-notification-20",
+        )
+
+        # Handoff path: analyze and compose must both receive the same rules
+        # and the same bounded pending projection without a conversation read.
+        handoff_job = make_job(
+            job_id="handoff-pending",
+            mode="task",
+            task={"instruction": "检查来源", "always_run": True, "handoff": True},
+        )
+        store.upsert_job(handoff_job, idempotency_key="handoff-pending")
+        admit_job_event(store, handoff_job)
+        handoff_model = ScriptedModel(
+            [
+                {"content": json.dumps(
+                    {
+                        "decision": "propose",
+                        "summary": "过程记录",
+                        "proposals": [{
+                            "kind": "internal_record",
+                            "fact_id": "work-note",
+                            "revision": "1",
+                            "body": "已检查来源",
+                        }],
+                    },
+                    ensure_ascii=False,
+                )},
+                {"content": json.dumps(
+                    {"decision": "silent", "summary": "进度留在内部记录", "proposals": []},
+                    ensure_ascii=False,
+                )},
+            ]
+        )
+        handoff = ProactiveCoordinator(
+            store,
+            registry=SourceRegistry(),
+            pack_builder=make_pack_builder(),
+            executor=make_executor(handoff_model, broker=make_broker()),
+            config=config,
+            conversation=conversation,
+        )
+        handoff_report = self.run_async(handoff.process_pending_run())
+        self.assertEqual(handoff_report.outcome, "proposed")
+        self.assertEqual(len(handoff_model.calls), 2)
+        for call in handoff_model.calls:
+            system_prompt = call["messages"][0]["content"]
+            context_prompt = call["messages"][1]["content"]
+            self.assertIn(NOTIFICATION_EXPRESSION_GUIDANCE, system_prompt)
+            self.assertIn("queued/unknown is NOT received or read", context_prompt)
+            self.assertNotIn("SECRET_FULL_NOTIFICATION_BODY", context_prompt)
+        handoff_pack = store.get_context_pack(handoff_report.context_ref)
+        self.assertEqual(len(handoff_pack["pending_notifications"]), 20)
+        self.assertEqual(
+            {entry["state"] for entry in handoff_pack["pending_notifications"]},
+            {"pending", "delivery_unknown"},
+        )
+        self.assertEqual(conversation.calls, 0)
 
 
 class FenceAndRecoveryTests(P3TestCase):
