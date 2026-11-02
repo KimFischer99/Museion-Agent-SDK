@@ -70,8 +70,15 @@ class LauncherTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await _configure(agent, [], False, True)
                 self.assertEqual(agent.jobs_get("first-demo").revision, 1)
+                first_source = agent.jobs_provenance("first-demo")["current"]
+                self.assertEqual(first_source["entry_kind"], "launcher")
+                self.assertEqual(first_source["authenticated_actor"], "launcher")
                 await _configure(agent, [], False, True)
                 self.assertEqual(agent.jobs_get("first-demo").revision, 2)
+                self.assertEqual(
+                    [row["revision"] for row in agent.jobs_provenance("first-demo")["revisions"]],
+                    [1, 2],
+                )
                 with patch.object(agent.store, "clock", FakeClock(wall_ms=agent.store.clock.wall_now_ms()+6000)):
                     await agent.tick()
                 self.assertIn("体验提醒已送达", agent.inbox_list()[0]["body"])

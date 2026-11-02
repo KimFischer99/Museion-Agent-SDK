@@ -20,6 +20,7 @@ from .config import PasConfig, PolicySection
 from .daemon import DaemonLock
 from .decision_parse import strict_json
 from .service import _probe_socket
+from .store import JobWriteSource
 
 _ENV_KEYS = frozenset({
     "PAS_EXECUTOR", "PAS_MODEL_BASE_URL", "PAS_MODEL_API_KEY", "PAS_MODEL_NAME",
@@ -273,7 +274,8 @@ def readiness(agent, settings: dict) -> dict:
             "daemon": daemon, "state_dir": str(agent.state_dir),
             "public_topics": list(topics), "next_due_ms": job.next_due_ms if job else None,
             "recent_status": recent, "activity": activity, "outbox": counts,
-            "manual_todos": issues, "current_issues": issues}
+            "manual_todos": issues, "current_issues": issues,
+            "job_provenance": agent.jobs_provenance(job.job_id) if job else None}
 
 
 def _check_topic_capacity(agent, topics: list[str]) -> None:
@@ -288,7 +290,12 @@ async def _configure(agent, topics: list[str], enable: bool, demo: bool) -> None
     for topic in topics:
         await agent.remember_user_context(agent.proactive._interest_entry(topic, public=True, now=now))
     if enable:
-        agent.proactive.enable(actor="launcher")
+        agent.proactive.enable(
+            actor="launcher",
+            entry_kind="launcher",
+            request_id="launcher-setup-enable",
+            host_ref=str(agent.state_dir),
+        )
     else:
         agent.proactive.disable()
     job = agent.jobs_get("proactive-research")
@@ -299,14 +306,26 @@ async def _configure(agent, topics: list[str], enable: bool, demo: bool) -> None
                 schedule=job.schedule, task=job.task, enabled=job.enabled, owner=job.owner,
                 grant_refs=job.grant_refs, delivery_policy=policy, misfire_policy=job.misfire_policy,
                 deadline=datetime.fromtimestamp(job.deadline_ms/1000, timezone.utc).isoformat() if job.deadline_ms else None,
-                reminder=job.reminder, obligation=job.obligation))
+                reminder=job.reminder, obligation=job.obligation),
+                provenance=JobWriteSource(
+                    entry_kind="launcher",
+                    actor="launcher",
+                    request_id="launcher-setup-policy",
+                    host_ref=str(agent.state_dir),
+                ))
     if demo:
         grant = agent.grant("notify.self", evidence="consent:launcher-demo")
         old_job = agent.jobs_get("first-demo")
         agent.jobs_upsert(Job(id="first-demo", revision=old_job.revision + 1 if old_job else 1,
             mode="reminder", schedule={"kind": "runonce", "at": (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()},
             reminder={"body": "体验提醒已送达。你现在可以创建自己的提醒。", "timezone": agent.timezone},
-            grant_refs=(grant.grant_id,)))
+            grant_refs=(grant.grant_id,)),
+            provenance=JobWriteSource(
+                entry_kind="launcher",
+                actor="launcher",
+                request_id="launcher-demo-reminder",
+                host_ref=str(agent.state_dir),
+            ))
 
 
 def main(factory, root: Path, argv: list[str] | None = None) -> int:
@@ -383,7 +402,13 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
                 if args.action == "say":
                     if not args.text:
                         raise _error("say 需要用户本人输入的文本。")
-                    result = await agent.proactive.handle_input(args.text, actor="launcher", inbox_id=args.inbox_id)
+                    result = await agent.proactive.handle_input(
+                        args.text,
+                        actor="launcher",
+                        inbox_id=args.inbox_id,
+                        entry_kind="launcher",
+                        host_ref=str(agent.state_dir),
+                    )
                 elif args.action == "inbox":
                     result = {"notifications": agent.inbox_list(limit=20)}
                 else:

@@ -128,6 +128,16 @@ class DaemonLifecycleTests(unittest.TestCase):
                     self.assertEqual(job.obligation, "due")
                     self.assertEqual(job.task["refresh_source_ids"], ["news-search"])
                     self.assertTrue(job.task["require_fresh_sources"])
+                    provenance = agent.jobs_provenance("research")
+                    self.assertEqual(provenance["source_status"], "recorded")
+                    self.assertEqual(
+                        [row["revision"] for row in provenance["revisions"]], [1, 2]
+                    )
+                    self.assertTrue(all(
+                        row["entry_kind"] == "rpc"
+                        and row["authenticated_actor"] == "owner-local"
+                        for row in provenance["revisions"]
+                    ))
                     await agent.stop()
 
         asyncio.run(scenario())

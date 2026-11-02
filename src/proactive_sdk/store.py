@@ -67,6 +67,8 @@ __all__ = [
     "ApprovalRecord",
     "OutboxLease",
     "ReminderAdmission",
+    "JobWriteSource",
+    "JobProvenanceRecord",
     "MIGRATION_COUNT",
 ]
 
@@ -95,6 +97,7 @@ def _policy_timezone(delivery_policy: dict[str, Any]) -> str | None:
     return None
 
 _MIGRATION_NAME_RE = re.compile(r"m(\d+)_[a-z0-9_]+\.sql")
+_SOURCE_ENTRY_RE = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 
 
 def _load_migrations() -> tuple[tuple[int, str], ...]:
@@ -169,6 +172,80 @@ class JobRecord:
     obligation: str = "opportunistic"
     stopped_at_ms: int | None = None
     stop_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class JobWriteSource:
+    """Trusted metadata for one job write.
+
+    This object is deliberately not part of :class:`JobSpec`: model output,
+    request bodies, source content and Skills cannot populate it.  Callers
+    at an authenticated boundary construct it from values they already own
+    (the authenticated principal, a correlation/request id, a host ref and,
+    optionally, a digest of the raw trusted input).  ``unspecified`` is an
+    honest fallback for low-level SDK/system writes, never a fabricated
+    user request.
+    """
+
+    entry_kind: str = "unspecified"
+    actor: str = "unspecified"
+    request_id: str | None = None
+    host_ref: str | None = None
+    #: SHA-256 digest of the trusted input.  Raw input is never stored here.
+    input_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entry_kind, str) or not _SOURCE_ENTRY_RE.fullmatch(self.entry_kind):
+            raise PASError(ErrorCode.INVALID_CONFIG, "provenance.entry_kind is invalid", scope="jobs")
+        if not isinstance(self.actor, str) or not 1 <= len(self.actor.strip()) <= 256:
+            raise PASError(ErrorCode.INVALID_CONFIG, "provenance.actor is required", scope="jobs")
+        for name, value in (("request_id", self.request_id), ("host_ref", self.host_ref)):
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 256):
+                raise PASError(
+                    ErrorCode.INVALID_CONFIG, f"provenance.{name} must be 1..256 chars", scope="jobs"
+                )
+        if self.input_hash is not None and (
+            not isinstance(self.input_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", self.input_hash)
+        ):
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "provenance.input_hash must be a sha256 hex digest", scope="jobs"
+            )
+
+
+@dataclass(frozen=True)
+class JobProvenanceRecord:
+    """One immutable ``(job_id, revision)`` source record."""
+
+    job_id: str
+    revision: int
+    entry_kind: str
+    authenticated_actor: str
+    request_id: str | None
+    host_ref: str | None
+    input_hash: str
+    recorded_at_ms: int
+    task: dict[str, Any]
+    grant_refs: tuple[str, ...]
+    job_spec: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "revision": self.revision,
+            "recorded": True,
+            "source_status": "recorded",
+            "source_label": "来源已记录",
+            "entry_kind": self.entry_kind,
+            "authenticated_actor": self.authenticated_actor,
+            "request_id": self.request_id,
+            "host_ref": self.host_ref,
+            "input_hash": self.input_hash,
+            "recorded_at_ms": self.recorded_at_ms,
+            "task": self.task,
+            "grant_refs": list(self.grant_refs),
+            "job_spec": self.job_spec,
+            "raw_input_stored": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -870,8 +947,14 @@ class Store:
         idempotency_key: str,
         now_ms: int | None = None,
         initial_next_due_ms: int | None = None,
+        provenance: JobWriteSource | None = None,
     ) -> JobRecord:
         """Create or revise a job.
+
+        ``provenance`` is trusted metadata supplied by the authenticated
+        write boundary; it is not part of the JobSpec and is never derived
+        from model output.  A provenance row is inserted inside this same
+        transaction for every new ``(job_id, revision)``.
 
         - New job: stored at ``spec.revision`` (use 1 for a fresh job).
         - Existing job: ``spec.revision`` must equal current revision + 1
@@ -885,7 +968,9 @@ class Store:
         now = self.clock.wall_now_ms() if now_ms is None else now_ms
         if not idempotency_key or len(idempotency_key) > 256:
             raise PASError(ErrorCode.INVALID_CONFIG, "idempotency_key must be 1..256 chars")
-        request_hash = content_hash(spec.to_dict())
+        source = provenance or JobWriteSource()
+        spec_dict = spec.to_dict()
+        request_hash = content_hash(spec_dict)
         resolved_misfire = spec.misfire_policy or (
             "coalesce_latest" if spec.mode == "heartbeat" else "grace_once"
         )
@@ -980,6 +1065,7 @@ class Store:
                 " VALUES (?,?,?,?)",
                 (idempotency_key, request_hash, spec.job_id, now),
             )
+            self._write_job_provenance_tx(spec_dict, source, now)
             record = self._read_job(spec.job_id)
             assert record is not None
             return record
@@ -998,7 +1084,13 @@ class Store:
         return [record for record in records if record is not None]
 
     def set_job_enabled(
-        self, job_id: str, *, expected_revision: int, enabled: bool, now_ms: int | None = None
+        self,
+        job_id: str,
+        *,
+        expected_revision: int,
+        enabled: bool,
+        now_ms: int | None = None,
+        provenance: JobWriteSource | None = None,
     ) -> JobRecord:
         """Pause or resume with optimistic revision.
 
@@ -1008,6 +1100,7 @@ class Store:
         their grace window, strict jobs expire).
         """
         now = self.clock.wall_now_ms() if now_ms is None else now_ms
+        source = provenance or JobWriteSource()
         with self.transaction():
             cursor = self.db.execute(
                 "SELECT revision, stopped_at_ms FROM jobs WHERE job_id=?", (job_id,)
@@ -1041,6 +1134,13 @@ class Store:
                     " WHERE job_id=? AND revision=?",
                     (expected_revision + 1, 0, now, job_id, expected_revision),
                 )
+            version_row = self.db.execute(
+                "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            assert version_row is not None
+            self._write_job_provenance_tx(
+                self._job_spec_dict_from_row(version_row), source, now
+            )
             record = self._read_job(job_id)
             assert record is not None
             return record
@@ -5517,6 +5617,117 @@ class Store:
     # Internals
     # ------------------------------------------------------------------ #
 
+    def get_job_provenance(
+        self, job_id: str, *, revision: int | None = None
+    ) -> JobProvenanceRecord | None:
+        """One source record by revision (latest when omitted), or None.
+
+        ``None`` for a legacy revision means "not recorded"; callers must
+        display that absence rather than infer a source from the current
+        jobs row.
+        """
+        if revision is None:
+            row = self.db.execute(
+                "SELECT * FROM job_provenance WHERE job_id=?"
+                " ORDER BY revision DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        else:
+            if type(revision) is not int or revision < 1:
+                raise PASError(ErrorCode.INVALID_CONFIG, "revision must be >= 1", scope="jobs")
+            row = self.db.execute(
+                "SELECT * FROM job_provenance WHERE job_id=? AND revision=?",
+                (job_id, revision),
+            ).fetchone()
+        return self._provenance_record_from_row(row) if row is not None else None
+
+    def list_job_provenance(self, job_id: str) -> list[JobProvenanceRecord]:
+        rows = self.db.execute(
+            "SELECT * FROM job_provenance WHERE job_id=? ORDER BY revision",
+            (job_id,),
+        ).fetchall()
+        return [self._provenance_record_from_row(row) for row in rows]
+
+    @staticmethod
+    def _provenance_record_from_row(row: Any) -> JobProvenanceRecord:
+        return JobProvenanceRecord(
+            job_id=row["job_id"],
+            revision=int(row["revision"]),
+            entry_kind=row["entry_kind"],
+            authenticated_actor=row["authenticated_actor"],
+            request_id=row["request_id"],
+            host_ref=row["host_ref"],
+            input_hash=row["input_hash"],
+            recorded_at_ms=int(row["recorded_at_ms"]),
+            task=canonical_loads(row["task_json"]),
+            grant_refs=tuple(canonical_loads(row["grant_refs_json"])),
+            job_spec=canonical_loads(row["job_spec_json"]),
+        )
+
+    def _write_job_provenance_tx(
+        self, spec_dict: dict[str, Any], source: JobWriteSource, now_ms: int
+    ) -> None:
+        """Append the source record for the revision just written.
+
+        Must only be called inside the caller's ``upsert_job`` /
+        ``set_job_enabled`` transaction.  It intentionally never updates an
+        existing row: duplicate revisions are an invariant violation, not a
+        backfill opportunity.
+        """
+        if not isinstance(spec_dict, dict):
+            raise PASError(ErrorCode.INTERNAL_ERROR, "job version snapshot is not an object")
+        input_hash = source.input_hash or content_hash(spec_dict)
+        task = spec_dict.get("task")
+        grant_refs = spec_dict.get("grant_refs")
+        if not isinstance(task, dict) or not isinstance(grant_refs, list):
+            raise PASError(ErrorCode.INTERNAL_ERROR, "job version snapshot is incomplete")
+        self.db.execute(
+            """INSERT INTO job_provenance(
+                   job_id, revision, entry_kind, authenticated_actor,
+                   request_id, host_ref, input_hash, recorded_at_ms,
+                   task_json, grant_refs_json, job_spec_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                spec_dict["job_id"],
+                spec_dict["revision"],
+                source.entry_kind,
+                source.actor.strip(),
+                source.request_id,
+                source.host_ref,
+                input_hash,
+                now_ms,
+                canonical_json(task),
+                canonical_json(grant_refs),
+                canonical_json(spec_dict),
+            ),
+        )
+
+    @staticmethod
+    def _job_spec_dict_from_row(row: Any) -> dict[str, Any]:
+        """Canonical JobSpec shape for a stored jobs row (history snapshot)."""
+        source = {
+            "job_id": row["job_id"],
+            "revision": int(row["revision"]),
+            "owner": row["scheduler_owner"],
+            "mode": row["mode"],
+            "schedule": canonical_loads(row["schedule_json"]),
+            "task": canonical_loads(row["task_json"]),
+            "grant_refs": canonical_loads(row["grant_refs_json"]),
+            "delivery_policy": canonical_loads(row["delivery_policy_json"]),
+            "misfire_policy": row["misfire_policy"],
+            "deadline": (
+                Store._ms_to_rfc3339(int(row["deadline_ms"]))
+                if row["deadline_ms"] is not None
+                else None
+            ),
+            "enabled": bool(row["enabled"]),
+        }
+        if row["reminder_json"]:
+            source["reminder"] = canonical_loads(row["reminder_json"])
+        if row["obligation"] is not None:
+            source["obligation"] = row["obligation"]
+        return source
+
     def _read_job(self, job_id: str) -> JobRecord | None:
         row = self.db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
@@ -5784,7 +5995,7 @@ class Store:
             # v0.1.1 additions: the occurrence ledger and the user-visible
             # activity projection are part of the profile's data, so export
             # and delete must not silently skip them.
-            "job_occurrences", "job_activity",
+            "job_occurrences", "job_activity", "job_provenance",
             "context_packs", "memory_entries", "proactive_preferences",
             # v2 W6: delivery-outcome feedback is profile data too.
             "delivery_feedback", "memory_candidates", "memory_forget_blocks", "goals", "goal_entries",
@@ -5822,6 +6033,7 @@ class Store:
             "approvals",          # -> grants
             "job_grants",         # -> jobs, grants
             "job_occurrences",    # -> jobs, events
+            "job_provenance",     # append-only audit rows; no FK to jobs
             "jobs_idempotency",   # -> jobs
             "grants",
             "topic_mutes",
