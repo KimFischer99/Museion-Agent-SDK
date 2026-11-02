@@ -3821,6 +3821,94 @@ class Store:
             for row in rows
         ]
 
+    def notification_observations(
+        self, *, limit: int = 50, run_id: str | None = None, job_id: str | None = None
+    ) -> dict[str, Any]:
+        """Bounded read-only view of stage-C notification observations.
+
+        Rows come from the existing ``run_proposals`` verdict ledger; there
+        is no observation table and this method never mutates either the
+        proposals or the outbox. ``delivery_state`` is always
+        ``not_delivered``: an observed notification was never queued.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise PASError(ErrorCode.INVALID_CONFIG, "limit must be an integer in 1..100")
+        where = [
+            "p.policy_json IS NOT NULL",
+            "json_extract(p.policy_json, '$.observed') = 1",
+        ]
+        params: list[Any] = []
+        if run_id is not None:
+            if not isinstance(run_id, str) or not run_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "run_id must be a non-empty string")
+            where.append("p.run_id = ?")
+            params.append(run_id)
+        if job_id is not None:
+            if not isinstance(job_id, str) or not job_id:
+                raise PASError(ErrorCode.INVALID_CONFIG, "job_id must be a non-empty string")
+            where.append("e.job_id = ?")
+            params.append(job_id)
+        params.append(limit + 1)
+        rows = self.db.execute(
+            """SELECT p.proposal_id, p.run_id, e.job_id, p.seq, p.kind, p.fact_id,
+                      p.revision, p.body, p.arguments_json, p.evidence_refs_json,
+                      p.expires_at_ms, p.reason AS proposal_reason, p.policy_json,
+                      p.created_at_ms, r.state AS run_state
+               FROM run_proposals p
+               JOIN runs r ON r.run_id=p.run_id
+               JOIN events e ON e.event_id=r.event_id
+               WHERE """ + " AND ".join(where) + """
+               ORDER BY p.created_at_ms DESC, p.rowid DESC
+               LIMIT ?""",
+            tuple(params),
+        ).fetchall()
+        truncated = len(rows) > limit
+        items: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            verdict = canonical_loads(row["policy_json"]) if row["policy_json"] else {}
+            reason = verdict.get("reason") or row["proposal_reason"]
+            items.append(
+                {
+                    "proposal_id": row["proposal_id"],
+                    "run_id": row["run_id"],
+                    "job_id": row["job_id"],
+                    "seq": row["seq"],
+                    "kind": row["kind"],
+                    "fact_id": row["fact_id"],
+                    "revision": row["revision"],
+                    "body": row["body"],
+                    "arguments": (
+                        canonical_loads(row["arguments_json"])
+                        if row["arguments_json"]
+                        else {}
+                    ),
+                    "evidence_refs": canonical_loads(row["evidence_refs_json"]),
+                    "reason": reason,
+                    "proposal_reason": row["proposal_reason"],
+                    "observed_result": verdict.get("observed_result"),
+                    "proposed_result": verdict.get("proposed_result") or {
+                        "outcome": verdict.get("outcome"),
+                        "destination_ref": verdict.get("destination_ref"),
+                        "not_before_ms": verdict.get("not_before_ms"),
+                        "reason": verdict.get("reason"),
+                    },
+                    "run_state": row["run_state"],
+                    "delivery_state": "not_delivered",
+                    "delivery_label": "未投递",
+                    "created_at_ms": row["created_at_ms"],
+                }
+            )
+        return {
+            "observations": items,
+            "items": items,
+            "count": len(items),
+            "returned": len(items),
+            "limit": limit,
+            "truncated": truncated,
+            "delivery_state": "not_delivered",
+            "delivery_label": "未投递",
+        }
+
     def get_context_pack(self, context_ref: str) -> dict[str, Any] | None:
         row = self.db.execute(
             "SELECT pack_json, content_hash FROM context_packs WHERE context_ref=?", (context_ref,)

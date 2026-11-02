@@ -1156,6 +1156,22 @@ class ProactiveAgent:
     def current_issues(self, *, limit: int = 50) -> dict[str, Any]:
         return self.manual_todos(limit=limit)
 
+    def notification_observations(
+        self,
+        *,
+        limit: int = 50,
+        run_id: str | None = None,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Bounded, read-only query for stage-C notification observations.
+
+        Every item is explicitly marked ``not_delivered``; observed proposals
+        were never turned into actions, approvals or outbox rows.
+        """
+        return self.store.notification_observations(
+            limit=limit, run_id=run_id, job_id=job_id
+        )
+
     def status(self) -> dict[str, Any]:
         now = self.store.clock.wall_now_ms()
         jobs = self.store.list_jobs()
@@ -1294,6 +1310,7 @@ class ProactiveAgent:
             cadence=policy.cadence,
             cadence_min_gap_seconds=policy.cadence_min_gap_seconds,
             cadence_max_per_day=policy.cadence_max_per_day,
+            observe_notifications=policy.observe_notifications,
         )
 
     def _assemble_builtin_executor(self, model: Any, include_builtin: bool) -> Any:

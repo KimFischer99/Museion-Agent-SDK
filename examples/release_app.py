@@ -172,6 +172,9 @@ def build_agent(config=None) -> ProactiveAgent:
             cadence=source_policy.cadence if source_policy else "balanced",
             cadence_min_gap_seconds=source_policy.cadence_min_gap_seconds if source_policy else None,
             cadence_max_per_day=source_policy.cadence_max_per_day if source_policy else None,
+            observe_notifications=(
+                source_policy.observe_notifications if source_policy else False
+            ),
         )
 
     agent = ProactiveAgent(

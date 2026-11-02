@@ -39,6 +39,7 @@ from proactive_sdk import (  # noqa: E402
     Job,
     LocalToolBroker,
     PASError,
+    PolicyConfig,
     ProactiveAgent,
     RunLease,
     ToolLoopExecutor,
@@ -211,6 +212,72 @@ class AuthorityLedgerTests(unittest.TestCase):
             )
         finally:
             asyncio.run(agent.close())
+
+
+class ObservationAuthorityTests(unittest.TestCase):
+    def test_uncontrolled_host_is_refused_before_the_model_runs(self):
+        class CountingHost(SilentHost):
+            def __init__(self):
+                self.submits = 0
+
+            async def submit(self, prompt, *, timeout_s):
+                self.submits += 1
+                return await super().submit(prompt, timeout_s=timeout_s)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = FakeClock(wall_ms=T0)
+            host = CountingHost()
+            agent = ProactiveAgent(
+                state_dir=Path(tmp) / "observe-host",
+                executor=HostBridge(host),
+                clock=clock,
+                timezone="UTC",
+                locale="en",
+                profile="observe-host",
+                policy_config=PolicyConfig(observe_notifications=True),
+            )
+            try:
+                grant = agent.create_grant_from_user_consent(
+                    capability="notify.self", account_ref="a", scope={},
+                    consent_evidence_ref="c",
+                )
+                agent.jobs_upsert(
+                    Job(
+                        id="observed-job",
+                        mode="heartbeat",
+                        schedule={
+                            "kind": "interval",
+                            "anchor": "2025-10-09T00:00:00Z",
+                            "every_seconds": 3600,
+                        },
+                        instruction="check",
+                        grant_refs=(grant.grant_id,),
+                    ),
+                    idempotency_key="observed-job-v1",
+                )
+                # Scheduler origin: manual wakes intentionally keep their legacy
+                # behaviour and are covered by the existing authority tests.
+                agent.store.admit_event(
+                    "observed-job:scheduler:1",
+                    origin="scheduler",
+                    payload={"job_id": "observed-job", "mode": "heartbeat"},
+                    observed_at_ms=T0,
+                    expires_at_ms=T0 + 3_600_000,
+                    job_id="observed-job",
+                    job_revision=1,
+                )
+                report = asyncio.run(agent.tick(run_hooks=False, dispatch=False))
+                self.assertEqual(host.submits, 0)
+                self.assertEqual(report["runs"][0]["outcome"], "failed")
+                run = agent.store.list_runs()[0]
+                self.assertEqual(run["tool_authority"], TOOL_AUTHORITY_HOST)
+                self.assertEqual(run["error_class"], ErrorCode.PERMISSION_DENIED.value)
+                events = agent.store.run_events(run["run_id"])
+                self.assertIn("notification_observation_rejected", [e["kind"] for e in events])
+                self.assertEqual(agent.store.list_outbox(), [])
+                self.assertEqual(agent.store.list_approvals(), [])
+            finally:
+                asyncio.run(agent.close())
 
 
 class AuthoritySurfacingTests(unittest.TestCase):

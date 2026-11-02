@@ -421,6 +421,28 @@ class ProactiveCoordinator:
             now_ms=now_ms,
         )
 
+        # Stage C: observation is only honest when PAS can bound what the
+        # executor reaches. This check is deliberately before source fetch
+        # and before any model call; an unknown/host-only authority is
+        # refused rather than trusted to follow a prompt.
+        if self._notification_observation_active(job=job, event=event) and (
+            context.tool_authority != TOOL_AUTHORITY_PAS_BROKER
+        ):
+            self.store.append_run_event(
+                lease,
+                kind="notification_observation_rejected",
+                safe_summary=(
+                    "tool_authority=" + context.tool_authority
+                    + "; observation requires PAS broker"
+                )[:200],
+                now_ms=now_ms,
+            )
+            raise PASError(
+                ErrorCode.PERMISSION_DENIED,
+                "notification observation requires PAS-brokered tool authority",
+                scope="runs",
+            )
+
         if event.authorization:
             # Where a wake's authority came from is part of the ledger: an
             # event-scoped binding is a different fact from a job's standing
@@ -802,6 +824,18 @@ class ProactiveCoordinator:
                          context_ref=context_ref, policy_outcome=policy.outcome if policy else None,
                          queued=policy.queued if policy else 0,
                          retryable=code == ErrorCode.PROVIDER_UNAVAILABLE)
+
+    def _notification_observation_active(self, *, job: Any, event: Any) -> bool:
+        """Mirror PolicyEngine's stage-C scope before spending a model turn."""
+        if self.policy_engine is None:
+            return False
+        if not self.policy_engine.config.observe_notifications:
+            return False
+        if job is None or event is None:
+            return False
+        if event.origin == "manual" or job.mode == "reminder":
+            return False
+        return job.obligation == "opportunistic"
 
     def _require_reason(self) -> bool:
         config = getattr(self.executor, "config", None)

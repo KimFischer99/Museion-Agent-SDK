@@ -59,7 +59,7 @@ _POLICY_KEYS = ("notification_window", "max_unsolicited_notifications_per_day",
                 "max_candidates", "feedback_ignored_backfill",
                 "conversation_context", "memory_consolidation", "goal_context", "handoff",
                 "run_resume", "max_resumes", "goal_stale_days", "memory_ttl_days",
-                "feedback_context")
+                "feedback_context", "observe_notifications")
 _SKILLS_KEYS = ("import_mode", "source", "distribution")
 _CONTROL_PLANE_KEYS = ("enabled", "socket", "token_file")
 
@@ -270,6 +270,13 @@ class PolicySection:
     #: + topic + signal, at most 5) into the run's context pack. Off by
     #: default; turning it off stops new injections but keeps recorded rows.
     feedback_context: bool = False
+
+    #: Notification observation mode (stage C). Off by default. When on,
+    #: job-bound opportunistic background runs evaluate notifications exactly
+    #: as usual but record the would-be result instead of creating actions,
+    #: approvals or outbox rows. Manual requests, reminders and due reports
+    #: are never switched into observation by this setting.
+    observe_notifications: bool = False
 
     conversation_context: bool = False
     memory_consolidation: bool = False
@@ -512,7 +519,7 @@ def build_config(raw: dict[str, Any], *, source_path: str | None = None) -> PasC
         raise ConfigError("policy.feedback_ignored_backfill must be a boolean")
     v3 = {}
     for name in ("conversation_context", "memory_consolidation", "goal_context", "handoff",
-                 "run_resume", "feedback_context"):
+                 "run_resume", "feedback_context", "observe_notifications"):
         value = policy_raw.get(name, False)
         if type(value) is not bool:
             raise ConfigError(f"policy.{name} must be a boolean")

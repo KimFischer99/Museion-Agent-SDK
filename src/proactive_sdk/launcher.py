@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import Job, JobSpec, PASError, ErrorCode
-from .config import PasConfig
+from .config import PasConfig, PolicySection
 from .daemon import DaemonLock
 from .decision_parse import strict_json
 from .service import _probe_socket
@@ -43,7 +43,8 @@ def _defaults(root: Path, state_dir: str | None) -> dict:
         previous if previous.exists() else Path.home() / ".local/state/museion"
     )
     return {"state_dir": str(state.resolve()), "timezone": "UTC",
-            "environment": {key: os.environ[key] for key in _ENV_KEYS if key in os.environ}}
+            "environment": {key: os.environ[key] for key in _ENV_KEYS if key in os.environ},
+            "observe_notifications": False}
 
 
 def load_settings(path: Path) -> dict:
@@ -55,8 +56,12 @@ def load_settings(path: Path) -> dict:
         settings = strict_json(path.read_text())
     except (ValueError, UnicodeError):
         raise _error("settings.json 不是有效的配置对象；可运行 setup --state-dir 原状态目录 重新配置。") from None
-    if not isinstance(settings, dict) or set(settings) != {"state_dir", "timezone", "environment"}:
-        raise _error("settings.json 需要 state_dir、timezone 和 environment 三项。")
+    required = {"state_dir", "timezone", "environment"}
+    allowed = required | {"observe_notifications"}
+    if not isinstance(settings, dict) or not required <= set(settings) or set(settings) - allowed:
+        raise _error("settings.json 需要 state_dir、timezone、environment，可选 observe_notifications。")
+    if "observe_notifications" in settings and type(settings["observe_notifications"]) is not bool:
+        raise _error("settings.json 的 observe_notifications 必须是布尔值。")
     environment = settings["environment"]
     if not isinstance(environment, dict) or set(environment) - _ENV_KEYS or any(
         not isinstance(value, str) or len(value) > 4096 for value in environment.values()
@@ -161,7 +166,12 @@ def collect_settings(previous: dict) -> tuple[dict, list[str], bool, bool]:
             raise _error("公开主题最多 8 项，每项最多 128 字符。")
         enable = _ask("启用/保持后台研究，允许将已保存记忆交给所选模型分析并向自己发送通知？y/N", "N").casefold() in {"y", "yes", "是"}
     demo = choice == "1" and _ask("创建一条 5 秒后的体验提醒？y/N", "N").casefold() in {"y", "yes", "是"}
-    return {"state_dir": previous["state_dir"], "timezone": tz, "environment": environment}, topics, enable, demo
+    return {
+        "state_dir": previous["state_dir"],
+        "timezone": tz,
+        "environment": environment,
+        "observe_notifications": bool(previous.get("observe_notifications", False)),
+    }, topics, enable, demo
 
 
 def _apply_environment(settings: dict) -> None:
@@ -306,6 +316,20 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
     parser.add_argument("--state-dir", help="明确指定持久状态目录")
     parser.add_argument("--inbox-id", help="say 知道了 时对应的通知 id")
     parser.add_argument("--json", action="store_true")
+    observe_group = parser.add_mutually_exclusive_group()
+    observe_group.add_argument(
+        "--observe-notifications",
+        dest="observe_notifications",
+        action="store_true",
+        default=None,
+        help="仅对 job 绑定的机会型后台任务启用通知观察模式",
+    )
+    observe_group.add_argument(
+        "--no-observe-notifications",
+        dest="observe_notifications",
+        action="store_false",
+        help="关闭通知观察模式",
+    )
     args = parser.parse_args(argv)
     path = root / "settings.json"
     try:
@@ -318,6 +342,8 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
             settings = _defaults(root, args.state_dir)
         if args.state_dir:
             settings["state_dir"] = str(Path(args.state_dir).expanduser().resolve())
+        if args.observe_notifications is not None:
+            settings["observe_notifications"] = args.observe_notifications
         setup = args.action == "setup" or args.action == "run" and not path.exists()
         topics, enable, demo = [], False, False
         if setup:
@@ -331,7 +357,19 @@ def main(factory, root: Path, argv: list[str] | None = None) -> int:
             state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
             if state_dir.stat().st_mode & 0o077:
                 raise _error("状态目录需限制为 0700；请修正该目录权限，或用 --state-dir 选择新的专用目录。")
-            agent = factory(PasConfig(state_dir=settings["state_dir"], profile="personal", timezone=settings["timezone"], locale="zh-CN"))
+            agent = factory(
+                PasConfig(
+                    state_dir=settings["state_dir"],
+                    profile="personal",
+                    timezone=settings["timezone"],
+                    locale="zh-CN",
+                    policy=PolicySection(
+                        observe_notifications=bool(
+                            settings.get("observe_notifications", False)
+                        )
+                    ),
+                )
+            )
             try:
                 if setup:
                     initial = readiness(agent, settings)

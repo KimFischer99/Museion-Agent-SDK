@@ -199,8 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="window: 7d/24h/30m or an ISO timestamp (default 7d)",
     )
 
-    runs = add("runs", help_text="run operations: list|show|cancel|events")
-    runs.add_argument("action", choices=["list", "show", "cancel", "events"])
+    runs = add(
+        "runs",
+        help_text="run operations: list|show|cancel|events|observations",
+    )
+    runs.add_argument("action", choices=["list", "show", "cancel", "events", "observations"])
     runs.add_argument("run_id", nargs="?")
     runs.add_argument("--state", help="filter by run state (list)")
     runs.add_argument("--limit", type=int, default=20)
@@ -810,6 +813,11 @@ def _cmd_runs(args: argparse.Namespace) -> int:
         elif args.action == "events":
             events = agent.run_events(args.run_id)  # type: ignore[arg-type]
             _print({"events": events, "count": len(events)}, _json_flag(args))
+        elif args.action == "observations":
+            observations = agent.notification_observations(
+                limit=args.limit, run_id=args.run_id
+            )
+            _print(observations, _json_flag(args))
     finally:
         agent.store.close()
     return 0

@@ -92,6 +92,9 @@ class PolicyConfig:
     cadence: str = "balanced"
     cadence_min_gap_seconds: int | None = None
     cadence_max_per_day: int | None = None
+    #: Stage C notification observation. Off by default; only job-bound
+    #: opportunistic background runs are affected.
+    observe_notifications: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.notification_profile, str) or not self.notification_profile:
@@ -117,6 +120,10 @@ class PolicyConfig:
                 raise PASError(
                     ErrorCode.INVALID_CONFIG, f"{name} must be a positive integer or None"
                 )
+        if type(self.observe_notifications) is not bool:
+            raise PASError(
+                ErrorCode.INVALID_CONFIG, "observe_notifications must be a boolean"
+            )
 
 
 @dataclass(frozen=True)
@@ -321,6 +328,7 @@ class PolicyEngine:
             "watch_suggestions": 0,
         }
         queued_in_batch = 0
+        observe_notifications = self._observation_active(job=job, event=event)
         for proposal in proposals:
             verdict, entry = self.evaluate_proposal(
                 proposal,
@@ -331,6 +339,7 @@ class PolicyEngine:
                 now_ms=now,
                 queued_in_batch=queued_in_batch,
                 obligation=obligation,
+                observe_notifications=observe_notifications,
             )
             verdicts[proposal["proposal_id"]] = verdict
             if entry is not None:
@@ -400,9 +409,16 @@ class PolicyEngine:
         now_ms: int,
         queued_in_batch: int = 0,
         obligation: str = "opportunistic",
+        observe_notifications: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Return (verdict dict, queueing entry or None). The verdict is
-        persisted on the proposal row; the entry is what phase B queues."""
+        persisted on the proposal row; the entry is what phase B queues.
+
+        In observation mode a notification is evaluated against the same
+        authorization, evidence and timing gates, then the entry is dropped
+        and the verdict is annotated as not delivered. External effects and
+        watch suggestions are refused before they can create local records.
+        """
         kind = proposal["kind"]
         arguments = proposal.get("arguments") or {}
         if not isinstance(arguments, dict):
@@ -417,6 +433,10 @@ class PolicyEngine:
         if reason:
             return self._suppressed(reason)
 
+        if observe_notifications and kind not in _LOCAL_KINDS and kind != "notify_self":
+            verdict, _ = self._suppressed("observation_external_effect_forbidden")
+            return self._mark_observed(verdict, now_ms=now_ms), None
+
         if kind == "suggest_watch":
             return self._evaluate_suggest_watch(
                 proposal, arguments, goal_id, grant_refs, run_id, now_ms
@@ -430,10 +450,13 @@ class PolicyEngine:
             return {"outcome": "local_record", "reason": kind}, None
 
         if kind == "notify_self":
-            return self._evaluate_notify_self(
+            verdict, entry = self._evaluate_notify_self(
                 proposal, arguments, goal_id, delivery_policy, grant_refs, run_id, now_ms,
                 queued_in_batch=queued_in_batch, obligation=obligation, artifacts=artifacts,
             )
+            if observe_notifications:
+                return self._mark_observed(verdict, now_ms=now_ms), None
+            return verdict, entry
         if kind == "request_external_action":
             return self._evaluate_external_action(
                 proposal, arguments, goal_id, delivery_policy, grant_refs, run_id, now_ms,
@@ -703,6 +726,64 @@ class PolicyEngine:
             "suggestion_id": record["suggestion_id"],
             "job_name": record["job_name"],
         }, None
+
+    # ------------------------------------------------------------------ #
+    # Notification observation (stage C)
+    # ------------------------------------------------------------------ #
+
+    def _observation_active(self, *, job: Any, event: Any) -> bool:
+        """Only job-bound opportunistic background work is observed.
+
+        Manual input, reminders and due reports keep their existing
+        delivery semantics even when the switch is on.
+        """
+        if not self.config.observe_notifications:
+            return False
+        if job is None or event is None:
+            return False
+        if event.origin == "manual" or job.mode == "reminder":
+            return False
+        return job.obligation == "opportunistic"
+
+    @staticmethod
+    def _mark_observed(verdict: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
+        """Annotate the ordinary policy verdict without queueing anything.
+
+        The stored ``outcome`` keeps its existing vocabulary for readers of
+        older ledgers; ``observed_result`` states what *would* have happened
+        and the delivery marker is explicit so a completed run can never be
+        mistaken for a sent notification.
+        """
+        marked = dict(verdict)
+        outcome = marked.get("outcome")
+        if outcome == "queued":
+            observed_result = (
+                "would_defer"
+                if isinstance(marked.get("not_before_ms"), int)
+                and marked["not_before_ms"] > now_ms
+                else "would_send"
+            )
+        elif outcome == "approval_required":
+            observed_result = "would_require_approval"
+        elif outcome == "suppressed":
+            observed_result = "suppressed"
+        else:
+            observed_result = "recorded"
+        marked.update(
+            {
+                "observed": True,
+                "delivery_state": "not_delivered",
+                "delivery_label": "未投递",
+                "observed_result": observed_result,
+                "proposed_result": {
+                    "outcome": outcome,
+                    "destination_ref": marked.get("destination_ref"),
+                    "not_before_ms": marked.get("not_before_ms"),
+                    "reason": marked.get("reason"),
+                },
+            }
+        )
+        return marked
 
     # ------------------------------------------------------------------ #
     # Shared helpers
